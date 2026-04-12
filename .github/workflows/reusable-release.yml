@@ -35,6 +35,11 @@ on:
         required: false
         default: ''
         type: string
+      linux_deps:
+        description: 'apt packages to install on Linux (e.g., "libdbus-1-dev pkg-config")'
+        required: false
+        default: ''
+        type: string
       cargo_build_args:
         description: 'Extra args for cargo build (e.g., "--features mock")'
         required: false
@@ -101,6 +106,10 @@ jobs:
 
       - name: Clone libenclaveapp
         run: git clone --depth 1 https://github.com/jgowdy/libenclaveapp.git ../libenclaveapp
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux' && inputs.linux_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.linux_deps }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
