@@ -12,6 +12,7 @@ use enclaveapp_core::{Error, Result};
 use std::path::PathBuf;
 
 /// Configuration for keychain operations, scoped to an application.
+#[derive(Debug)]
 pub struct KeychainConfig {
     pub app_name: String,
     /// Optional override for the keys directory. If None, uses the standard
@@ -38,25 +39,27 @@ impl KeychainConfig {
     pub fn keys_dir(&self) -> PathBuf {
         self.keys_dir_override
             .clone()
-            .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&self.app_name))
+            .unwrap_or_else(|| metadata::keys_dir(&self.app_name))
     }
 }
 
 /// Check if the Secure Enclave is available.
+#[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
 pub fn is_available() -> bool {
     unsafe { ffi::enclaveapp_se_available() == 1 }
 }
 
 /// Generate a new Secure Enclave key.
 /// Returns (uncompressed_public_key_65_bytes, data_representation).
+#[allow(unsafe_code)] // FFI calls to CryptoKit Swift bridge
 pub fn generate_key(key_type: KeyType, auth_policy: i32) -> Result<(Vec<u8>, Vec<u8>)> {
     if !is_available() {
         return Err(Error::NotAvailable);
     }
 
-    let mut pub_key = vec![0u8; 65];
+    let mut pub_key = vec![0_u8; 65];
     let mut pub_key_len: i32 = 65;
-    let mut data_rep = vec![0u8; 1024];
+    let mut data_rep = vec![0_u8; 1024];
     let mut data_rep_len: i32 = 1024;
 
     let rc = match key_type {
@@ -93,8 +96,9 @@ pub fn generate_key(key_type: KeyType, auth_policy: i32) -> Result<(Vec<u8>, Vec
 
 /// Extract the public key from a persisted data representation.
 /// Returns 65-byte uncompressed public key.
+#[allow(unsafe_code)] // FFI calls to CryptoKit Swift bridge
 pub fn public_key_from_data_rep(key_type: KeyType, data_rep: &[u8]) -> Result<Vec<u8>> {
-    let mut pub_key = vec![0u8; 65];
+    let mut pub_key = vec![0_u8; 65];
     let mut pub_key_len: i32 = 65;
 
     let rc = match key_type {

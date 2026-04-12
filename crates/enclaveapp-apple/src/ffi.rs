@@ -6,7 +6,9 @@
 //! All functions are declared regardless of feature flags since the Swift
 //! bridge compiles all functions unconditionally.
 
-#[allow(dead_code)]
+// FFI extern block requires unsafe to declare. The actual unsafe usage is at
+// call sites in keychain.rs, sign.rs, and encrypt.rs.
+#[allow(unsafe_code, dead_code)]
 extern "C" {
     pub fn enclaveapp_se_available() -> i32;
 

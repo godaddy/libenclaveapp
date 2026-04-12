@@ -3,6 +3,9 @@
 
 //! Windows Hello UI policy setup for TPM key operations.
 
+// This module wraps NCrypt C APIs which require unsafe FFI calls.
+#![allow(unsafe_code)]
+
 use crate::provider::NcryptHandle;
 use enclaveapp_core::AccessPolicy;
 use windows::core::PCWSTR;
@@ -48,7 +51,10 @@ pub fn set_ui_policy(
 
     if result.is_err() {
         // Non-fatal: Windows Hello may not be configured on this machine.
-        eprintln!("warning: could not set UI policy (Windows Hello may not be available)");
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("warning: could not set UI policy (Windows Hello may not be available)");
+        }
     }
     Ok(())
 }

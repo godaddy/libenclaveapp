@@ -4,6 +4,11 @@
 //! Key creation, opening, deletion, and enumeration shared between signing
 //! and encryption modules.
 
+// This module wraps NCrypt C APIs which require unsafe FFI calls.
+// `mem_forget` is used intentionally in `delete_key` because NCryptDeleteKey
+// takes ownership of the handle.
+#![allow(unsafe_code, clippy::mem_forget)]
+
 use crate::convert::key_name;
 use crate::export::export_public_key;
 use crate::provider::{open_provider, NcryptHandle};

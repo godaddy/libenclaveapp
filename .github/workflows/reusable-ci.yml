@@ -64,7 +64,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace ${{ inputs.cargo_args }} -- -D warnings
+        run: cargo clippy --workspace --all-targets ${{ inputs.cargo_args }} -- -D warnings
 
       - name: Build
         run: cargo build --workspace ${{ inputs.cargo_args }}

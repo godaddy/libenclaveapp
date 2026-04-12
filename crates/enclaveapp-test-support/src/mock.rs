@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// A stored mock key.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct MockKey {
     #[allow(dead_code)]
     label: String,
@@ -22,6 +22,7 @@ struct MockKey {
 
 /// Mock key backend for testing. All operations are in-memory.
 /// Keys are deterministic: the same label always produces the same key material.
+#[derive(Debug)]
 pub struct MockKeyBackend {
     keys: Mutex<HashMap<String, MockKey>>,
 }
@@ -44,8 +45,8 @@ impl MockKeyBackend {
         let hash = hasher.finish();
         let hash_bytes = hash.to_le_bytes();
 
-        let mut key = vec![0x04u8]; // uncompressed prefix
-                                    // X coordinate: repeat hash bytes to fill 32 bytes
+        let mut key = vec![0x04_u8]; // uncompressed prefix
+                                     // X coordinate: repeat hash bytes to fill 32 bytes
         for i in 0..32 {
             key.push(hash_bytes[i % 8]);
         }
@@ -68,11 +69,21 @@ impl Default for MockKeyBackend {
     }
 }
 
+/// Lock the mutex, converting a poison error to `Error::KeyOperation`.
+fn lock_keys(
+    keys: &Mutex<HashMap<String, MockKey>>,
+) -> Result<std::sync::MutexGuard<'_, HashMap<String, MockKey>>> {
+    keys.lock().map_err(|e| Error::KeyOperation {
+        operation: "lock".into(),
+        detail: format!("lock poisoned: {e}"),
+    })
+}
+
 impl EnclaveKeyManager for MockKeyBackend {
     fn generate(&self, label: &str, key_type: KeyType, policy: AccessPolicy) -> Result<Vec<u8>> {
-        enclaveapp_core::types::validate_label(label)?;
+        types::validate_label(label)?;
 
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = lock_keys(&self.keys)?;
         if keys.contains_key(label) {
             return Err(Error::DuplicateLabel {
                 label: label.to_string(),
@@ -97,7 +108,7 @@ impl EnclaveKeyManager for MockKeyBackend {
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
-        let keys = self.keys.lock().unwrap();
+        let keys = lock_keys(&self.keys)?;
         keys.get(label)
             .map(|k| k.public_key.clone())
             .ok_or_else(|| Error::KeyNotFound {
@@ -106,14 +117,14 @@ impl EnclaveKeyManager for MockKeyBackend {
     }
 
     fn list_keys(&self) -> Result<Vec<String>> {
-        let keys = self.keys.lock().unwrap();
+        let keys = lock_keys(&self.keys)?;
         let mut labels: Vec<String> = keys.keys().cloned().collect();
         labels.sort();
         Ok(labels)
     }
 
     fn delete_key(&self, label: &str) -> Result<()> {
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = lock_keys(&self.keys)?;
         if keys.remove(label).is_none() {
             return Err(Error::KeyNotFound {
                 label: label.to_string(),
@@ -129,7 +140,7 @@ impl EnclaveKeyManager for MockKeyBackend {
 
 impl EnclaveSigner for MockKeyBackend {
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
-        let keys = self.keys.lock().unwrap();
+        let keys = lock_keys(&self.keys)?;
         let key = keys.get(label).ok_or_else(|| Error::KeyNotFound {
             label: label.to_string(),
         })?;
@@ -188,7 +199,7 @@ impl EnclaveSigner for MockKeyBackend {
 
 impl EnclaveEncryptor for MockKeyBackend {
     fn encrypt(&self, label: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let keys = self.keys.lock().unwrap();
+        let keys = lock_keys(&self.keys)?;
         let key = keys.get(label).ok_or_else(|| Error::KeyNotFound {
             label: label.to_string(),
         })?;
@@ -201,7 +212,7 @@ impl EnclaveEncryptor for MockKeyBackend {
 
         // Mock ECIES: XOR plaintext with repeating seed.
         // Format: [0x01 version] [plaintext XOR'd with seed]
-        let mut ciphertext = vec![0x01u8];
+        let mut ciphertext = vec![0x01_u8];
         for (i, &b) in plaintext.iter().enumerate() {
             ciphertext.push(b ^ key.private_seed[i % key.private_seed.len()]);
         }
@@ -209,7 +220,7 @@ impl EnclaveEncryptor for MockKeyBackend {
     }
 
     fn decrypt(&self, label: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let keys = self.keys.lock().unwrap();
+        let keys = lock_keys(&self.keys)?;
         let key = keys.get(label).ok_or_else(|| Error::KeyNotFound {
             label: label.to_string(),
         })?;
@@ -237,6 +248,7 @@ impl EnclaveEncryptor for MockKeyBackend {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

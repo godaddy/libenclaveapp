@@ -13,6 +13,7 @@ use enclaveapp_core::{Error, Result};
 const ECIES_OVERHEAD: usize = 1 + 65 + 12 + 16;
 
 /// ECIES encryption backend using the macOS Secure Enclave.
+#[derive(Debug)]
 pub struct SecureEnclaveEncryptor {
     config: KeychainConfig,
 }
@@ -66,11 +67,12 @@ impl EnclaveKeyManager for SecureEnclaveEncryptor {
 }
 
 impl EnclaveEncryptor for SecureEnclaveEncryptor {
+    #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn encrypt(&self, label: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
         let data_rep = keychain::load_handle(&self.config, label)?;
 
         let output_capacity = plaintext.len() + ECIES_OVERHEAD;
-        let mut ciphertext = vec![0u8; output_capacity];
+        let mut ciphertext = vec![0_u8; output_capacity];
         let mut ciphertext_len = output_capacity as i32;
 
         let rc = unsafe {
@@ -94,6 +96,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
         Ok(ciphertext)
     }
 
+    #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn decrypt(&self, label: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
         if ciphertext.len() < ECIES_OVERHEAD {
             return Err(Error::DecryptFailed {
@@ -104,7 +107,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
         let data_rep = keychain::load_handle(&self.config, label)?;
 
         let max_plaintext = ciphertext.len();
-        let mut plaintext = vec![0u8; max_plaintext];
+        let mut plaintext = vec![0_u8; max_plaintext];
         let mut plaintext_len = max_plaintext as i32;
 
         let rc = unsafe {

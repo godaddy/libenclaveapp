@@ -3,6 +3,9 @@
 
 //! NCrypt provider management and RAII handle wrapper.
 
+// This module wraps NCrypt C APIs which require unsafe FFI calls.
+#![allow(unsafe_code)]
+
 use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::*;
 
@@ -10,6 +13,7 @@ use windows::Win32::Security::Cryptography::*;
 pub const PLATFORM_PROVIDER: &str = "Microsoft Platform Crypto Provider";
 
 /// RAII wrapper for NCrypt handles. Calls `NCryptFreeObject` on drop.
+#[derive(Debug)]
 pub struct NcryptHandle(pub NCRYPT_HANDLE);
 
 // NCrypt handles are thread-safe opaque pointers.

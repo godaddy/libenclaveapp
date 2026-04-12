@@ -27,6 +27,7 @@ pub fn save_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};

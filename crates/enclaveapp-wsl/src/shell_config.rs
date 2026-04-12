@@ -11,6 +11,7 @@ use enclaveapp_core::Result;
 use std::path::Path;
 
 /// Configuration for managed shell blocks.
+#[derive(Debug)]
 pub struct ShellBlockConfig {
     /// Application name, used in markers.
     pub app_name: String,
@@ -200,6 +201,7 @@ pub fn shell_config_paths(home: &Path) -> Vec<(&'static str, std::path::PathBuf)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, let_underscore_drop)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

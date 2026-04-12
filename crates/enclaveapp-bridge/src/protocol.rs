@@ -77,6 +77,7 @@ pub fn decode_data(encoded: &str) -> enclaveapp_core::Result<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

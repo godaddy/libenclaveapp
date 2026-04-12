@@ -3,6 +3,9 @@
 
 //! Public key export from NCrypt key handles.
 
+// This module wraps NCrypt C APIs which require unsafe FFI calls.
+#![allow(unsafe_code)]
+
 use crate::convert::eccpublic_blob_to_sec1;
 use crate::provider::NcryptHandle;
 use windows::core::PCWSTR;
@@ -37,7 +40,7 @@ pub fn export_public_key(key_handle: &NcryptHandle) -> enclaveapp_core::Result<V
     }
 
     // Export the blob.
-    let mut blob = vec![0u8; blob_size as usize];
+    let mut blob = vec![0_u8; blob_size as usize];
     unsafe {
         NCryptExportKey(
             key_handle.as_key(),

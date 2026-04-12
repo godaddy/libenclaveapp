@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 //! `TpmEncryptor` — ECDH P-256 / ECIES encryption backend using the Windows TPM.
+
+// This module wraps BCrypt/NCrypt C APIs which require unsafe FFI calls.
+#![allow(unsafe_code)]
 //!
 //! ## ECIES Wire Format
 //!
@@ -52,6 +55,7 @@ const GCM_TAG_SIZE: usize = 16;
 const MIN_CIPHERTEXT_LEN: usize = 1 + 65 + GCM_NONCE_SIZE + GCM_TAG_SIZE;
 
 /// Windows TPM-backed ECDH P-256 encryptor (ECIES).
+#[derive(Debug)]
 pub struct TpmEncryptor {
     app_name: String,
     keys_dir_override: Option<std::path::PathBuf>,
@@ -248,7 +252,7 @@ unsafe fn ecies_encrypt(stored_pub_sec1: &[u8], plaintext: &[u8]) -> Result<Vec<
         .map_err(|e| Error::EncryptFailed {
             detail: format!("BCryptExportKey eph size: {e}"),
         })?;
-        let mut blob = vec![0u8; sz as usize];
+        let mut blob = vec![0_u8; sz as usize];
         BCryptExportKey(
             ephemeral_key,
             BCRYPT_KEY_HANDLE::default(),
@@ -291,7 +295,7 @@ unsafe fn ecies_encrypt(stored_pub_sec1: &[u8], plaintext: &[u8]) -> Result<Vec<
 
     // Derive 32-byte AES key via HASH KDF (SHA-256).
     let kdf_name = to_wide("HASH");
-    let mut derived_key = vec![0u8; 32];
+    let mut derived_key = vec![0_u8; 32];
     let mut derived_len: u32 = 0;
     BCryptDeriveKey(
         secret,
@@ -386,7 +390,7 @@ unsafe fn ecies_decrypt(
 
     // Derive 32-byte AES key.
     let kdf_name = to_wide("HASH");
-    let mut derived_key = vec![0u8; 32];
+    let mut derived_key = vec![0_u8; 32];
     let mut derived_len: u32 = 0;
     NCryptDeriveKey(
         secret,
@@ -394,7 +398,7 @@ unsafe fn ecies_decrypt(
         None,
         Some(&mut derived_key),
         &mut derived_len,
-        0u32,
+        0_u32,
     )
     .map_err(|e| Error::DecryptFailed {
         detail: format!("NCryptDeriveKey: {e}"),
@@ -454,7 +458,7 @@ unsafe fn aes_gcm_encrypt(
         })?;
 
     // Random nonce.
-    let mut nonce = [0u8; GCM_NONCE_SIZE];
+    let mut nonce = [0_u8; GCM_NONCE_SIZE];
     BCryptGenRandom(
         BCRYPT_ALG_HANDLE::default(),
         &mut nonce,
@@ -465,7 +469,7 @@ unsafe fn aes_gcm_encrypt(
         detail: format!("BCryptGenRandom: {e}"),
     })?;
 
-    let mut tag = [0u8; GCM_TAG_SIZE];
+    let mut tag = [0_u8; GCM_TAG_SIZE];
     let auth_info = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
         cbSize: std::mem::size_of::<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>() as u32,
         dwInfoVersion: 1, // BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION
@@ -482,7 +486,7 @@ unsafe fn aes_gcm_encrypt(
         dwFlags: 0,
     };
 
-    let mut ciphertext = vec![0u8; plaintext.len()];
+    let mut ciphertext = vec![0_u8; plaintext.len()];
     let mut ct_len: u32 = 0;
     BCryptEncrypt(
         aes_key,
@@ -549,9 +553,9 @@ unsafe fn aes_gcm_decrypt(
             detail: format!("BCryptGenerateSymmetricKey: {e}"),
         })?;
 
-    let mut nonce_copy = [0u8; GCM_NONCE_SIZE];
+    let mut nonce_copy = [0_u8; GCM_NONCE_SIZE];
     nonce_copy[..nonce.len()].copy_from_slice(nonce);
-    let mut tag_copy = [0u8; GCM_TAG_SIZE];
+    let mut tag_copy = [0_u8; GCM_TAG_SIZE];
     tag_copy[..tag.len()].copy_from_slice(tag);
 
     let auth_info = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
@@ -570,7 +574,7 @@ unsafe fn aes_gcm_decrypt(
         dwFlags: 0,
     };
 
-    let mut plaintext = vec![0u8; ciphertext.len()];
+    let mut plaintext = vec![0_u8; ciphertext.len()];
     let mut pt_len: u32 = 0;
     BCryptDecrypt(
         aes_key,

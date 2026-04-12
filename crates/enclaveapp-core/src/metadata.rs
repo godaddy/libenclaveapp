@@ -86,7 +86,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, data)?;
     if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
+        std::fs::remove_file(&tmp).ok();
         return Err(e.into());
     }
     Ok(())
@@ -94,6 +94,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 
 /// File-based directory lock using flock (Unix) or LockFile (Windows).
 /// Prevents concurrent writes to the keys directory.
+#[derive(Debug)]
 pub struct DirLock {
     _file: std::fs::File,
 }
@@ -110,6 +111,9 @@ impl DirLock {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
+            // Safety: calling libc::flock with a valid file descriptor to acquire
+            // an exclusive file lock. This is the standard POSIX locking mechanism.
+            #[allow(unsafe_code)]
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
             if rc != 0 {
                 return Err(Error::Io(std::io::Error::last_os_error()));
@@ -124,10 +128,15 @@ impl DirLock {
 
 /// Ensure a directory exists with restrictive permissions (0700 on Unix).
 pub fn ensure_dir(dir: &Path) -> Result<()> {
+    // Safety: calling libc::umask to temporarily set a restrictive umask while
+    // creating directories. umask is a simple syscall with no memory safety concerns.
     #[cfg(unix)]
+    #[allow(unsafe_code)]
     let old_umask = unsafe { libc::umask(0o077) };
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
+    #[allow(unsafe_code)]
+    // Safety: restoring the original umask value obtained above.
     unsafe {
         libc::umask(old_umask);
     }
@@ -140,11 +149,12 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
 }
 
 /// Set restrictive file permissions (0600 on Unix).
-pub fn restrict_file_permissions(_path: &Path) -> Result<()> {
+#[cfg_attr(not(unix), allow(unused_variables))]
+pub fn restrict_file_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -258,7 +268,7 @@ pub fn rename_key_files(dir: &Path, old_label: &str, new_label: &str) -> Result<
             if let Ok(mut meta) = serde_json::from_str::<KeyMeta>(&content) {
                 meta.label = new_label.to_string();
                 if let Ok(json) = serde_json::to_string_pretty(&meta) {
-                    let _ = atomic_write(&new_meta_path, json.as_bytes());
+                    atomic_write(&new_meta_path, json.as_bytes()).ok();
                 }
             }
         }
@@ -267,6 +277,12 @@ pub fn rename_key_files(dir: &Path, old_label: &str, new_label: &str) -> Result<
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::used_underscore_binding,
+    let_underscore_drop
+)]
 mod tests {
     use super::*;
     use crate::{AccessPolicy, KeyType};

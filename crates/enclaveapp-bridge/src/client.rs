@@ -142,6 +142,7 @@ pub fn bridge_decrypt(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

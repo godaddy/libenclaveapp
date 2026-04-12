@@ -61,7 +61,7 @@ pub fn der_to_p1363(der: &[u8]) -> enclaveapp_core::Result<Vec<u8>> {
     let (r, r_end) = parse_der_integer(&der[2..])?;
     let (s, _) = parse_der_integer(&der[2 + r_end..])?;
 
-    let mut out = vec![0u8; 64];
+    let mut out = vec![0_u8; 64];
     copy_integer_padded(&r, &mut out[0..32]);
     copy_integer_padded(&s, &mut out[32..64]);
     Ok(out)
@@ -185,6 +185,7 @@ fn copy_integer_padded(src: &[u8], dst: &mut [u8]) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -209,7 +210,7 @@ mod tests {
 
     #[test]
     fn p1363_to_der_simple() {
-        let mut sig = vec![0u8; 64];
+        let mut sig = vec![0_u8; 64];
         sig[31] = 1; // r = 1
         sig[63] = 2; // s = 2
         let der = p1363_to_der(&sig);
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn p1363_to_der_high_bit_needs_padding() {
-        let mut sig = vec![0u8; 64];
+        let mut sig = vec![0_u8; 64];
         sig[0] = 0x80;
         sig[31] = 1;
         sig[32] = 0x80;
@@ -238,7 +239,7 @@ mod tests {
 
     #[test]
     fn p1363_to_der_all_zeros() {
-        let sig = vec![0u8; 64];
+        let sig = vec![0_u8; 64];
         let der = p1363_to_der(&sig);
         // r = 0, s = 0 => each is INTEGER 0x02 0x01 0x00
         assert_eq!(der, vec![0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00]);
@@ -260,7 +261,7 @@ mod tests {
 
     #[test]
     fn p1363_to_der_leading_zeros_stripped() {
-        let mut sig = vec![0u8; 64];
+        let mut sig = vec![0_u8; 64];
         // r = 0x00 0x00 ... 0x00 0x42 (leading zeros stripped)
         sig[31] = 0x42;
         // s = 0x00 ... 0x00 0x7F (no pad needed, high bit clear)
@@ -276,7 +277,7 @@ mod tests {
 
     #[test]
     fn der_to_p1363_simple_roundtrip() {
-        let mut sig = vec![0u8; 64];
+        let mut sig = vec![0_u8; 64];
         sig[31] = 1;
         sig[63] = 2;
         let der = p1363_to_der(&sig);
@@ -286,7 +287,7 @@ mod tests {
 
     #[test]
     fn der_to_p1363_high_bit_roundtrip() {
-        let mut sig = vec![0u8; 64];
+        let mut sig = vec![0_u8; 64];
         sig[0] = 0x80;
         sig[31] = 0x01;
         sig[32] = 0xFF;
@@ -306,7 +307,7 @@ mod tests {
 
     #[test]
     fn der_to_p1363_all_zeros_roundtrip() {
-        let sig = vec![0u8; 64];
+        let sig = vec![0_u8; 64];
         let der = p1363_to_der(&sig);
         let p1363 = der_to_p1363(&der).unwrap();
         assert_eq!(p1363, sig);
@@ -354,8 +355,8 @@ mod tests {
     #[test]
     fn eccpublic_blob_to_sec1_truncated_data() {
         let mut blob = Vec::new();
-        blob.extend_from_slice(&0u32.to_le_bytes()); // magic
-        blob.extend_from_slice(&32u32.to_le_bytes()); // cbKey = 32
+        blob.extend_from_slice(&0_u32.to_le_bytes()); // magic
+        blob.extend_from_slice(&32_u32.to_le_bytes()); // cbKey = 32
         blob.extend_from_slice(&[0; 32]); // X only, missing Y
         assert!(eccpublic_blob_to_sec1(&blob).is_err());
     }
@@ -363,8 +364,8 @@ mod tests {
     #[test]
     fn eccpublic_blob_to_sec1_wrong_key_size() {
         let mut blob = Vec::new();
-        blob.extend_from_slice(&0u32.to_le_bytes());
-        blob.extend_from_slice(&16u32.to_le_bytes()); // cbKey = 16, not 32
+        blob.extend_from_slice(&0_u32.to_le_bytes());
+        blob.extend_from_slice(&16_u32.to_le_bytes()); // cbKey = 16, not 32
         blob.extend_from_slice(&[0; 32]); // X(16) + Y(16) = 32 bytes
         let result = eccpublic_blob_to_sec1(&blob);
         // 1 + 16*2 = 33 != 65

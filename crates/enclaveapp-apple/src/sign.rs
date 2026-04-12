@@ -10,6 +10,7 @@ use enclaveapp_core::types::{validate_label, AccessPolicy, KeyType};
 use enclaveapp_core::{Error, Result};
 
 /// ECDSA P-256 signing backend using the macOS Secure Enclave.
+#[derive(Debug)]
 pub struct SecureEnclaveSigner {
     config: KeychainConfig,
 }
@@ -64,10 +65,11 @@ impl EnclaveKeyManager for SecureEnclaveSigner {
 }
 
 impl EnclaveSigner for SecureEnclaveSigner {
+    #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         let data_rep = keychain::load_handle(&self.config, label)?;
 
-        let mut sig = vec![0u8; 128]; // DER ECDSA P-256 sig is at most ~72 bytes
+        let mut sig = vec![0_u8; 128]; // DER ECDSA P-256 sig is at most ~72 bytes
         let mut sig_len: i32 = 128;
 
         let rc = unsafe {

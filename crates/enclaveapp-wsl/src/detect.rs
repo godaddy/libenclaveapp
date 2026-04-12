@@ -90,6 +90,7 @@ fn get_distro_home(distro: &str) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

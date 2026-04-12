@@ -45,7 +45,6 @@ impl AccessPolicy {
     /// Create from FFI integer value.
     pub fn from_ffi_value(val: i32) -> Self {
         match val {
-            0 => AccessPolicy::None,
             1 => AccessPolicy::Any,
             2 => AccessPolicy::BiometricOnly,
             3 => AccessPolicy::PasswordOnly,
@@ -99,6 +98,7 @@ pub fn validate_p256_point(bytes: &[u8]) -> crate::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

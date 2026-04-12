@@ -4,6 +4,15 @@
 //! Build script for enclaveapp-apple.
 //! Compiles the Swift CryptoKit bridge into a static library and links it.
 
+// Build scripts are expected to panic on failure — that is the standard Cargo
+// convention for communicating build errors.
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::match_same_arms,
+    clippy::print_stdout
+)]
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;

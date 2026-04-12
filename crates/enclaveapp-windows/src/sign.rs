@@ -3,6 +3,9 @@
 
 //! `TpmSigner` — ECDSA P-256 signing backend using the Windows TPM.
 
+// This module wraps NCrypt C APIs which require unsafe FFI calls.
+#![allow(unsafe_code)]
+
 use crate::convert::p1363_to_der;
 use crate::export::export_public_key;
 use crate::key;
@@ -18,6 +21,7 @@ use windows::Win32::Security::Cryptography::*;
 const ECDSA_P256_ALGORITHM: &str = "ECDSA_P256";
 
 /// Windows TPM-backed ECDSA P-256 signer.
+#[derive(Debug)]
 pub struct TpmSigner {
     app_name: String,
     keys_dir_override: Option<std::path::PathBuf>,
@@ -137,7 +141,7 @@ impl EnclaveSigner for TpmSigner {
         }
 
         // Produce the P1363 signature.
-        let mut sig = vec![0u8; sig_size as usize];
+        let mut sig = vec![0_u8; sig_size as usize];
         unsafe {
             NCryptSignHash(
                 key_handle.as_key(),
