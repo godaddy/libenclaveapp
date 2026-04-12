@@ -4,7 +4,7 @@
 //! Windows Hello UI policy setup for TPM key operations.
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
-#![allow(unsafe_code)]
+#![allow(unsafe_code, trivial_casts, clippy::ptr_as_ptr, unused_qualifications)]
 
 use crate::provider::NcryptHandle;
 use enclaveapp_core::AccessPolicy;

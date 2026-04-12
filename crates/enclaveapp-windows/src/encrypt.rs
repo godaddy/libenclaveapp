@@ -4,7 +4,9 @@
 //! `TpmEncryptor` — ECDH P-256 / ECIES encryption backend using the Windows TPM.
 
 // This module wraps BCrypt/NCrypt C APIs which require unsafe FFI calls.
-#![allow(unsafe_code)]
+// The Windows crate's type conversions trigger trivial_casts and ptr_as_ptr
+// for API-required pointer casts that cannot be simplified.
+#![allow(unsafe_code, trivial_casts, clippy::ptr_as_ptr, unused_qualifications)]
 //!
 //! ## ECIES Wire Format
 //!
