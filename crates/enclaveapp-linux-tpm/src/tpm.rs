@@ -271,3 +271,80 @@ pub fn delete_key_blobs(dir: &Path, label: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_dir() -> PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("enclaveapp-tpm-test-{pid}-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn tpm_config_new_sets_app_name() {
+        let config = TpmConfig::new("sshenc");
+        assert_eq!(config.app_name, "sshenc");
+        assert!(config.keys_dir_override.is_none());
+    }
+
+    #[test]
+    fn tpm_config_with_keys_dir_overrides_path() {
+        let custom = PathBuf::from("/tmp/custom-tpm-keys");
+        let config = TpmConfig::with_keys_dir("sshenc", custom.clone());
+        assert_eq!(config.app_name, "sshenc");
+        assert_eq!(config.keys_dir_override, Some(custom.clone()));
+        assert_eq!(config.keys_dir(), custom);
+    }
+
+    #[test]
+    fn tpm_config_keys_dir_returns_default_when_no_override() {
+        let config = TpmConfig::new("test-app");
+        let expected = metadata::keys_dir("test-app");
+        assert_eq!(config.keys_dir(), expected);
+    }
+
+    #[test]
+    fn save_load_key_blobs_roundtrip() {
+        let dir = test_dir();
+        let pub_blob = b"fake-tpm-public-blob-data";
+        let priv_blob = b"fake-tpm-private-blob-data";
+        save_key_blobs(&dir, "mykey", pub_blob, priv_blob).unwrap();
+
+        let (loaded_pub, loaded_priv) = load_key_blobs(&dir, "mykey").unwrap();
+        assert_eq!(loaded_pub, pub_blob);
+        assert_eq!(loaded_priv, priv_blob);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_key_blobs_removes_files() {
+        let dir = test_dir();
+        save_key_blobs(&dir, "delme", b"pub", b"priv").unwrap();
+        assert!(dir.join("delme.tpm_pub").exists());
+        assert!(dir.join("delme.tpm_priv").exists());
+
+        delete_key_blobs(&dir, "delme").unwrap();
+        assert!(!dir.join("delme.tpm_pub").exists());
+        assert!(!dir.join("delme.tpm_priv").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_key_blobs_missing_returns_key_not_found() {
+        let dir = test_dir();
+        let err = load_key_blobs(&dir, "nonexistent").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "nonexistent"),
+            other => panic!("expected KeyNotFound, got: {other}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

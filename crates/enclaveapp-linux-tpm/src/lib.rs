@@ -42,3 +42,14 @@ pub fn is_available() -> bool {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    fn is_available_returns_false_on_non_linux() {
+        assert!(!is_available());
+    }
+}

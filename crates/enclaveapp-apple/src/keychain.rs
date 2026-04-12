@@ -201,3 +201,46 @@ pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
     let _lock = metadata::DirLock::acquire(&dir)?;
     metadata::delete_key_files(&dir, label)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keychain_config_new_sets_app_name() {
+        let config = KeychainConfig::new("sshenc");
+        assert_eq!(config.app_name, "sshenc");
+        assert!(config.keys_dir_override.is_none());
+    }
+
+    #[test]
+    fn keychain_config_new_different_app_name() {
+        let config = KeychainConfig::new("awsenc");
+        assert_eq!(config.app_name, "awsenc");
+    }
+
+    #[test]
+    fn keychain_config_with_keys_dir_overrides_path() {
+        let custom = PathBuf::from("/tmp/custom-keys");
+        let config = KeychainConfig::with_keys_dir("sshenc", custom.clone());
+        assert_eq!(config.app_name, "sshenc");
+        assert_eq!(config.keys_dir_override, Some(custom));
+    }
+
+    #[test]
+    fn keys_dir_returns_default_when_no_override() {
+        let config = KeychainConfig::new("test-app");
+        let dir = config.keys_dir();
+        // Should use the platform default from metadata::keys_dir
+        let expected = metadata::keys_dir("test-app");
+        assert_eq!(dir, expected);
+    }
+
+    #[test]
+    fn keys_dir_returns_override_when_set() {
+        let custom = PathBuf::from("/tmp/my-custom-keys");
+        let config = KeychainConfig::with_keys_dir("test-app", custom.clone());
+        assert_eq!(config.keys_dir(), custom);
+    }
+}
