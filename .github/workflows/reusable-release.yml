@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       app_name:
-        description: 'Application name (e.g., "sshenc", "awsenc", "sso-jwt")'
+        description: 'Application name (e.g., "sshenc")'
         required: true
         type: string
       targets:
@@ -13,78 +13,43 @@ on:
         default: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]'
         type: string
       unix_binaries:
-        description: 'Space-separated list of Unix binaries to package'
+        description: 'Space-separated Unix binaries to package'
         required: true
-        type: string
-      unix_libs:
-        description: 'Space-separated list of Unix dylibs to package (optional)'
-        required: false
-        default: ''
         type: string
       windows_binaries:
-        description: 'Space-separated list of Windows .exe binaries to package'
+        description: 'Space-separated Windows .exe to package'
         required: true
         type: string
-      windows_dlls:
-        description: 'Space-separated list of Windows .dll files to package (optional)'
-        required: false
-        default: ''
-        type: string
-      wix_file:
-        description: 'Path to WiX installer definition (e.g., "installer/app.wxs"). Empty to skip MSI.'
+      cargo_build_args:
+        description: 'Extra cargo args for clippy/build/test'
         required: false
         default: ''
         type: string
       linux_deps:
-        description: 'apt packages to install on Linux (e.g., "libdbus-1-dev pkg-config")'
+        description: 'apt packages for Linux builds'
         required: false
         default: ''
         type: string
-      cargo_build_args:
-        description: 'Extra args for cargo build (e.g., "--features mock")'
+      wix_file:
+        description: 'WiX .wxs path for MSI. Empty to skip.'
         required: false
         default: ''
         type: string
-      test_args:
-        description: 'Extra args for cargo test (e.g., "--features mock"). Empty to skip tests.'
+      extra_packaging:
+        description: 'JSON: {"unix_libs":"","windows_dlls":""}'
+        required: false
+        default: '{}'
+        type: string
+      homebrew:
+        description: 'JSON: {"tap_repo":"","formula_class":"","description":""}. Empty string to skip.'
         required: false
         default: ''
         type: string
-      homebrew_tap_repo:
-        description: 'Homebrew tap repo (e.g., "jgowdy/homebrew-sshenc"). Empty to skip.'
+      scoop:
+        description: 'JSON: {"bucket_repo":"","description":"","has_winget":false}. Empty string to skip.'
         required: false
         default: ''
         type: string
-      homebrew_formula_class:
-        description: 'Ruby class name for Homebrew formula (e.g., "Sshenc")'
-        required: false
-        default: ''
-        type: string
-      homebrew_description:
-        description: 'Homebrew formula desc string'
-        required: false
-        default: ''
-        type: string
-      homebrew_caveats:
-        description: 'Homebrew formula caveats text (optional)'
-        required: false
-        default: ''
-        type: string
-      scoop_bucket_repo:
-        description: 'Scoop bucket repo (e.g., "jgowdy/scoop-sshenc"). Empty to skip.'
-        required: false
-        default: ''
-        type: string
-      scoop_description:
-        description: 'Scoop manifest description'
-        required: false
-        default: ''
-        type: string
-      has_winget:
-        description: 'Whether to generate winget manifests'
-        required: false
-        default: false
-        type: boolean
     secrets:
       HOMEBREW_TAP_TOKEN:
         required: false
@@ -154,16 +119,19 @@ jobs:
         run: cargo build --workspace --release --target ${{ matrix.target }} ${{ inputs.cargo_build_args }}
 
       - name: Test
-        run: cargo test --workspace ${{ inputs.cargo_build_args }} ${{ inputs.test_args }}
+        run: cargo test --workspace ${{ inputs.cargo_build_args }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           mkdir -p dist
           for bin in ${{ inputs.unix_binaries }}; do
             cp "target/${{ matrix.target }}/release/${bin}" dist/
           done
-          for lib in ${{ inputs.unix_libs }}; do
+          extra='${{ inputs.extra_packaging }}'
+          unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
+          for lib in $unix_libs; do
             cp "target/${{ matrix.target }}/release/${lib}" dist/ 2>/dev/null || true
           done
           tar czf "${{ inputs.app_name }}-${{ matrix.target }}.tar.gz" -C dist .
@@ -176,9 +144,12 @@ jobs:
           foreach ($bin in "${{ inputs.windows_binaries }}".Split(" ")) {
             Copy-Item "target/${{ matrix.target }}/release/$bin" dist/
           }
-          foreach ($dll in "${{ inputs.windows_dlls }}".Split(" ")) {
-            if ($dll -and (Test-Path "target/${{ matrix.target }}/release/$dll")) {
-              Copy-Item "target/${{ matrix.target }}/release/$dll" dist/
+          $extra = '${{ inputs.extra_packaging }}' | ConvertFrom-Json -ErrorAction SilentlyContinue
+          if ($extra -and $extra.windows_dlls) {
+            foreach ($dll in $extra.windows_dlls.Split(" ")) {
+              if ($dll -and (Test-Path "target/${{ matrix.target }}/release/$dll")) {
+                Copy-Item "target/${{ matrix.target }}/release/$dll" dist/
+              }
             }
           }
           Compress-Archive -Path dist/* -DestinationPath "${{ inputs.app_name }}-${{ matrix.target }}.zip"
@@ -228,45 +199,35 @@ jobs:
         with:
           path: artifacts
 
-      - name: Compute SHA256s
-        id: sha
-        run: |
-          for f in artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.tar.gz \
-                   artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.zip \
-                   artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.msi; do
-            [ -f "$f" ] || continue
-            name=$(basename "$f")
-            sha=$(sha256sum "$f" | cut -d' ' -f1)
-            # Convert filename to output-safe key: replace dots and hyphens with underscores
-            key=$(echo "$name" | sed 's/[^a-zA-Z0-9]/_/g')
-            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
-            echo "  ${name}: ${sha}"
-          done
-
       - name: Update Homebrew tap
-        if: inputs.homebrew_tap_repo != ''
+        if: inputs.homebrew != ''
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
           app="${{ inputs.app_name }}"
 
+          tap_repo=$(echo '${{ inputs.homebrew }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['tap_repo'])")
+          formula_class=$(echo '${{ inputs.homebrew }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['formula_class'])")
+          description=$(echo '${{ inputs.homebrew }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['description'])")
+
           arm_sha=$(sha256sum "artifacts/${app}-aarch64-apple-darwin/${app}-aarch64-apple-darwin.tar.gz" | cut -d' ' -f1)
           intel_sha=$(sha256sum "artifacts/${app}-x86_64-apple-darwin/${app}-x86_64-apple-darwin.tar.gz" | cut -d' ' -f1)
 
-          git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${{ inputs.homebrew_tap_repo }}.git" /tmp/tap
+          git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${tap_repo}.git" /tmp/tap
 
-          # Build the install lines from unix_binaries
           install_lines=""
           for bin in ${{ inputs.unix_binaries }}; do
             install_lines="${install_lines}    bin.install \"${bin}\"\n"
           done
-          for lib in ${{ inputs.unix_libs }}; do
+          extra='${{ inputs.extra_packaging }}'
+          unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
+          for lib in $unix_libs; do
             install_lines="${install_lines}    lib.install \"${lib}\"\n"
           done
 
           cat > /tmp/tap/Formula/${app}.rb << FORMULA
-          class ${{ inputs.homebrew_formula_class }} < Formula
-            desc "${{ inputs.homebrew_description }}"
+          class ${formula_class} < Formula
+            desc "${description}"
             homepage "https://github.com/jgowdy/${app}"
             version "${version}"
             license "MIT"
@@ -286,8 +247,6 @@ jobs:
             def install
           $(echo -e "${install_lines}")    end
 
-            ${{ inputs.homebrew_caveats != '' && format('def caveats\n      <<~EOS\n        {0}\n      EOS\n    end', inputs.homebrew_caveats) || '' }}
-
             test do
               assert_match "${app}", shell_output("\#{bin}/${app} --help 2>&1", 2)
             end
@@ -303,17 +262,19 @@ jobs:
           git push
 
       - name: Update Scoop bucket
-        if: inputs.scoop_bucket_repo != ''
+        if: inputs.scoop != ''
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
           app="${{ inputs.app_name }}"
 
+          bucket_repo=$(echo '${{ inputs.scoop }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['bucket_repo'])")
+          scoop_desc=$(echo '${{ inputs.scoop }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['description'])")
+
           win_sha=$(sha256sum "artifacts/${app}-x86_64-pc-windows-msvc/${app}-x86_64-pc-windows-msvc.zip" | cut -d' ' -f1)
 
-          git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/${{ inputs.scoop_bucket_repo }}.git" /tmp/bucket
+          git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/${bucket_repo}.git" /tmp/bucket
 
-          # Build bin array from windows_binaries
           bin_json=""
           for bin in ${{ inputs.windows_binaries }}; do
             [ -n "$bin_json" ] && bin_json="${bin_json},"
@@ -323,7 +284,7 @@ jobs:
           cat > /tmp/bucket/bucket/${app}.json << SCOOP
           {
               "version": "${version}",
-              "description": "${{ inputs.scoop_description }}",
+              "description": "${scoop_desc}",
               "homepage": "https://github.com/jgowdy/${app}",
               "license": "MIT",
               "architecture": {
@@ -345,8 +306,11 @@ jobs:
           git push
 
       - name: Generate winget manifest
-        if: inputs.has_winget
+        if: inputs.scoop != ''
         run: |
+          has_winget=$(echo '${{ inputs.scoop }}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('has_winget',False))" 2>/dev/null || echo "False")
+          [ "$has_winget" = "True" ] || exit 0
+
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
           app="${{ inputs.app_name }}"
@@ -363,8 +327,9 @@ jobs:
           done
 
       - name: Upload winget manifest
-        if: inputs.has_winget
+        if: inputs.scoop != ''
         uses: actions/upload-artifact@v5
         with:
           name: winget-manifest
           path: /tmp/winget/
+          if-no-files-found: ignore
