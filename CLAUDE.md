@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`libenclaveapp` is a shared Rust library for hardware-backed key management across macOS (Secure Enclave via CryptoKit) and Windows (TPM 2.0 via CNG). It provides signing (ECDSA P-256) and encryption (ECIES via ECDH P-256 + AES-GCM) behind feature flags, plus WSL integration and a TPM bridge for WSL→Windows communication.
+`libenclaveapp` is a shared Rust library for hardware-backed key management across macOS (Secure Enclave via CryptoKit), Windows (TPM 2.0 via CNG), and Linux (software fallback). It provides signing (ECDSA P-256) and encryption (ECIES via ECDH P-256 + AES-GCM) behind feature flags, plus WSL integration and a TPM bridge for WSL→Windows communication.
 
 Three applications consume this library:
 - **sshenc** — SSH key management (signing)
@@ -17,16 +17,19 @@ Rust workspace. Requires Rust 1.75+. macOS builds need Xcode (for swiftc).
 
 ```bash
 # Build with all features (macOS)
-cargo build --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption
+cargo build --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-software/signing,enclaveapp-software/encryption
 
 # Build with all features (Windows)
-cargo build --workspace --features enclaveapp-windows/signing,enclaveapp-windows/encryption
+cargo build --workspace --features enclaveapp-windows/signing,enclaveapp-windows/encryption,enclaveapp-software/signing,enclaveapp-software/encryption
+
+# Build with all features (Linux)
+cargo build --workspace --features enclaveapp-software/signing,enclaveapp-software/encryption
 
 # Test everything
-cargo test --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption
+cargo test --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-software/signing,enclaveapp-software/encryption
 
 # Lint
-cargo clippy --workspace --all-targets --features enclaveapp-apple/signing,enclaveapp-apple/encryption -- -D warnings
+cargo clippy --workspace --all-targets --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-software/signing,enclaveapp-software/encryption -- -D warnings
 
 # Format
 cargo fmt --all -- --check
@@ -41,6 +44,7 @@ Rust workspace under `crates/`:
 - **enclaveapp-windows** — Windows TPM 2.0 via CNG NCrypt/BCrypt. ECDSA signing (feature `signing`) and ECIES encryption (feature `encryption`). Shared provider/key/export modules. P1363↔DER conversion in cross-platform `convert` module.
 - **enclaveapp-wsl** — WSL detection (`is_wsl`, `detect_distros`), managed shell config block injection/removal for `.bashrc`/`.zshrc`, syntax validation. Parameterized by app name.
 - **enclaveapp-bridge** — JSON-RPC over stdin/stdout TPM bridge. Client side (WSL discovers and calls Windows bridge binary) and protocol types. Server implementation lives in consuming apps.
+- **enclaveapp-software** — Software-only P-256 backend for Linux (feature `signing` and `encryption`). Uses `p256` crate for real ECDSA/ECDH crypto and `aes-gcm` for symmetric encryption. Private keys stored as files on disk (not hardware-backed). Same ECIES wire format as hardware backends.
 - **enclaveapp-test-support** — `MockKeyBackend` implementing all three traits with deterministic in-memory operations. XOR-based mock crypto for testing control flow without hardware.
 
 ### Key Patterns
@@ -57,5 +61,6 @@ Rust workspace under `crates/`:
 
 - macOS: Secure Enclave via CryptoKit (Swift bridge compiled by build.rs)
 - Windows: TPM 2.0 via CNG (NCrypt/BCrypt APIs via `windows` crate)
+- Linux: Software-only P-256 keys via `p256`/`aes-gcm` crates (no hardware security)
 - WSL: Bridge from Linux to Windows TPM via JSON-RPC subprocess
 - All crates compile (as stubs) on all platforms for cross-compilation support

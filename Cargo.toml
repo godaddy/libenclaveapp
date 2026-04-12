@@ -5,6 +5,7 @@ members = [
     "crates/enclaveapp-windows",
     "crates/enclaveapp-wsl",
     "crates/enclaveapp-bridge",
+    "crates/enclaveapp-software",
     "crates/enclaveapp-test-support",
 ]
 resolver = "2"
@@ -23,6 +24,7 @@ enclaveapp-apple = { path = "crates/enclaveapp-apple" }
 enclaveapp-windows = { path = "crates/enclaveapp-windows" }
 enclaveapp-wsl = { path = "crates/enclaveapp-wsl" }
 enclaveapp-bridge = { path = "crates/enclaveapp-bridge" }
+enclaveapp-software = { path = "crates/enclaveapp-software" }
 enclaveapp-test-support = { path = "crates/enclaveapp-test-support" }
 
 # Serialization
@@ -42,6 +44,9 @@ base64 = "0.22"
 
 # Crypto
 sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+aes-gcm = "0.10"
+elliptic-curve = { version = "0.13", features = ["sec1"] }
 
 # Windows
 windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
