@@ -222,6 +222,8 @@ jobs:
           extra='${{ inputs.extra_packaging }}'
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
           for lib in $unix_libs; do
+            # Homebrew is macOS-only, skip .so files (Linux)
+            case "$lib" in *.so) continue ;; esac
             install_lines="${install_lines}    lib.install \"${lib}\"\n"
           done
 
