@@ -198,21 +198,24 @@ unsafe fn ecies_encrypt(stored_pub_sec1: &[u8], plaintext: &[u8]) -> Result<Vec<
         None,
         Default::default(),
     )
+    .ok()
     .map_err(|e| Error::EncryptFailed {
         detail: format!("BCryptOpenAlgorithmProvider(ECDH): {e}"),
     })?;
 
     // Generate ephemeral key pair.
     let mut ephemeral_key = BCRYPT_KEY_HANDLE::default();
-    BCryptGenerateKeyPair(ecdh_alg, &mut ephemeral_key, 256, 0).map_err(|e| {
-        BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
-        Error::EncryptFailed {
-            detail: format!("BCryptGenerateKeyPair: {e}"),
-        }
-    })?;
-    BCryptFinalizeKeyPair(ephemeral_key, 0).map_err(|e| {
-        BCryptDestroyKey(ephemeral_key).ok();
-        BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
+    BCryptGenerateKeyPair(ecdh_alg, &mut ephemeral_key, 256, 0)
+        .ok()
+        .map_err(|e| {
+            let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
+            Error::EncryptFailed {
+                detail: format!("BCryptGenerateKeyPair: {e}"),
+            }
+        })?;
+    BCryptFinalizeKeyPair(ephemeral_key, 0).ok().map_err(|e| {
+        let _ = BCryptDestroyKey(ephemeral_key).ok();
+        let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
         Error::EncryptFailed {
             detail: format!("BCryptFinalizeKeyPair: {e}"),
         }
@@ -229,6 +232,7 @@ unsafe fn ecies_encrypt(stored_pub_sec1: &[u8], plaintext: &[u8]) -> Result<Vec<
             &mut sz,
             0,
         )
+        .ok()
         .map_err(|e| Error::EncryptFailed {
             detail: format!("BCryptExportKey eph size: {e}"),
         })?;
@@ -241,6 +245,7 @@ unsafe fn ecies_encrypt(stored_pub_sec1: &[u8], plaintext: &[u8]) -> Result<Vec<
             &mut sz,
             0,
         )
+        .ok()
         .map_err(|e| Error::EncryptFailed {
             detail: format!("BCryptExportKey eph: {e}"),
         })?;
@@ -259,17 +264,18 @@ unsafe fn ecies_encrypt(stored_pub_sec1: &[u8], plaintext: &[u8]) -> Result<Vec<
         &stored_blob,
         0,
     )
+    .ok()
     .map_err(|e| Error::EncryptFailed {
         detail: format!("BCryptImportKeyPair: {e}"),
     })?;
 
     // ECDH: ephemeral private + stored public → shared secret.
     let mut secret = BCRYPT_SECRET_HANDLE::default();
-    BCryptSecretAgreement(ephemeral_key, stored_key, &mut secret, 0).map_err(|e| {
-        Error::EncryptFailed {
+    BCryptSecretAgreement(ephemeral_key, stored_key, &mut secret, 0)
+        .ok()
+        .map_err(|e| Error::EncryptFailed {
             detail: format!("BCryptSecretAgreement: {e}"),
-        }
-    })?;
+        })?;
 
     // Derive 32-byte AES key via HASH KDF (SHA-256).
     let kdf_name = to_wide("HASH");
@@ -283,16 +289,17 @@ unsafe fn ecies_encrypt(stored_pub_sec1: &[u8], plaintext: &[u8]) -> Result<Vec<
         &mut derived_len,
         0,
     )
+    .ok()
     .map_err(|e| Error::EncryptFailed {
         detail: format!("BCryptDeriveKey: {e}"),
     })?;
     derived_key.truncate(derived_len as usize);
 
     // Cleanup ECDH handles.
-    let _ = BCryptDestroySecret(secret);
-    let _ = BCryptDestroyKey(stored_key);
-    let _ = BCryptDestroyKey(ephemeral_key);
-    let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0);
+    let _ = BCryptDestroySecret(secret).ok();
+    let _ = BCryptDestroyKey(stored_key).ok();
+    let _ = BCryptDestroyKey(ephemeral_key).ok();
+    let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
 
     // AES-256-GCM encrypt.
     let (nonce, tag, ct) = aes_gcm_encrypt(&derived_key, plaintext)?;
@@ -329,6 +336,7 @@ unsafe fn ecies_decrypt(
         None,
         Default::default(),
     )
+    .ok()
     .map_err(|e| Error::DecryptFailed {
         detail: format!("BCryptOpenAlgorithmProvider(ECDH): {e}"),
     })?;
@@ -344,16 +352,19 @@ unsafe fn ecies_decrypt(
         &eph_blob,
         0,
     )
+    .ok()
     .map_err(|e| Error::DecryptFailed {
         detail: format!("BCryptImportKeyPair(eph): {e}"),
     })?;
 
     // NCryptSecretAgreement: TPM private key + ephemeral public key.
     // We use the NCrypt variant because the private key lives in the TPM.
+    // Convert BCRYPT_KEY_HANDLE → NCRYPT_KEY_HANDLE (both are opaque handles
+    // to the same underlying CNG key object).
     let mut secret = NCRYPT_SECRET_HANDLE::default();
     NCryptSecretAgreement(
         tpm_key.as_key(),
-        eph_key,
+        NCRYPT_KEY_HANDLE(eph_key.0 as usize),
         &mut secret,
         NCRYPT_FLAGS::default(),
     )
@@ -371,7 +382,7 @@ unsafe fn ecies_decrypt(
         None,
         Some(&mut derived_key),
         &mut derived_len,
-        NCRYPT_FLAGS::default(),
+        0u32,
     )
     .map_err(|e| Error::DecryptFailed {
         detail: format!("NCryptDeriveKey: {e}"),
@@ -379,8 +390,8 @@ unsafe fn ecies_decrypt(
     derived_key.truncate(derived_len as usize);
 
     let _ = NCryptFreeObject(NCRYPT_HANDLE(secret.0));
-    let _ = BCryptDestroyKey(eph_key);
-    let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0);
+    let _ = BCryptDestroyKey(eph_key).ok();
+    let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
 
     // AES-256-GCM decrypt.
     aes_gcm_decrypt(&derived_key, nonce, ct, tag)
@@ -407,33 +418,39 @@ unsafe fn aes_gcm_encrypt(
         None,
         Default::default(),
     )
+    .ok()
     .map_err(|e| Error::EncryptFailed {
         detail: format!("BCryptOpenAlgorithmProvider(AES): {e}"),
     })?;
 
     BCryptSetProperty(
-        aes_alg,
+        aes_alg.into(),
         PCWSTR(chain_mode_prop.as_ptr()),
         std::slice::from_raw_parts(gcm_mode.as_ptr() as *const u8, gcm_mode.len() * 2),
         0,
     )
+    .ok()
     .map_err(|e| Error::EncryptFailed {
         detail: format!("BCryptSetProperty(GCM): {e}"),
     })?;
 
     let mut aes_key = BCRYPT_KEY_HANDLE::default();
-    BCryptGenerateSymmetricKey(aes_alg, &mut aes_key, None, key_bytes, 0).map_err(|e| {
-        Error::EncryptFailed {
+    BCryptGenerateSymmetricKey(aes_alg, &mut aes_key, None, key_bytes, 0)
+        .ok()
+        .map_err(|e| Error::EncryptFailed {
             detail: format!("BCryptGenerateSymmetricKey: {e}"),
-        }
-    })?;
+        })?;
 
     // Random nonce.
     let mut nonce = [0u8; GCM_NONCE_SIZE];
-    BCryptGenRandom(None, &mut nonce, BCRYPT_USE_SYSTEM_PREFERRED_RNG).map_err(|e| {
-        Error::EncryptFailed {
-            detail: format!("BCryptGenRandom: {e}"),
-        }
+    BCryptGenRandom(
+        BCRYPT_ALG_HANDLE::default(),
+        &mut nonce,
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    )
+    .ok()
+    .map_err(|e| Error::EncryptFailed {
+        detail: format!("BCryptGenRandom: {e}"),
     })?;
 
     let mut tag = [0u8; GCM_TAG_SIZE];
@@ -462,15 +479,16 @@ unsafe fn aes_gcm_encrypt(
         None,
         Some(&mut ciphertext),
         &mut ct_len,
-        0,
+        BCRYPT_FLAGS::default(),
     )
+    .ok()
     .map_err(|e| Error::EncryptFailed {
         detail: format!("BCryptEncrypt(AES-GCM): {e}"),
     })?;
     ciphertext.truncate(ct_len as usize);
 
-    let _ = BCryptDestroyKey(aes_key);
-    let _ = BCryptCloseAlgorithmProvider(aes_alg, 0);
+    let _ = BCryptDestroyKey(aes_key).ok();
+    let _ = BCryptCloseAlgorithmProvider(aes_alg, 0).ok();
 
     Ok((nonce, tag, ciphertext))
 }
@@ -496,26 +514,28 @@ unsafe fn aes_gcm_decrypt(
         None,
         Default::default(),
     )
+    .ok()
     .map_err(|e| Error::DecryptFailed {
         detail: format!("BCryptOpenAlgorithmProvider(AES): {e}"),
     })?;
 
     BCryptSetProperty(
-        aes_alg,
+        aes_alg.into(),
         PCWSTR(chain_mode_prop.as_ptr()),
         std::slice::from_raw_parts(gcm_mode.as_ptr() as *const u8, gcm_mode.len() * 2),
         0,
     )
+    .ok()
     .map_err(|e| Error::DecryptFailed {
         detail: format!("BCryptSetProperty(GCM): {e}"),
     })?;
 
     let mut aes_key = BCRYPT_KEY_HANDLE::default();
-    BCryptGenerateSymmetricKey(aes_alg, &mut aes_key, None, key_bytes, 0).map_err(|e| {
-        Error::DecryptFailed {
+    BCryptGenerateSymmetricKey(aes_alg, &mut aes_key, None, key_bytes, 0)
+        .ok()
+        .map_err(|e| Error::DecryptFailed {
             detail: format!("BCryptGenerateSymmetricKey: {e}"),
-        }
-    })?;
+        })?;
 
     let mut nonce_copy = [0u8; GCM_NONCE_SIZE];
     nonce_copy[..nonce.len()].copy_from_slice(nonce);
@@ -547,15 +567,16 @@ unsafe fn aes_gcm_decrypt(
         None,
         Some(&mut plaintext),
         &mut pt_len,
-        0,
+        BCRYPT_FLAGS::default(),
     )
+    .ok()
     .map_err(|e| Error::DecryptFailed {
         detail: format!("BCryptDecrypt(AES-GCM): {e}"),
     })?;
     plaintext.truncate(pt_len as usize);
 
-    let _ = BCryptDestroyKey(aes_key);
-    let _ = BCryptCloseAlgorithmProvider(aes_alg, 0);
+    let _ = BCryptDestroyKey(aes_key).ok();
+    let _ = BCryptCloseAlgorithmProvider(aes_alg, 0).ok();
 
     Ok(plaintext)
 }
