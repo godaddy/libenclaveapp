@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = ["keyring-storage"]
+default = []
 signing = []
 encryption = []
 keyring-storage = ["keyring"]
@@ -26,4 +26,7 @@ rand = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# keyring is only useful on Linux with glibc (needs libdbus).
+# On musl/Alpine, it won't link. The keyring-storage feature gates the code.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 keyring = { workspace = true, optional = true }
