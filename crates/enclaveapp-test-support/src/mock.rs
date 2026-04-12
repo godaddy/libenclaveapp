@@ -638,4 +638,165 @@ mod tests {
         let labels = backend.list_keys().unwrap();
         assert_eq!(labels.len(), 10);
     }
+
+    // ── Additional tests ───────────────────────────────────────────────
+
+    #[test]
+    fn generate_then_list_returns_sorted_labels() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("zebra", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        backend
+            .generate("alpha", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        backend
+            .generate("mango", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        let labels = backend.list_keys().unwrap();
+        assert_eq!(labels, vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn delete_all_keys_then_list_returns_empty() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("a", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        backend
+            .generate("b", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        backend
+            .generate("c", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        backend.delete_key("a").unwrap();
+        backend.delete_key("b").unwrap();
+        backend.delete_key("c").unwrap();
+        let labels = backend.list_keys().unwrap();
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn sign_with_data_larger_than_1mb() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("big-sign", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        let data: Vec<u8> = (0..1_100_000).map(|i| (i % 256) as u8).collect();
+        let sig = backend.sign("big-sign", &data).unwrap();
+        assert_eq!(sig[0], 0x30, "signature should start with DER SEQUENCE tag");
+        // Signature should be deterministic
+        let sig2 = backend.sign("big-sign", &data).unwrap();
+        assert_eq!(sig, sig2);
+    }
+
+    #[test]
+    fn encrypt_empty_plaintext_returns_valid_ciphertext() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("enc-empty", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        let ciphertext = backend.encrypt("enc-empty", b"").unwrap();
+        // Ciphertext should be version byte only (0x01) for empty plaintext
+        assert_eq!(ciphertext, vec![0x01]);
+        let decrypted = backend.decrypt("enc-empty", &ciphertext).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn encrypt_1mb_plaintext_roundtrips() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("enc-1mb", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        let plaintext: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
+        let ciphertext = backend.encrypt("enc-1mb", &plaintext).unwrap();
+        let decrypted = backend.decrypt("enc-1mb", &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn concurrent_generate_from_20_threads() {
+        use std::sync::Arc;
+
+        let backend = Arc::new(MockKeyBackend::new());
+        let mut handles = Vec::new();
+
+        for i in 0..20 {
+            let backend = Arc::clone(&backend);
+            handles.push(std::thread::spawn(move || {
+                let label = format!("stress-key-{i:02}");
+                backend
+                    .generate(&label, KeyType::Signing, AccessPolicy::None)
+                    .unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let labels = backend.list_keys().unwrap();
+        assert_eq!(labels.len(), 20);
+    }
+
+    #[test]
+    fn concurrent_sign_from_10_threads_same_key() {
+        use std::sync::Arc;
+
+        let backend = Arc::new(MockKeyBackend::new());
+        backend
+            .generate("shared-signer", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let backend = Arc::clone(&backend);
+            handles.push(std::thread::spawn(move || {
+                let data = format!("data-from-thread-{i}");
+                backend.sign("shared-signer", data.as_bytes()).unwrap()
+            }));
+        }
+
+        let mut signatures = Vec::new();
+        for handle in handles {
+            signatures.push(handle.join().unwrap());
+        }
+
+        // All signatures should start with DER SEQUENCE tag
+        for sig in &signatures {
+            assert_eq!(sig[0], 0x30);
+        }
+    }
+
+    #[test]
+    fn mock_key_backend_default_works() {
+        let backend = MockKeyBackend::default();
+        assert!(backend.is_available());
+        assert!(backend.list_keys().unwrap().is_empty());
+    }
+
+    #[test]
+    fn different_mock_key_backend_instances_are_independent() {
+        let backend1 = MockKeyBackend::new();
+        let backend2 = MockKeyBackend::new();
+
+        backend1
+            .generate("key-in-1", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        backend2
+            .generate("key-in-2", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        let labels1 = backend1.list_keys().unwrap();
+        let labels2 = backend2.list_keys().unwrap();
+
+        assert_eq!(labels1, vec!["key-in-1"]);
+        assert_eq!(labels2, vec!["key-in-2"]);
+
+        // key-in-1 should not exist in backend2
+        assert!(backend2.public_key("key-in-1").is_err());
+        // key-in-2 should not exist in backend1
+        assert!(backend1.public_key("key-in-2").is_err());
+    }
 }

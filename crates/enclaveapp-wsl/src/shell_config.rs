@@ -433,4 +433,109 @@ mod tests {
         assert_eq!(paths[2].0, "bash");
         assert_eq!(paths[2].1, home.join(".profile"));
     }
+
+    #[test]
+    fn test_install_block_special_characters() {
+        let dir = test_dir("special-chars");
+        let path = dir.join(".bashrc");
+        let config = ShellBlockConfig::new(
+            "sshenc",
+            r#"export FOO="$HOME/.sshenc/agent.sock"
+export BAR=`whoami`
+export BAZ=\\escaped"#,
+        );
+
+        let result = install_block(&path, &config).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("$HOME"));
+        assert!(content.contains("`whoami`"));
+        assert!(content.contains("\\\\escaped"));
+        assert!(content.contains(&config.begin_marker()));
+        assert!(content.contains(&config.end_marker()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_preserves_content_before_and_after_exactly() {
+        let dir = test_dir("preserve-exact");
+        let path = dir.join(".bashrc");
+        let config = ShellBlockConfig::new("sshenc", "export X=1");
+
+        let before = "# line one\nexport PATH=/usr/bin\n";
+        let after = "# line three\nexport Y=2\n";
+        // Write before content, install block, then append after content
+        std::fs::write(&path, before).unwrap();
+        install_block(&path, &config).unwrap();
+        // Append content after the block
+        let mut content = std::fs::read_to_string(&path).unwrap();
+        content.push_str(after);
+        std::fs::write(&path, &content).unwrap();
+
+        uninstall_block(&path, &config).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("# line one"));
+        assert!(result.contains("export PATH=/usr/bin"));
+        assert!(result.contains("# line three"));
+        assert!(result.contains("export Y=2"));
+        assert!(!result.contains(&config.begin_marker()));
+        assert!(!result.contains("export X=1"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_multiple_different_app_blocks_coexist() {
+        let dir = test_dir("multi-blocks");
+        let path = dir.join(".bashrc");
+        let sshenc_config =
+            ShellBlockConfig::new("sshenc", "export SSH_AUTH_SOCK=/tmp/sshenc.sock");
+        let awsenc_config = ShellBlockConfig::new("awsenc", "export AWS_PROFILE=default");
+
+        install_block(&path, &sshenc_config).unwrap();
+        install_block(&path, &awsenc_config).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&sshenc_config.begin_marker()));
+        assert!(content.contains(&sshenc_config.end_marker()));
+        assert!(content.contains(&awsenc_config.begin_marker()));
+        assert!(content.contains(&awsenc_config.end_marker()));
+        assert!(content.contains("SSH_AUTH_SOCK"));
+        assert!(content.contains("AWS_PROFILE"));
+
+        // Remove sshenc, awsenc should remain
+        uninstall_block(&path, &sshenc_config).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains(&sshenc_config.begin_marker()));
+        assert!(content.contains(&awsenc_config.begin_marker()));
+        assert!(content.contains("AWS_PROFILE"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_then_update_pattern() {
+        let dir = test_dir("install-update");
+        let path = dir.join(".bashrc");
+        let config_v1 = ShellBlockConfig::new("sshenc", "export VERSION=1");
+
+        install_block(&path, &config_v1).unwrap();
+        let content_v1 = std::fs::read_to_string(&path).unwrap();
+        assert!(content_v1.contains("VERSION=1"));
+
+        // Remove old, install new
+        uninstall_block(&path, &config_v1).unwrap();
+        let config_v2 = ShellBlockConfig::new("sshenc", "export VERSION=2");
+        install_block(&path, &config_v2).unwrap();
+
+        let content_v2 = std::fs::read_to_string(&path).unwrap();
+        assert!(!content_v2.contains("VERSION=1"));
+        assert!(content_v2.contains("VERSION=2"));
+        assert!(content_v2.contains(&config_v2.begin_marker()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

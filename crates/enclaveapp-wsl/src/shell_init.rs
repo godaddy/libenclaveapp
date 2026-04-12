@@ -604,4 +604,105 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn bash_output_contains_trap_chaining() {
+        let script = generate_shell_init("bash", &awsenc_config()).unwrap();
+        // The bash awsenc-style output chains with existing DEBUG trap
+        assert!(
+            script.contains("trap"),
+            "bash output should contain trap for DEBUG"
+        );
+        assert!(
+            script.contains("existing_trap"),
+            "bash output should chain with existing trap"
+        );
+    }
+
+    #[test]
+    fn zsh_output_contains_add_zsh_hook() {
+        let script = generate_shell_init("zsh", &awsenc_config()).unwrap();
+        assert!(
+            script.contains("add-zsh-hook"),
+            "zsh output should contain add-zsh-hook"
+        );
+    }
+
+    #[test]
+    fn fish_output_contains_commandline_check() {
+        // For the command_wrapper style (sso-jwt), fish uses `commandline`
+        let script = generate_shell_init("fish", &ssojwt_config()).unwrap();
+        assert!(
+            script.contains("commandline"),
+            "fish command wrapper output should check commandline"
+        );
+    }
+
+    #[test]
+    fn powershell_output_when_enabled() {
+        let script = generate_shell_init("powershell", &awsenc_config()).unwrap();
+        assert!(script.contains("PowerShell"));
+        assert!(script.contains("function prompt"));
+        assert!(script.contains("Get-History"));
+    }
+
+    #[test]
+    fn generate_unknown_shell_returns_error() {
+        let result = generate_shell_init("csh", &awsenc_config());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unsupported shell"));
+    }
+
+    #[test]
+    fn export_patterns_appear_in_generated_output() {
+        let config = awsenc_config();
+        for shell in &["bash", "zsh"] {
+            let script = generate_shell_init(shell, &config).unwrap();
+            assert!(
+                script.contains("AWS_ACCESS_KEY_ID"),
+                "{shell} output should contain export pattern AWS_ACCESS_KEY_ID"
+            );
+            assert!(
+                script.contains("AWS_SECRET_ACCESS_KEY"),
+                "{shell} output should contain export pattern AWS_SECRET_ACCESS_KEY"
+            );
+            assert!(
+                script.contains("AWS_SESSION_TOKEN"),
+                "{shell} output should contain export pattern AWS_SESSION_TOKEN"
+            );
+        }
+    }
+
+    #[test]
+    fn command_name_appears_in_generated_output() {
+        let config = awsenc_config();
+        for shell in &["bash", "zsh", "fish", "powershell"] {
+            let script = generate_shell_init(shell, &config).unwrap();
+            assert!(
+                script.contains("awsenc"),
+                "{shell} output should contain command name 'awsenc'"
+            );
+        }
+    }
+
+    #[test]
+    fn helper_function_appears_in_bash_output() {
+        let script = generate_shell_init("bash", &awsenc_config()).unwrap();
+        assert!(
+            script.contains("awsenc-use()"),
+            "bash output should contain helper function 'awsenc-use()'"
+        );
+        assert!(
+            script.contains("AWSENC_PROFILE"),
+            "bash output should contain helper function body"
+        );
+    }
+
+    #[test]
+    fn pwsh_alias_works_for_powershell() {
+        // "pwsh" should be treated the same as "powershell"
+        let script = generate_shell_init("pwsh", &awsenc_config()).unwrap();
+        assert!(script.contains("PowerShell"));
+    }
 }

@@ -168,4 +168,91 @@ mod tests {
         let result = decode_data("not valid base64!!!");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn bridge_request_all_methods() {
+        for method in &["init", "encrypt", "decrypt", "destroy"] {
+            let request = BridgeRequest {
+                method: (*method).to_string(),
+                params: BridgeParams {
+                    data: String::new(),
+                    biometric: false,
+                    app_name: "test".to_string(),
+                },
+            };
+            let json = serde_json::to_string(&request).unwrap();
+            let parsed: BridgeRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.method, *method);
+        }
+    }
+
+    #[test]
+    fn bridge_response_success_with_empty_result() {
+        let resp = BridgeResponse::ok();
+        assert_eq!(resp.result, Some(String::new()));
+        assert!(resp.error.is_none());
+
+        // Verify it roundtrips through JSON
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: BridgeResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.result, Some(String::new()));
+    }
+
+    #[test]
+    fn bridge_response_error_preserves_message() {
+        let msg = "TPM device not found: error code 0x8028000F";
+        let resp = BridgeResponse::error(msg);
+        assert_eq!(resp.error.as_deref(), Some(msg));
+        assert!(resp.result.is_none());
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: BridgeResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.error.as_deref(), Some(msg));
+    }
+
+    #[test]
+    fn encode_decode_binary_data_with_null_bytes() {
+        let data: Vec<u8> = vec![0x00, 0x01, 0x00, 0xFF, 0x00, 0xFE];
+        let encoded = encode_data(&data);
+        let decoded = decode_data(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn encode_decode_large_data_1mb() {
+        let data: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
+        let encoded = encode_data(&data);
+        let decoded = decode_data(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn decode_data_invalid_base64_returns_error() {
+        let result = decode_data("!!!not-base64!!!");
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("base64"));
+    }
+
+    #[test]
+    fn decode_data_empty_string_returns_empty_vec() {
+        let result = decode_data("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bridge_params_default_values() {
+        let json = r#"{}"#;
+        let params: BridgeParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.data, "");
+        assert!(!params.biometric);
+        assert_eq!(params.app_name, "");
+    }
+
+    #[test]
+    fn find_bridge_returns_none_on_macos() {
+        // On macOS there's no /mnt/c/ and no bridge binary
+        let result = crate::find_bridge("sshenc");
+        assert!(result.is_none());
+    }
 }

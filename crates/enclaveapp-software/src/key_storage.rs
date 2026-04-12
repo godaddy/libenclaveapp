@@ -699,7 +699,8 @@ mod tests {
         // For completeness, we verify the function works with a basic label.
         let dir = test_dir();
         let config = test_config(&dir);
-        let result = generate_and_save(&config, "valid-label", KeyType::Signing, AccessPolicy::None);
+        let result =
+            generate_and_save(&config, "valid-label", KeyType::Signing, AccessPolicy::None);
         assert!(result.is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -813,7 +814,11 @@ mod tests {
 
         // Verify format: version(1) + nonce(12) + ciphertext(32) + tag(16)
         assert_eq!(encrypted[0], 0x01, "version byte should be 0x01");
-        assert_eq!(encrypted.len(), 1 + 12 + 32 + 16, "total length should be 61");
+        assert_eq!(
+            encrypted.len(),
+            1 + 12 + 32 + 16,
+            "total length should be 61"
+        );
 
         // Nonce is 12 bytes starting at offset 1
         let nonce = &encrypted[1..13];

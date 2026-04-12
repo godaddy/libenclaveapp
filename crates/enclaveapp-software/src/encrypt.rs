@@ -479,10 +479,7 @@ mod tests {
             let plaintext: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
             let ciphertext = enc.encrypt("sizes-test", &plaintext).unwrap();
             let decrypted = enc.decrypt("sizes-test", &ciphertext).unwrap();
-            assert_eq!(
-                decrypted, plaintext,
-                "roundtrip failed for size {size}"
-            );
+            assert_eq!(decrypted, plaintext, "roundtrip failed for size {size}");
         }
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -503,7 +500,10 @@ mod tests {
         assert_eq!(ciphertext[0], 0x01);
 
         // Ephemeral public key: 65 bytes starting with 0x04
-        assert_eq!(ciphertext[1], 0x04, "ephemeral pubkey should start with 0x04");
+        assert_eq!(
+            ciphertext[1], 0x04,
+            "ephemeral pubkey should start with 0x04"
+        );
         let eph_pub = &ciphertext[1..66];
         assert_eq!(eph_pub.len(), 65);
 

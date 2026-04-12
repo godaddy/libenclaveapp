@@ -582,4 +582,108 @@ mod tests {
         assert_eq!(cloned.app_name, config.app_name);
         assert_eq!(cloned.shell_block, config.shell_block);
     }
+
+    #[test]
+    fn test_decode_wsl_output_real_utf16le_bom() {
+        // Simulate real UTF-16LE BOM output: "Ubuntu\r\n"
+        let text = "Ubuntu\r\n";
+        let mut bytes = vec![0xFF_u8, 0xFE]; // BOM
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let result = decode_wsl_output(&bytes);
+        assert_eq!(result, "Ubuntu\r\n");
+    }
+
+    #[test]
+    fn test_decode_wsl_output_plain_utf8() {
+        let input = b"Debian GNU/Linux\n";
+        let result = decode_wsl_output(input);
+        assert_eq!(result, "Debian GNU/Linux\n");
+    }
+
+    #[test]
+    fn test_configure_distro_creates_backup_like_file() {
+        // Configure a distro with shell configs — the .bashrc should be modified
+        let dir = test_dir("configure-backup");
+        let bashrc = dir.join(".bashrc");
+        std::fs::write(&bashrc, "# original content\nexport PATH=/usr/bin\n").unwrap();
+        let original_content = std::fs::read_to_string(&bashrc).unwrap();
+
+        let distro = WslDistro {
+            name: "TestDistro".to_string(),
+            home_path: Some(dir.clone()),
+        };
+        let config = WslInstallConfig {
+            app_name: "testapp".to_string(),
+            shell_block: "export TEST=1".to_string(),
+            install_bridge_deps: false,
+            linux_binary_path: None,
+            linux_binary_target: None,
+        };
+
+        let result = configure_distro(&distro, &config).unwrap();
+        assert!(!result.is_empty());
+
+        // .bashrc should now contain the block
+        let new_content = std::fs::read_to_string(&bashrc).unwrap();
+        assert!(new_content.contains("BEGIN testapp managed block"));
+        // Original content should still be present
+        assert!(new_content.contains(&original_content.trim_end().to_string()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_unconfigure_distro_removes_block_but_keeps_content() {
+        let dir = test_dir("unconfigure-keep");
+        let bashrc = dir.join(".bashrc");
+        std::fs::write(&bashrc, "# my config\nexport FOO=bar\n").unwrap();
+
+        let block_config = ShellBlockConfig::new("testapp", "export Q=1");
+        install_block(bashrc.as_path(), &block_config).unwrap();
+
+        // Verify block is there
+        let content = std::fs::read_to_string(&bashrc).unwrap();
+        assert!(content.contains("BEGIN testapp managed block"));
+
+        let distro = WslDistro {
+            name: "TestDistro".to_string(),
+            home_path: Some(dir.clone()),
+        };
+        let config = WslInstallConfig {
+            app_name: "testapp".to_string(),
+            shell_block: "export Q=1".to_string(),
+            install_bridge_deps: false,
+            linux_binary_path: None,
+            linux_binary_target: None,
+        };
+        let result = unconfigure_distro(&distro, &config).unwrap();
+        assert!(result.iter().any(|a| a.contains("Removed")));
+
+        let final_content = std::fs::read_to_string(&bashrc).unwrap();
+        assert!(!final_content.contains("BEGIN testapp managed block"));
+        assert!(final_content.contains("# my config"));
+        assert!(final_content.contains("export FOO=bar"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_decode_wsl_output_utf16le_multiple_lines() {
+        // UTF-16LE BOM with multiple lines: "Ubuntu\nDebian\n"
+        let text = "Ubuntu\nDebian\n";
+        let mut bytes = vec![0xFF_u8, 0xFE];
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let result = decode_wsl_output(&bytes);
+        assert_eq!(result, "Ubuntu\nDebian\n");
+    }
+
+    #[test]
+    fn test_decode_wsl_output_empty_utf8() {
+        let result = decode_wsl_output(b"");
+        assert_eq!(result, "");
+    }
 }
