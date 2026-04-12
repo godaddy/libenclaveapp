@@ -7,7 +7,12 @@
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
 // `mem_forget` is used intentionally in `delete_key` because NCryptDeleteKey
 // takes ownership of the handle.
-#![allow(unsafe_code, clippy::mem_forget, clippy::ptr_as_ptr, unused_qualifications)]
+#![allow(
+    unsafe_code,
+    clippy::mem_forget,
+    clippy::ptr_as_ptr,
+    unused_qualifications
+)]
 
 use crate::convert::key_name;
 use crate::export::export_public_key;
