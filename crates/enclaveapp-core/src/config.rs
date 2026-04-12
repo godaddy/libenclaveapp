@@ -53,6 +53,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn load_toml_returns_default_for_missing() {
         let dir = test_dir();
         let path = dir.join("nonexistent.toml");
@@ -62,6 +63,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn load_toml_parses_valid() {
         let dir = test_dir();
         let path = dir.join("config.toml");
@@ -73,6 +75,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn load_toml_rejects_invalid() {
         let dir = test_dir();
         let path = dir.join("bad.toml");
@@ -82,6 +85,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // save_toml calls libc::umask -> FFI not supported by Miri
     fn save_toml_creates_parent_dirs() {
         let dir = test_dir();
         let path = dir.join("sub").join("dir").join("config.toml");
@@ -95,6 +99,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // save_toml calls libc::umask -> FFI not supported by Miri
     fn save_load_toml_roundtrip() {
         let dir = test_dir();
         let path = dir.join("roundtrip.toml");

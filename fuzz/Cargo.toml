@@ -1,0 +1,20 @@
+[package]
+name = "libenclaveapp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+enclaveapp-windows = { path = "../crates/enclaveapp-windows", features = ["signing"] }
+
+[[bin]]
+name = "fuzz_der_to_p1363"
+path = "fuzz_targets/der_to_p1363.rs"
+
+[[bin]]
+name = "fuzz_eccpublic_blob"
+path = "fuzz_targets/eccpublic_blob.rs"

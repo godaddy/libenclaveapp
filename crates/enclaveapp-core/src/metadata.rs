@@ -329,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
     fn atomic_write_creates_file() {
         let dir = test_dir();
         let path = dir.join("test.txt");
@@ -340,6 +341,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
     fn save_load_meta_roundtrip() {
         let dir = test_dir();
         let meta = KeyMeta::new("mykey", KeyType::Signing, AccessPolicy::Any);
@@ -352,6 +354,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn load_meta_returns_default_for_missing() {
         let dir = test_dir();
         let meta = load_meta(&dir, "nonexistent").unwrap();
@@ -361,6 +364,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
     fn save_load_pub_key_roundtrip() {
         let dir = test_dir();
         let pub_key = vec![0x04; 65];
@@ -371,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn load_pub_key_returns_key_not_found() {
         let dir = test_dir();
         let err = load_pub_key(&dir, "missing").unwrap_err();
@@ -382,6 +387,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported under Miri isolation
     fn list_labels_empty_for_nonexistent_dir() {
         let dir = std::env::temp_dir().join("enclaveapp-core-test-nonexistent-dir");
         let _ = std::fs::remove_dir_all(&dir);
@@ -390,6 +396,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
     fn list_labels_finds_meta_files() {
         let dir = test_dir();
         let meta_a = KeyMeta::new("alpha", KeyType::Signing, AccessPolicy::None);
@@ -404,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn delete_key_files_removes_all() {
         let dir = test_dir();
         std::fs::write(dir.join("mykey.meta"), b"{}").unwrap();
@@ -417,6 +425,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn delete_key_files_returns_key_not_found() {
         let dir = test_dir();
         let err = delete_key_files(&dir, "ghost").unwrap_err();
@@ -428,6 +437,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
     fn rename_key_files_renames_and_updates_meta() {
         let dir = test_dir();
         let meta = KeyMeta::new("old-name", KeyType::Signing, AccessPolicy::None);
@@ -447,6 +457,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
     fn rename_key_files_rejects_existing_target() {
         let dir = test_dir();
         let meta = KeyMeta::new("src", KeyType::Signing, AccessPolicy::None);
@@ -463,6 +474,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn rename_key_files_rejects_missing_source() {
         let dir = test_dir();
         let err = rename_key_files(&dir, "missing", "new").unwrap_err();
@@ -474,6 +486,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // dirs::data_dir() calls FFI not supported by Miri
     fn keys_dir_returns_absolute_path() {
         let dir = keys_dir("test-app");
         assert!(dir.is_absolute());
@@ -482,6 +495,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // dirs::config_dir() calls FFI not supported by Miri
     fn config_dir_returns_absolute_path() {
         let dir = config_dir("test-app");
         assert!(dir.is_absolute());
@@ -489,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // libc::umask not supported by Miri
     fn ensure_dir_creates_nested() {
         let dir = test_dir();
         let nested = dir.join("a").join("b").join("c");
@@ -499,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn dir_lock_acquire_and_drop() {
         let dir = test_dir();
         let _lock = DirLock::acquire(&dir).unwrap();
@@ -508,6 +524,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // libc::chmod not supported by Miri
     fn restrict_file_permissions_succeeds() {
         let dir = test_dir();
         let path = dir.join("secret.txt");
