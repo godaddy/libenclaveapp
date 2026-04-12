@@ -45,11 +45,16 @@ pub fn is_available() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     fn is_available_returns_false_on_non_linux() {
-        assert!(!is_available());
+        assert!(!super::is_available());
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn is_available_returns_bool_on_linux() {
+        // Just verify it doesn't panic — actual TPM may or may not be present
+        let _ = super::is_available();
     }
 }
