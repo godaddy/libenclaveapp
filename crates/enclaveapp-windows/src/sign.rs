@@ -3,7 +3,7 @@
 
 //! `TpmSigner` — ECDSA P-256 signing backend using the Windows TPM.
 
-use crate::convert::{key_name, p1363_to_der};
+use crate::convert::p1363_to_der;
 use crate::export::export_public_key;
 use crate::key;
 use crate::provider;

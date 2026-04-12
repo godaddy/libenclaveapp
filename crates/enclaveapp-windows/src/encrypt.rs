@@ -23,7 +23,7 @@
 //! Decryption uses `NCryptSecretAgreement` (the TPM private key never leaves
 //! the hardware) and otherwise mirrors the process.
 
-use crate::convert::{eccpublic_blob_to_sec1, key_name, sec1_to_eccpublic_blob};
+use crate::convert::{eccpublic_blob_to_sec1, sec1_to_eccpublic_blob};
 use crate::key;
 use crate::provider;
 use enclaveapp_core::metadata;
@@ -454,7 +454,7 @@ unsafe fn aes_gcm_encrypt(
     })?;
 
     let mut tag = [0u8; GCM_TAG_SIZE];
-    let mut auth_info = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
+    let auth_info = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
         cbSize: std::mem::size_of::<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>() as u32,
         dwInfoVersion: 1, // BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION
         pbNonce: nonce.as_mut_ptr(),
@@ -542,7 +542,7 @@ unsafe fn aes_gcm_decrypt(
     let mut tag_copy = [0u8; GCM_TAG_SIZE];
     tag_copy[..tag.len()].copy_from_slice(tag);
 
-    let mut auth_info = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
+    let auth_info = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
         cbSize: std::mem::size_of::<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>() as u32,
         dwInfoVersion: 1,
         pbNonce: nonce_copy.as_mut_ptr(),
