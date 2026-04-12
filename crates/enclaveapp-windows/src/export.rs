@@ -4,7 +4,7 @@
 //! Public key export from NCrypt key handles.
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
-#![allow(unsafe_code)]
+#![allow(unsafe_code, unused_qualifications)]
 
 use crate::convert::eccpublic_blob_to_sec1;
 use crate::provider::NcryptHandle;

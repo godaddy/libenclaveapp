@@ -4,7 +4,7 @@
 //! `TpmSigner` — ECDSA P-256 signing backend using the Windows TPM.
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
-#![allow(unsafe_code)]
+#![allow(unsafe_code, unused_qualifications)]
 
 use crate::convert::p1363_to_der;
 use crate::export::export_public_key;
