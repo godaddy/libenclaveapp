@@ -1,0 +1,73 @@
+name: Reusable CI
+
+on:
+  workflow_call:
+    inputs:
+      platforms:
+        description: 'JSON array of runner OS values (e.g., ["macos-latest", "windows-latest"])'
+        required: false
+        default: '["macos-latest", "windows-latest"]'
+        type: string
+      cargo_args:
+        description: 'Extra args for clippy/build/test (e.g., "--features mock")'
+        required: false
+        default: ''
+        type: string
+      test_args:
+        description: 'Extra args for cargo test only (e.g., "--features awsenc-secure-storage/mock")'
+        required: false
+        default: ''
+        type: string
+      linux_deps:
+        description: 'apt packages to install on Linux (e.g., "libdbus-1-dev pkg-config")'
+        required: false
+        default: ''
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check / Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(inputs.platforms) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Clone libenclaveapp
+        run: git clone --depth 1 https://github.com/jgowdy/libenclaveapp.git ../libenclaveapp
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux' && inputs.linux_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.linux_deps }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets ${{ inputs.cargo_args }} -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace ${{ inputs.cargo_args }}
+
+      - name: Test
+        run: cargo test --workspace ${{ inputs.cargo_args }} ${{ inputs.test_args }}

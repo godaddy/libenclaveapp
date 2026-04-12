@@ -1,0 +1,345 @@
+name: Reusable Release
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Application name (e.g., "sshenc", "awsenc", "sso-jwt")'
+        required: true
+        type: string
+      targets:
+        description: 'JSON array of build targets'
+        required: false
+        default: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]'
+        type: string
+      unix_binaries:
+        description: 'Space-separated list of Unix binaries to package'
+        required: true
+        type: string
+      unix_libs:
+        description: 'Space-separated list of Unix dylibs to package (optional)'
+        required: false
+        default: ''
+        type: string
+      windows_binaries:
+        description: 'Space-separated list of Windows .exe binaries to package'
+        required: true
+        type: string
+      windows_dlls:
+        description: 'Space-separated list of Windows .dll files to package (optional)'
+        required: false
+        default: ''
+        type: string
+      wix_file:
+        description: 'Path to WiX installer definition (e.g., "installer/app.wxs"). Empty to skip MSI.'
+        required: false
+        default: ''
+        type: string
+      cargo_build_args:
+        description: 'Extra args for cargo build (e.g., "--features mock")'
+        required: false
+        default: ''
+        type: string
+      test_args:
+        description: 'Extra args for cargo test (e.g., "--features mock"). Empty to skip tests.'
+        required: false
+        default: ''
+        type: string
+      homebrew_tap_repo:
+        description: 'Homebrew tap repo (e.g., "jgowdy/homebrew-sshenc"). Empty to skip.'
+        required: false
+        default: ''
+        type: string
+      homebrew_formula_class:
+        description: 'Ruby class name for Homebrew formula (e.g., "Sshenc")'
+        required: false
+        default: ''
+        type: string
+      homebrew_description:
+        description: 'Homebrew formula desc string'
+        required: false
+        default: ''
+        type: string
+      homebrew_caveats:
+        description: 'Homebrew formula caveats text (optional)'
+        required: false
+        default: ''
+        type: string
+      scoop_bucket_repo:
+        description: 'Scoop bucket repo (e.g., "jgowdy/scoop-sshenc"). Empty to skip.'
+        required: false
+        default: ''
+        type: string
+      scoop_description:
+        description: 'Scoop manifest description'
+        required: false
+        default: ''
+        type: string
+      has_winget:
+        description: 'Whether to generate winget manifests'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: false
+      SCOOP_BUCKET_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.target == 'x86_64-pc-windows-msvc' && 'windows-latest' || (matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-latest' || 'macos-latest') }}
+    strategy:
+      matrix:
+        target: ${{ fromJson(inputs.targets) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Clone libenclaveapp
+        run: git clone --depth 1 https://github.com/jgowdy/libenclaveapp.git ../libenclaveapp
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Set version from tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Patch Cargo.toml version (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          sed -i '' "s/^version = \".*\"/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml 2>/dev/null || \
+          sed -i "s/^version = \".*\"/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
+
+      - name: Patch Cargo.toml version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"${{ steps.version.outputs.version }}`"" | Set-Content Cargo.toml
+
+      - name: Build release
+        run: cargo build --workspace --release --target ${{ matrix.target }} ${{ inputs.cargo_build_args }}
+
+      - name: Test
+        if: inputs.test_args != ''
+        run: cargo test --workspace ${{ inputs.test_args }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          for bin in ${{ inputs.unix_binaries }}; do
+            cp "target/${{ matrix.target }}/release/${bin}" dist/
+          done
+          for lib in ${{ inputs.unix_libs }}; do
+            cp "target/${{ matrix.target }}/release/${lib}" dist/ 2>/dev/null || true
+          done
+          tar czf "${{ inputs.app_name }}-${{ matrix.target }}.tar.gz" -C dist .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          foreach ($bin in "${{ inputs.windows_binaries }}".Split(" ")) {
+            Copy-Item "target/${{ matrix.target }}/release/$bin" dist/
+          }
+          foreach ($dll in "${{ inputs.windows_dlls }}".Split(" ")) {
+            if ($dll -and (Test-Path "target/${{ matrix.target }}/release/$dll")) {
+              Copy-Item "target/${{ matrix.target }}/release/$dll" dist/
+            }
+          }
+          Compress-Archive -Path dist/* -DestinationPath "${{ inputs.app_name }}-${{ matrix.target }}.zip"
+
+      - name: Build MSI (Windows)
+        if: runner.os == 'Windows' && inputs.wix_file != ''
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.*
+          wix build "${{ inputs.wix_file }}" -o "${{ inputs.app_name }}-${{ matrix.target }}.msi" -bindpath .
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ inputs.app_name }}-${{ matrix.target }}
+          path: ${{ inputs.app_name }}-${{ matrix.target }}.*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          files=()
+          for f in artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*; do
+            files+=("$f")
+          done
+          gh release create "$tag" --title "$tag" --generate-notes "${files[@]}"
+
+  update-packages:
+    name: Update Package Managers
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Compute SHA256s
+        id: sha
+        run: |
+          for f in artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.tar.gz \
+                   artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.zip \
+                   artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.msi; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            # Convert filename to output-safe key: replace dots and hyphens with underscores
+            key=$(echo "$name" | sed 's/[^a-zA-Z0-9]/_/g')
+            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
+            echo "  ${name}: ${sha}"
+          done
+
+      - name: Update Homebrew tap
+        if: inputs.homebrew_tap_repo != ''
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          app="${{ inputs.app_name }}"
+
+          arm_sha=$(sha256sum "artifacts/${app}-aarch64-apple-darwin/${app}-aarch64-apple-darwin.tar.gz" | cut -d' ' -f1)
+          intel_sha=$(sha256sum "artifacts/${app}-x86_64-apple-darwin/${app}-x86_64-apple-darwin.tar.gz" | cut -d' ' -f1)
+
+          git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${{ inputs.homebrew_tap_repo }}.git" /tmp/tap
+
+          # Build the install lines from unix_binaries
+          install_lines=""
+          for bin in ${{ inputs.unix_binaries }}; do
+            install_lines="${install_lines}    bin.install \"${bin}\"\n"
+          done
+          for lib in ${{ inputs.unix_libs }}; do
+            install_lines="${install_lines}    lib.install \"${lib}\"\n"
+          done
+
+          cat > /tmp/tap/Formula/${app}.rb << FORMULA
+          class ${{ inputs.homebrew_formula_class }} < Formula
+            desc "${{ inputs.homebrew_description }}"
+            homepage "https://github.com/jgowdy/${app}"
+            version "${version}"
+            license "MIT"
+
+            on_arm do
+              url "https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-aarch64-apple-darwin.tar.gz"
+              sha256 "${arm_sha}"
+            end
+
+            on_intel do
+              url "https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-x86_64-apple-darwin.tar.gz"
+              sha256 "${intel_sha}"
+            end
+
+            depends_on :macos
+
+            def install
+          $(echo -e "${install_lines}")    end
+
+            ${{ inputs.homebrew_caveats != '' && format('def caveats\n      <<~EOS\n        {0}\n      EOS\n    end', inputs.homebrew_caveats) || '' }}
+
+            test do
+              assert_match "${app}", shell_output("\#{bin}/${app} --help 2>&1", 2)
+            end
+          end
+          FORMULA
+          sed -i 's/^          //' /tmp/tap/Formula/${app}.rb
+
+          cd /tmp/tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Update ${app} to ${tag}"
+          git push
+
+      - name: Update Scoop bucket
+        if: inputs.scoop_bucket_repo != ''
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          app="${{ inputs.app_name }}"
+
+          win_sha=$(sha256sum "artifacts/${app}-x86_64-pc-windows-msvc/${app}-x86_64-pc-windows-msvc.zip" | cut -d' ' -f1)
+
+          git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/${{ inputs.scoop_bucket_repo }}.git" /tmp/bucket
+
+          # Build bin array from windows_binaries
+          bin_json=""
+          for bin in ${{ inputs.windows_binaries }}; do
+            [ -n "$bin_json" ] && bin_json="${bin_json},"
+            bin_json="${bin_json}\"${bin}\""
+          done
+
+          cat > /tmp/bucket/bucket/${app}.json << SCOOP
+          {
+              "version": "${version}",
+              "description": "${{ inputs.scoop_description }}",
+              "homepage": "https://github.com/jgowdy/${app}",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-x86_64-pc-windows-msvc.zip",
+                      "hash": "${win_sha}"
+                  }
+              },
+              "bin": [${bin_json}]
+          }
+          SCOOP
+          sed -i 's/^          //' /tmp/bucket/bucket/${app}.json
+
+          cd /tmp/bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Update ${app} to ${tag}"
+          git push
+
+      - name: Generate winget manifest
+        if: inputs.has_winget
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          app="${{ inputs.app_name }}"
+          msi_sha=$(sha256sum "artifacts/${app}-x86_64-pc-windows-msvc/${app}-x86_64-pc-windows-msvc.msi" 2>/dev/null | cut -d' ' -f1 | tr 'a-f' 'A-F')
+
+          mkdir -p /tmp/winget
+          for f in winget/*.yaml; do
+            [ -f "$f" ] || continue
+            sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
+                -e "s|InstallerUrl: .*|InstallerUrl: https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-x86_64-pc-windows-msvc.msi|" \
+                -e "s/InstallerSha256: .*/InstallerSha256: ${msi_sha}/" \
+                -e "s|ReleaseNotesUrl: .*|ReleaseNotesUrl: https://github.com/jgowdy/${app}/releases/tag/${tag}|" \
+              "$f" > "/tmp/winget/$(basename "$f")"
+          done
+
+      - name: Upload winget manifest
+        if: inputs.has_winget
+        uses: actions/upload-artifact@v5
+        with:
+          name: winget-manifest
+          path: /tmp/winget/
