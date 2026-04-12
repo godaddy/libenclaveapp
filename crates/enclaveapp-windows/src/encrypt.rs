@@ -54,6 +54,7 @@ const MIN_CIPHERTEXT_LEN: usize = 1 + 65 + GCM_NONCE_SIZE + GCM_TAG_SIZE;
 /// Windows TPM-backed ECDH P-256 encryptor (ECIES).
 pub struct TpmEncryptor {
     app_name: String,
+    keys_dir_override: Option<std::path::PathBuf>,
 }
 
 impl TpmEncryptor {
@@ -61,11 +62,22 @@ impl TpmEncryptor {
     pub fn new(app_name: &str) -> Self {
         TpmEncryptor {
             app_name: app_name.to_string(),
+            keys_dir_override: None,
+        }
+    }
+
+    /// Create an encryptor with a custom keys directory path.
+    pub fn with_keys_dir(app_name: &str, keys_dir: std::path::PathBuf) -> Self {
+        TpmEncryptor {
+            app_name: app_name.to_string(),
+            keys_dir_override: Some(keys_dir),
         }
     }
 
     fn keys_dir(&self) -> std::path::PathBuf {
-        metadata::keys_dir(&self.app_name)
+        self.keys_dir_override
+            .clone()
+            .unwrap_or_else(|| metadata::keys_dir(&self.app_name))
     }
 }
 

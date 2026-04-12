@@ -20,6 +20,14 @@ impl SecureEnclaveSigner {
             config: KeychainConfig::new(app_name),
         }
     }
+
+    /// Create a signer with a custom keys directory path.
+    /// Use this for backward compatibility with existing key storage locations.
+    pub fn with_keys_dir(app_name: &str, keys_dir: std::path::PathBuf) -> Self {
+        SecureEnclaveSigner {
+            config: KeychainConfig::with_keys_dir(app_name, keys_dir),
+        }
+    }
 }
 
 impl EnclaveKeyManager for SecureEnclaveSigner {

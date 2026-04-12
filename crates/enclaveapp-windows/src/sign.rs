@@ -20,6 +20,7 @@ const ECDSA_P256_ALGORITHM: &str = "ECDSA_P256";
 /// Windows TPM-backed ECDSA P-256 signer.
 pub struct TpmSigner {
     app_name: String,
+    keys_dir_override: Option<std::path::PathBuf>,
 }
 
 impl TpmSigner {
@@ -27,11 +28,22 @@ impl TpmSigner {
     pub fn new(app_name: &str) -> Self {
         TpmSigner {
             app_name: app_name.to_string(),
+            keys_dir_override: None,
+        }
+    }
+
+    /// Create a signer with a custom keys directory path.
+    pub fn with_keys_dir(app_name: &str, keys_dir: std::path::PathBuf) -> Self {
+        TpmSigner {
+            app_name: app_name.to_string(),
+            keys_dir_override: Some(keys_dir),
         }
     }
 
     fn keys_dir(&self) -> std::path::PathBuf {
-        metadata::keys_dir(&self.app_name)
+        self.keys_dir_override
+            .clone()
+            .unwrap_or_else(|| metadata::keys_dir(&self.app_name))
     }
 }
 

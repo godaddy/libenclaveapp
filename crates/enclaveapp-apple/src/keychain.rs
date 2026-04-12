@@ -14,17 +14,31 @@ use std::path::PathBuf;
 /// Configuration for keychain operations, scoped to an application.
 pub struct KeychainConfig {
     pub app_name: String,
+    /// Optional override for the keys directory. If None, uses the standard
+    /// platform path (~/.config/<app_name>/keys/ on Unix).
+    pub keys_dir_override: Option<PathBuf>,
 }
 
 impl KeychainConfig {
     pub fn new(app_name: &str) -> Self {
         KeychainConfig {
             app_name: app_name.to_string(),
+            keys_dir_override: None,
+        }
+    }
+
+    /// Create a config with a custom keys directory path.
+    pub fn with_keys_dir(app_name: &str, keys_dir: PathBuf) -> Self {
+        KeychainConfig {
+            app_name: app_name.to_string(),
+            keys_dir_override: Some(keys_dir),
         }
     }
 
     pub fn keys_dir(&self) -> PathBuf {
-        enclaveapp_core::metadata::keys_dir(&self.app_name)
+        self.keys_dir_override
+            .clone()
+            .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&self.app_name))
     }
 }
 

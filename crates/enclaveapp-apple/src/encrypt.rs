@@ -23,6 +23,13 @@ impl SecureEnclaveEncryptor {
             config: KeychainConfig::new(app_name),
         }
     }
+
+    /// Create an encryptor with a custom keys directory path.
+    pub fn with_keys_dir(app_name: &str, keys_dir: std::path::PathBuf) -> Self {
+        SecureEnclaveEncryptor {
+            config: KeychainConfig::with_keys_dir(app_name, keys_dir),
+        }
+    }
 }
 
 impl EnclaveKeyManager for SecureEnclaveEncryptor {
