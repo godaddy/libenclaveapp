@@ -104,6 +104,7 @@ pub fn eccpublic_blob_to_sec1(blob: &[u8]) -> enclaveapp_core::Result<Vec<u8>> {
 ///
 /// `magic` should be the appropriate BCRYPT_ECDH_PUBLIC_P256_MAGIC or
 /// BCRYPT_ECDSA_PUBLIC_P256_MAGIC value.
+#[cfg_attr(not(feature = "encryption"), allow(dead_code))]
 pub fn sec1_to_eccpublic_blob(point: &[u8], magic: u32) -> enclaveapp_core::Result<Vec<u8>> {
     if point.len() != 65 || point[0] != 0x04 {
         return Err(Error::KeyOperation {

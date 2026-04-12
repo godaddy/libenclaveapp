@@ -6,10 +6,11 @@
 use serde::{Deserialize, Serialize};
 
 /// Key type determines what crypto operations are available.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyType {
     /// ECDSA P-256 signing key (SSH keys, git commit signing).
+    #[default]
     Signing,
     /// ECDH P-256 key agreement key (ECIES encryption for credential caching).
     Encryption,

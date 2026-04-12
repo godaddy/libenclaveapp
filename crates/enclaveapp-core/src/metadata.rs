@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 pub struct KeyMeta {
     /// Key label (unique identifier within the app).
     pub label: String,
-    /// Type of key (signing or encryption).
+    /// Type of key (signing or encryption). Defaults to Signing for backward
+    /// compatibility with metadata files created before this field existed.
+    #[serde(default)]
     pub key_type: crate::KeyType,
     /// Access control policy.
     #[serde(default)]
