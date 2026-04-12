@@ -278,9 +278,11 @@ fn copy_linux_binary(
     // Make executable via WSL
     if let Some(linux_home) = find_linux_home(distro_name) {
         let linux_path = format!("{linux_home}/{target}");
-        let _ = std::process::Command::new("wsl")
-            .args(["-d", distro_name, "--", "chmod", "+x", &linux_path])
-            .status();
+        drop(
+            std::process::Command::new("wsl")
+                .args(["-d", distro_name, "--", "chmod", "+x", &linux_path])
+                .status(),
+        );
     }
 
     actions.push(format!("Installed binary to ~/{target}"));
