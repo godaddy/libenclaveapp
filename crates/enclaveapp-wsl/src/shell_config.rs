@@ -1,0 +1,434 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! Managed block injection/removal for shell config files.
+//!
+//! Supports injecting and removing comment-delimited blocks in `.bashrc`,
+//! `.zshrc`, `.profile`, etc. Each block is parameterized by application name
+//! so multiple enclave apps can coexist without conflicts.
+
+use enclaveapp_core::Result;
+use std::path::Path;
+
+/// Configuration for managed shell blocks.
+pub struct ShellBlockConfig {
+    /// Application name, used in markers.
+    pub app_name: String,
+    /// The content to inject between markers (the shell script body).
+    pub block_content: String,
+}
+
+impl ShellBlockConfig {
+    pub fn new(app_name: &str, block_content: &str) -> Self {
+        ShellBlockConfig {
+            app_name: app_name.to_string(),
+            block_content: block_content.to_string(),
+        }
+    }
+
+    fn begin_marker(&self) -> String {
+        format!("# BEGIN {} managed block -- do not edit", self.app_name)
+    }
+
+    fn end_marker(&self) -> String {
+        format!("# END {} managed block", self.app_name)
+    }
+
+    fn full_block(&self) -> String {
+        format!(
+            "{}\n{}\n{}",
+            self.begin_marker(),
+            self.block_content,
+            self.end_marker()
+        )
+    }
+}
+
+/// Result of an install operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InstallResult {
+    Installed,
+    AlreadyPresent,
+}
+
+/// Result of an uninstall operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UninstallResult {
+    Removed,
+    NotPresent,
+}
+
+/// Check if a managed block is present in the given file.
+pub fn is_installed(path: &Path, config: &ShellBlockConfig) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(path)?;
+    Ok(content.contains(&config.begin_marker()))
+}
+
+/// Install a managed block into a shell config file.
+///
+/// Appends the block at the end of the file, separated by a blank line from
+/// any existing content. Creates the file and parent directories if needed.
+///
+/// Returns `AlreadyPresent` if the block marker is already found.
+pub fn install_block(path: &Path, config: &ShellBlockConfig) -> Result<InstallResult> {
+    let content = if path.exists() {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+
+    // Normalize line endings
+    let content = content.replace("\r\n", "\n");
+
+    if content.contains(&config.begin_marker()) {
+        return Ok(InstallResult::AlreadyPresent);
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut output = content;
+    // Ensure existing content ends with newline
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    // Add blank separator line if there's existing content
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&config.full_block());
+    output.push('\n');
+
+    std::fs::write(path, &output)?;
+    Ok(InstallResult::Installed)
+}
+
+/// Remove a managed block from a shell config file.
+///
+/// Removes everything between (and including) the BEGIN and END markers,
+/// plus any single blank line immediately before the block.
+pub fn uninstall_block(path: &Path, config: &ShellBlockConfig) -> Result<UninstallResult> {
+    if !path.exists() {
+        return Ok(UninstallResult::NotPresent);
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let content = content.replace("\r\n", "\n");
+
+    if !content.contains(&config.begin_marker()) {
+        return Ok(UninstallResult::NotPresent);
+    }
+
+    let begin = &config.begin_marker();
+    let end = &config.end_marker();
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut new_lines: Vec<&str> = Vec::new();
+    let mut in_block = false;
+
+    for line in &lines {
+        if line.contains(begin.as_str()) {
+            in_block = true;
+            // Remove a trailing blank line before the block
+            if let Some(last) = new_lines.last() {
+                if last.is_empty() {
+                    new_lines.pop();
+                }
+            }
+            continue;
+        }
+        if in_block {
+            if line.contains(end.as_str()) {
+                in_block = false;
+            }
+            continue;
+        }
+        new_lines.push(line);
+    }
+
+    // Rebuild content
+    let mut result = new_lines.join("\n");
+    // Trim trailing whitespace but keep a final newline if file is non-empty
+    let trimmed = result.trim_end().to_string();
+    result = if trimmed.is_empty() {
+        trimmed
+    } else {
+        trimmed + "\n"
+    };
+
+    std::fs::write(path, &result)?;
+    Ok(UninstallResult::Removed)
+}
+
+/// Validate shell config syntax by running `bash -n` or `zsh -n` on the file.
+///
+/// Returns `Ok(())` if valid or if the shell is not available.
+/// Returns `Err` with details if the syntax check fails.
+pub fn validate_shell_syntax(path: &Path, shell: &str) -> Result<()> {
+    let output = std::process::Command::new(shell)
+        .arg("-n")
+        .arg(path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            Err(enclaveapp_core::Error::Config(format!(
+                "{shell} syntax check failed: {stderr}"
+            )))
+        }
+        Err(_) => {
+            // Shell not available, skip validation
+            Ok(())
+        }
+    }
+}
+
+/// Shell config file candidates in priority order.
+pub fn shell_config_paths(home: &Path) -> Vec<(&'static str, std::path::PathBuf)> {
+    vec![
+        ("bash", home.join(".bashrc")),
+        ("zsh", home.join(".zshrc")),
+        ("bash", home.join(".profile")),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_dir(name: &str) -> PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("enclaveapp-wsl-test-{pid}-{id}-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_config() -> ShellBlockConfig {
+        ShellBlockConfig::new(
+            "sshenc",
+            "export SSH_AUTH_SOCK=\"$HOME/.sshenc/agent.sock\"",
+        )
+    }
+
+    #[test]
+    fn test_install_new_file() {
+        let dir = test_dir("install-new");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        let result = install_block(&path, &config).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&config.begin_marker()));
+        assert!(content.contains("SSH_AUTH_SOCK"));
+        assert!(content.contains(&config.end_marker()));
+        // Should end with newline
+        assert!(content.ends_with('\n'));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_existing_file() {
+        let dir = test_dir("install-existing");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        std::fs::write(&path, "# existing config\nexport PATH=/usr/bin\n").unwrap();
+
+        let result = install_block(&path, &config).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("# existing config"));
+        assert!(content.contains(&config.begin_marker()));
+        // Blank separator line between existing content and block
+        assert!(content.contains("PATH=/usr/bin\n\n"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_idempotent() {
+        let dir = test_dir("install-idempotent");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        let result1 = install_block(&path, &config).unwrap();
+        assert_eq!(result1, InstallResult::Installed);
+        let content_first = std::fs::read_to_string(&path).unwrap();
+
+        let result2 = install_block(&path, &config).unwrap();
+        assert_eq!(result2, InstallResult::AlreadyPresent);
+        let content_second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(content_first, content_second);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_removes_block() {
+        let dir = test_dir("uninstall-removes");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        install_block(&path, &config).unwrap();
+
+        let result = uninstall_block(&path, &config).unwrap();
+        assert_eq!(result, UninstallResult::Removed);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains(&config.begin_marker()));
+        assert!(!content.contains(&config.end_marker()));
+        assert!(!content.contains("SSH_AUTH_SOCK"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_not_present() {
+        let dir = test_dir("uninstall-not-present");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        std::fs::write(&path, "# just a comment\n").unwrap();
+
+        let result = uninstall_block(&path, &config).unwrap();
+        assert_eq!(result, UninstallResult::NotPresent);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_missing_file() {
+        let config = test_config();
+        let result = uninstall_block(Path::new("/nonexistent/path/.bashrc"), &config).unwrap();
+        assert_eq!(result, UninstallResult::NotPresent);
+    }
+
+    #[test]
+    fn test_is_installed_true() {
+        let dir = test_dir("is-installed-true");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        install_block(&path, &config).unwrap();
+        assert!(is_installed(&path, &config).unwrap());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_is_installed_false() {
+        let dir = test_dir("is-installed-false");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        std::fs::write(&path, "").unwrap();
+        assert!(!is_installed(&path, &config).unwrap());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_preserves_other_content() {
+        let dir = test_dir("uninstall-preserves");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        std::fs::write(&path, "# before\nexport FOO=bar\n").unwrap();
+        install_block(&path, &config).unwrap();
+
+        uninstall_block(&path, &config).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# before"));
+        assert!(content.contains("export FOO=bar"));
+        assert!(!content.contains(&config.begin_marker()));
+        assert!(!content.contains("SSH_AUTH_SOCK"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_block_content() {
+        let dir = test_dir("block-content");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        install_block(&path, &config).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Verify exact structure: begin marker, content, end marker
+        let begin = content.find(&config.begin_marker()).unwrap();
+        let end = content.find(&config.end_marker()).unwrap();
+        assert!(begin < end);
+
+        let block_body = &content[begin + config.begin_marker().len()..end];
+        assert!(block_body.contains("SSH_AUTH_SOCK"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_custom_app_name() {
+        let sshenc = ShellBlockConfig::new("sshenc", "# sshenc stuff");
+        let awsenc = ShellBlockConfig::new("awsenc", "# awsenc stuff");
+
+        assert_ne!(sshenc.begin_marker(), awsenc.begin_marker());
+        assert_ne!(sshenc.end_marker(), awsenc.end_marker());
+
+        assert!(sshenc.begin_marker().contains("sshenc"));
+        assert!(awsenc.begin_marker().contains("awsenc"));
+    }
+
+    #[test]
+    fn test_crlf_normalization() {
+        let dir = test_dir("crlf");
+        let path = dir.join(".bashrc");
+        let config = test_config();
+
+        // Write file with CRLF line endings
+        std::fs::write(&path, "# existing\r\nexport FOO=bar\r\n").unwrap();
+
+        let result = install_block(&path, &config).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // CRLF should have been normalized to LF
+        assert!(!content.contains("\r\n"));
+        assert!(content.contains("# existing"));
+        assert!(content.contains(&config.begin_marker()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_shell_config_paths() {
+        let home = PathBuf::from("/home/testuser");
+        let paths = shell_config_paths(&home);
+
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0].0, "bash");
+        assert_eq!(paths[0].1, home.join(".bashrc"));
+        assert_eq!(paths[1].0, "zsh");
+        assert_eq!(paths[1].1, home.join(".zshrc"));
+        assert_eq!(paths[2].0, "bash");
+        assert_eq!(paths[2].1, home.join(".profile"));
+    }
+}

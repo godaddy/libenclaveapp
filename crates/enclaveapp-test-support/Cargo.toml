@@ -1,0 +1,13 @@
+[package]
+name = "enclaveapp-test-support"
+description = "Mock backends for testing libenclaveapp without hardware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }

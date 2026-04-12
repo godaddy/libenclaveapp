@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "crates/enclaveapp-core",
+    "crates/enclaveapp-apple",
+    "crates/enclaveapp-windows",
+    "crates/enclaveapp-wsl",
+    "crates/enclaveapp-bridge",
+    "crates/enclaveapp-test-support",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+repository = "https://github.com/jgowdy/libenclaveapp"
+
+[workspace.dependencies]
+# Internal crates
+enclaveapp-core = { path = "crates/enclaveapp-core" }
+enclaveapp-apple = { path = "crates/enclaveapp-apple" }
+enclaveapp-windows = { path = "crates/enclaveapp-windows" }
+enclaveapp-wsl = { path = "crates/enclaveapp-wsl" }
+enclaveapp-bridge = { path = "crates/enclaveapp-bridge" }
+enclaveapp-test-support = { path = "crates/enclaveapp-test-support" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+toml = "0.8"
+dirs = "6"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Encoding
+base64 = "0.22"
+
+# Crypto
+sha2 = "0.10"
+
+# Windows
+windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+
+# System
+libc = "0.2"
+
+# Testing
+rand = "0.8"

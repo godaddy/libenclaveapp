@@ -1,0 +1,23 @@
+[package]
+name = "enclaveapp-windows"
+description = "Windows TPM 2.0 backend for libenclaveapp (CNG/NCrypt)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+signing = ["sha2"]
+encryption = ["sha2"]
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
