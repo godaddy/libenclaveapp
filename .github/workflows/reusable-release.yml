@@ -62,7 +62,7 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.target == 'x86_64-pc-windows-msvc' && 'windows-latest' || (matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-latest' || 'macos-latest') }}
+    runs-on: ${{ contains(matrix.target, 'windows') && 'windows-latest' || (contains(matrix.target, 'linux') && 'ubuntu-latest' || 'macos-latest') }}
     strategy:
       matrix:
         target: ${{ fromJson(inputs.targets) }}
@@ -72,9 +72,13 @@ jobs:
       - name: Clone libenclaveapp
         run: git clone --depth 1 https://github.com/jgowdy/libenclaveapp.git ../libenclaveapp
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux' && inputs.linux_deps != ''
+      - name: Install system dependencies (Linux glibc)
+        if: runner.os == 'Linux' && inputs.linux_deps != '' && !contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.linux_deps }}
+
+      - name: Install musl toolchain (Linux musl)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -109,16 +113,21 @@ jobs:
         run: |
           (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"${{ steps.version.outputs.version }}`"" | Set-Content Cargo.toml
 
+      # CI checks (fmt, clippy, test) run on native targets only.
+      # Cross-compile targets (arm64 Windows, musl) just build.
       - name: Check formatting
+        if: "!contains(matrix.target, 'aarch64-pc-windows') && !contains(matrix.target, 'musl')"
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        if: "!contains(matrix.target, 'aarch64-pc-windows') && !contains(matrix.target, 'musl')"
         run: cargo clippy --workspace ${{ inputs.cargo_build_args }} -- -D warnings
 
       - name: Build release
         run: cargo build --workspace --release --target ${{ matrix.target }} ${{ inputs.cargo_build_args }}
 
       - name: Test
+        if: "!contains(matrix.target, 'aarch64-pc-windows') && !contains(matrix.target, 'musl')"
         run: cargo test --workspace ${{ inputs.cargo_build_args }}
 
       - name: Package (Unix)
