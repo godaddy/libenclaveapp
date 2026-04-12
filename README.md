@@ -1,6 +1,6 @@
 # libenclaveapp
 
-Shared Rust library for hardware-backed key management across macOS (Secure Enclave) and Windows (TPM 2.0).
+Shared Rust library for hardware-backed key management across macOS (Secure Enclave), Windows (TPM 2.0), and Linux (TPM 2.0 / software fallback).
 
 ## What it does
 
@@ -19,7 +19,9 @@ Three applications currently consume this library:
 | [enclaveapp-core](crates/enclaveapp-core/) | Traits, types, metadata, config helpers, error types |
 | [enclaveapp-apple](crates/enclaveapp-apple/) | macOS Secure Enclave via CryptoKit Swift bridge |
 | [enclaveapp-windows](crates/enclaveapp-windows/) | Windows TPM 2.0 via CNG (NCrypt/BCrypt) |
-| [enclaveapp-wsl](crates/enclaveapp-wsl/) | WSL detection and shell configuration |
+| [enclaveapp-linux-tpm](crates/enclaveapp-linux-tpm/) | Linux TPM 2.0 via tss-esapi |
+| [enclaveapp-software](crates/enclaveapp-software/) | Software-only P-256 fallback (no hardware required) |
+| [enclaveapp-wsl](crates/enclaveapp-wsl/) | WSL detection, shell configuration, install helpers |
 | [enclaveapp-bridge](crates/enclaveapp-bridge/) | JSON-RPC TPM bridge for WSL |
 | [enclaveapp-test-support](crates/enclaveapp-test-support/) | Mock backend for testing without hardware |
 
@@ -41,20 +43,22 @@ enclaveapp-apple = { version = "0.1", features = ["encryption"] }
                   +-------------------+
                   | enclaveapp-core   |  Traits, types, metadata
                   +-------------------+
-                   /        |         \
-    +----------------+  +------------------+  +----------------+
-    | enclaveapp-    |  | enclaveapp-      |  | enclaveapp-    |
-    | apple          |  | windows          |  | test-support   |
-    | (macOS SE)     |  | (Windows TPM)    |  | (mock)         |
-    +----------------+  +------------------+  +----------------+
-                              |
-                  +-------------------+
-                  | enclaveapp-bridge |  WSL <-> Windows TPM
-                  +-------------------+
+                 /     |      |       \
+  +------------+  +----------+  +----------+  +-------------+
+  | enclaveapp-|  |enclaveapp|  |enclaveapp|  | enclaveapp- |
+  | apple      |  | -windows |  | -linux-  |  | software    |
+  | (macOS SE) |  | (Win TPM)|  |   tpm    |  | (fallback)  |
+  +------------+  +----------+  +----------+  +-------------+
+                       |
+               +-------------------+
+               | enclaveapp-bridge |  WSL <-> Windows TPM
+               +-------------------+
 
-    +-------------------+
-    | enclaveapp-wsl    |  WSL detection, shell config
-    +-------------------+
+  +-------------------+          +-------------------+
+  | enclaveapp-wsl    |          | enclaveapp-test-  |
+  | WSL detection,    |          | support (mock)    |
+  | shell config      |          |                   |
+  +-------------------+          +-------------------+
 ```
 
 ### Key traits
@@ -89,7 +93,7 @@ trait EnclaveEncryptor: EnclaveKeyManager {
 
 ## Building
 
-Requires Rust 1.75+. macOS builds require Xcode (for swiftc).
+Requires Rust 1.75+. macOS builds require Xcode (for swiftc). Linux TPM builds require tpm2-tss development libraries.
 
 ```bash
 # macOS
@@ -98,7 +102,10 @@ cargo build --workspace --features enclaveapp-apple/signing,enclaveapp-apple/enc
 # Windows
 cargo build --workspace --features enclaveapp-windows/signing,enclaveapp-windows/encryption
 
-# Tests (143 total)
+# Linux (with TPM)
+cargo build --workspace --features enclaveapp-linux-tpm/signing,enclaveapp-linux-tpm/encryption
+
+# Tests
 cargo test --workspace
 
 # Lint
@@ -111,6 +118,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 |---|---|---|---|---|
 | macOS | Secure Enclave | Yes | Yes | CryptoKit via Swift bridge, ad-hoc signing OK |
 | Windows | TPM 2.0 | Yes | Yes | CNG NCrypt/BCrypt, Windows Hello for auth |
+| Linux | TPM 2.0 | Yes | Yes | tss-esapi, /dev/tpmrm0 |
+| Linux (no TPM) | Software | Yes | Yes | P-256 on disk, no hardware isolation |
 | WSL | Windows TPM | No* | Yes | Via JSON-RPC bridge to Windows host |
 
 *WSL signing is possible through the sshenc agent bridge (socat + npiperelay).
