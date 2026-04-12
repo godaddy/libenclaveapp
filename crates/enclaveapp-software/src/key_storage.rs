@@ -27,13 +27,13 @@ const GCM_TAG_SIZE: usize = 16;
 const RAW_KEY_SIZE: usize = 32;
 
 /// KEK size in bytes (AES-256).
-#[cfg(any(feature = "keyring-storage", test))]
+#[cfg(any(all(feature = "keyring-storage", target_env = "gnu"), test))]
 const KEK_SIZE: usize = 32;
 
 /// Minimum encrypted key file size: version(1) + nonce(12) + encrypted_key(32) + tag(16).
 const MIN_ENCRYPTED_FILE_SIZE: usize = 1 + GCM_NONCE_SIZE + RAW_KEY_SIZE + GCM_TAG_SIZE;
 
-#[cfg(feature = "keyring-storage")]
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
 static UNENCRYPTED_WARNING: std::sync::Once = std::sync::Once::new();
 
 /// Software keys are always available.
@@ -78,7 +78,7 @@ impl SoftwareConfig {
 }
 
 /// Probe whether the system keyring is functional.
-#[cfg(feature = "keyring-storage")]
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
 fn keyring_available(app_name: &str) -> bool {
     let entry = match keyring::Entry::new(app_name, "__keyring_probe__") {
         Ok(e) => e,
@@ -101,17 +101,17 @@ fn save_private_key(
     secret_bytes: &[u8],
     label: &str,
 ) -> Result<()> {
-    #[cfg(feature = "keyring-storage")]
+    #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
     if config.use_keyring && keyring_available(&config.app_name) {
         return save_encrypted(&config.app_name, key_path, secret_bytes, label);
     }
 
-    #[cfg(feature = "keyring-storage")]
+    #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
     if config.use_keyring {
         warn_unencrypted();
     }
 
-    #[cfg(not(feature = "keyring-storage"))]
+    #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
     let _ = (config, label); // suppress unused warnings when keyring-storage is disabled
 
     metadata::atomic_write(key_path, secret_bytes)?;
@@ -121,7 +121,7 @@ fn save_private_key(
 
 /// Encrypt the secret key with a random KEK, store the KEK in the keyring,
 /// and write the encrypted key to disk.
-#[cfg(feature = "keyring-storage")]
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
 fn save_encrypted(
     app_name: &str,
     key_path: &std::path::Path,
@@ -190,11 +190,11 @@ fn load_private_key_bytes(
 
     // Encrypted format: version(1) + nonce(12) + encrypted_key(32) + tag(16) = 61
     if bytes.len() >= MIN_ENCRYPTED_FILE_SIZE && bytes[0] == ENCRYPTED_KEY_VERSION {
-        #[cfg(feature = "keyring-storage")]
+        #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
         {
             return decrypt_private_key(app_name, &bytes, label);
         }
-        #[cfg(not(feature = "keyring-storage"))]
+        #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
         {
             let _ = (app_name, label);
             return Err(Error::KeyOperation {
@@ -218,7 +218,7 @@ fn load_private_key_bytes(
 }
 
 /// Decrypt an encrypted key file using the KEK from the keyring.
-#[cfg(feature = "keyring-storage")]
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
 fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<Vec<u8>> {
     use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 
@@ -261,7 +261,7 @@ fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<
 
 /// Delete the keyring entry for a key, ignoring errors (the entry may not exist
 /// if the key was stored unencrypted).
-#[cfg(feature = "keyring-storage")]
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
 fn delete_keyring_entry(app_name: &str, label: &str) {
     if let Ok(entry) = keyring::Entry::new(app_name, label) {
         drop(entry.delete_credential());
@@ -269,7 +269,7 @@ fn delete_keyring_entry(app_name: &str, label: &str) {
 }
 
 /// Print a one-time warning that keys are stored unencrypted.
-#[cfg(feature = "keyring-storage")]
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
 #[allow(clippy::print_stderr)]
 fn warn_unencrypted() {
     UNENCRYPTED_WARNING.call_once(|| {
@@ -363,7 +363,7 @@ pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     let _lock = metadata::DirLock::acquire(&dir)?;
 
     // Remove the keyring entry (ignore errors -- may not exist)
-    #[cfg(feature = "keyring-storage")]
+    #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
     delete_keyring_entry(&config.app_name, label);
 
     // Remove the private key file
