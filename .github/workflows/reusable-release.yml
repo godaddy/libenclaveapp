@@ -10,7 +10,7 @@ on:
       targets:
         description: 'JSON array of build targets'
         required: false
-        default: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]'
+        default: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]'
         type: string
       unix_binaries:
         description: 'Space-separated Unix binaries to package'
@@ -41,12 +41,12 @@ on:
         default: '{}'
         type: string
       homebrew:
-        description: 'JSON: {"tap_repo":"","formula_class":"","description":""}. Empty string to skip.'
+        description: 'JSON: {"tap_repo":"","formula_class":"","description":""}. Empty to skip.'
         required: false
         default: ''
         type: string
       scoop:
-        description: 'JSON: {"bucket_repo":"","description":"","has_winget":false}. Empty string to skip.'
+        description: 'JSON: {"bucket_repo":"","description":"","has_winget":false}. Empty to skip.'
         required: false
         default: ''
         type: string
@@ -154,21 +154,60 @@ jobs:
           }
           Compress-Archive -Path dist/* -DestinationPath "${{ inputs.app_name }}-${{ matrix.target }}.zip"
 
-      - name: Build MSI (Windows)
-        if: runner.os == 'Windows' && inputs.wix_file != ''
-        shell: pwsh
-        run: |
-          dotnet tool install --global wix --version 5.*
-          wix build "${{ inputs.wix_file }}" -o "${{ inputs.app_name }}-${{ matrix.target }}.msi" -bindpath .
-
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ inputs.app_name }}-${{ matrix.target }}
           path: ${{ inputs.app_name }}-${{ matrix.target }}.*
 
+  msi:
+    name: Build MSI
+    needs: build
+    if: inputs.wix_file != ''
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.app_name }}-x86_64-pc-windows-msvc
+          path: win-artifact
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.app_name }}-x86_64-unknown-linux-gnu
+          path: linux-artifact
+
+      - name: Stage MSI contents
+        shell: pwsh
+        run: |
+          # Extract Windows binaries from zip
+          New-Item -ItemType Directory -Force -Path dist
+          Expand-Archive "win-artifact/${{ inputs.app_name }}-x86_64-pc-windows-msvc.zip" -DestinationPath dist
+
+          # Extract Linux binary from tarball for WSL bundling
+          New-Item -ItemType Directory -Force -Path linux-tmp
+          tar xzf "linux-artifact/${{ inputs.app_name }}-x86_64-unknown-linux-gnu.tar.gz" -C linux-tmp
+          # Copy the main Linux binary into dist as <app>-linux
+          $firstBin = "${{ inputs.unix_binaries }}".Split(" ")[0]
+          Copy-Item "linux-tmp/$firstBin" "dist/${{ inputs.app_name }}-linux"
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.*
+          wix build "${{ inputs.wix_file }}" -o "${{ inputs.app_name }}-x86_64-pc-windows-msvc.msi" -bindpath dist
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ inputs.app_name }}-msi
+          path: ${{ inputs.app_name }}-x86_64-pc-windows-msvc.msi
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, msi]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -183,8 +222,14 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           files=()
-          for f in artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*; do
-            files+=("$f")
+          # Collect all build artifacts
+          for f in artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.tar.gz \
+                   artifacts/${{ inputs.app_name }}-*/${{ inputs.app_name }}-*.zip; do
+            [ -f "$f" ] && files+=("$f")
+          done
+          # Collect MSI if it exists
+          for f in artifacts/${{ inputs.app_name }}-msi/${{ inputs.app_name }}-*.msi; do
+            [ -f "$f" ] && files+=("$f")
           done
           gh release create "$tag" --title "$tag" --generate-notes "${files[@]}"
 
@@ -222,7 +267,6 @@ jobs:
           extra='${{ inputs.extra_packaging }}'
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
           for lib in $unix_libs; do
-            # Homebrew is macOS-only, skip .so files (Linux)
             case "$lib" in *.so) continue ;; esac
             install_lines="${install_lines}    lib.install \"${lib}\"\n"
           done
@@ -316,7 +360,7 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
           app="${{ inputs.app_name }}"
-          msi_sha=$(sha256sum "artifacts/${app}-x86_64-pc-windows-msvc/${app}-x86_64-pc-windows-msvc.msi" 2>/dev/null | cut -d' ' -f1 | tr 'a-f' 'A-F')
+          msi_sha=$(sha256sum "artifacts/${app}-msi/${app}-x86_64-pc-windows-msvc.msi" 2>/dev/null | cut -d' ' -f1 | tr 'a-f' 'A-F')
 
           mkdir -p /tmp/winget
           for f in winget/*.yaml; do
