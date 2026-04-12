@@ -13,7 +13,6 @@ use enclaveapp_core::metadata::{self, KeyMeta};
 use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use p256::SecretKey;
 use std::path::PathBuf;
-use std::sync::Once;
 
 /// Version byte for encrypted key files.
 const ENCRYPTED_KEY_VERSION: u8 = 0x01;
@@ -28,12 +27,14 @@ const GCM_TAG_SIZE: usize = 16;
 const RAW_KEY_SIZE: usize = 32;
 
 /// KEK size in bytes (AES-256).
+#[cfg(any(feature = "keyring-storage", test))]
 const KEK_SIZE: usize = 32;
 
 /// Minimum encrypted key file size: version(1) + nonce(12) + encrypted_key(32) + tag(16).
 const MIN_ENCRYPTED_FILE_SIZE: usize = 1 + GCM_NONCE_SIZE + RAW_KEY_SIZE + GCM_TAG_SIZE;
 
-static UNENCRYPTED_WARNING: Once = Once::new();
+#[cfg(feature = "keyring-storage")]
+static UNENCRYPTED_WARNING: std::sync::Once = std::sync::Once::new();
 
 /// Software keys are always available.
 pub fn is_available() -> bool {
@@ -45,7 +46,8 @@ pub fn is_available() -> bool {
 pub struct SoftwareConfig {
     pub app_name: String,
     pub keys_dir_override: Option<PathBuf>,
-    /// Whether to attempt keyring-based encryption. Defaults to `true`.
+    /// Whether to attempt keyring-based encryption. Defaults to `true` when
+    /// the `keyring-storage` feature is enabled, `false` otherwise.
     /// Set to `false` for testing or environments where the keyring
     /// is known to be unavailable.
     pub use_keyring: bool,
@@ -56,7 +58,7 @@ impl SoftwareConfig {
         Self {
             app_name: app_name.to_string(),
             keys_dir_override: None,
-            use_keyring: true,
+            use_keyring: cfg!(feature = "keyring-storage"),
         }
     }
 
@@ -64,7 +66,7 @@ impl SoftwareConfig {
         Self {
             app_name: app_name.to_string(),
             keys_dir_override: Some(keys_dir),
-            use_keyring: true,
+            use_keyring: cfg!(feature = "keyring-storage"),
         }
     }
 
@@ -76,6 +78,7 @@ impl SoftwareConfig {
 }
 
 /// Probe whether the system keyring is functional.
+#[cfg(feature = "keyring-storage")]
 fn keyring_available(app_name: &str) -> bool {
     let entry = match keyring::Entry::new(app_name, "__keyring_probe__") {
         Ok(e) => e,
@@ -98,20 +101,27 @@ fn save_private_key(
     secret_bytes: &[u8],
     label: &str,
 ) -> Result<()> {
+    #[cfg(feature = "keyring-storage")]
     if config.use_keyring && keyring_available(&config.app_name) {
-        save_encrypted(&config.app_name, key_path, secret_bytes, label)
-    } else {
-        if config.use_keyring {
-            warn_unencrypted();
-        }
-        metadata::atomic_write(key_path, secret_bytes)?;
-        metadata::restrict_file_permissions(key_path)?;
-        Ok(())
+        return save_encrypted(&config.app_name, key_path, secret_bytes, label);
     }
+
+    #[cfg(feature = "keyring-storage")]
+    if config.use_keyring {
+        warn_unencrypted();
+    }
+
+    #[cfg(not(feature = "keyring-storage"))]
+    let _ = (config, label); // suppress unused warnings when keyring-storage is disabled
+
+    metadata::atomic_write(key_path, secret_bytes)?;
+    metadata::restrict_file_permissions(key_path)?;
+    Ok(())
 }
 
 /// Encrypt the secret key with a random KEK, store the KEK in the keyring,
 /// and write the encrypted key to disk.
+#[cfg(feature = "keyring-storage")]
 fn save_encrypted(
     app_name: &str,
     key_path: &std::path::Path,
@@ -180,7 +190,20 @@ fn load_private_key_bytes(
 
     // Encrypted format: version(1) + nonce(12) + encrypted_key(32) + tag(16) = 61
     if bytes.len() >= MIN_ENCRYPTED_FILE_SIZE && bytes[0] == ENCRYPTED_KEY_VERSION {
-        return decrypt_private_key(app_name, &bytes, label);
+        #[cfg(feature = "keyring-storage")]
+        {
+            return decrypt_private_key(app_name, &bytes, label);
+        }
+        #[cfg(not(feature = "keyring-storage"))]
+        {
+            let _ = (app_name, label);
+            return Err(Error::KeyOperation {
+                operation: "load_private_key".into(),
+                detail: "key file is encrypted with keyring but the \
+                         keyring-storage feature is not compiled in"
+                    .into(),
+            });
+        }
     }
 
     // Unknown format
@@ -195,6 +218,7 @@ fn load_private_key_bytes(
 }
 
 /// Decrypt an encrypted key file using the KEK from the keyring.
+#[cfg(feature = "keyring-storage")]
 fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<Vec<u8>> {
     use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 
@@ -237,6 +261,7 @@ fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<
 
 /// Delete the keyring entry for a key, ignoring errors (the entry may not exist
 /// if the key was stored unencrypted).
+#[cfg(feature = "keyring-storage")]
 fn delete_keyring_entry(app_name: &str, label: &str) {
     if let Ok(entry) = keyring::Entry::new(app_name, label) {
         drop(entry.delete_credential());
@@ -244,6 +269,7 @@ fn delete_keyring_entry(app_name: &str, label: &str) {
 }
 
 /// Print a one-time warning that keys are stored unencrypted.
+#[cfg(feature = "keyring-storage")]
 #[allow(clippy::print_stderr)]
 fn warn_unencrypted() {
     UNENCRYPTED_WARNING.call_once(|| {
@@ -337,6 +363,7 @@ pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     let _lock = metadata::DirLock::acquire(&dir)?;
 
     // Remove the keyring entry (ignore errors -- may not exist)
+    #[cfg(feature = "keyring-storage")]
     delete_keyring_entry(&config.app_name, label);
 
     // Remove the private key file

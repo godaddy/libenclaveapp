@@ -38,6 +38,9 @@ impl SoftwareEncryptor {
 
     /// Disable keyring-based key encryption (for testing or environments
     /// without a keyring daemon).
+    ///
+    /// When the `keyring-storage` feature is not enabled this is a no-op
+    /// because keyring support is already absent.
     pub fn without_keyring(mut self) -> Self {
         self.config.use_keyring = false;
         self
