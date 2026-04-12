@@ -124,7 +124,19 @@ jobs:
         run: cargo clippy --workspace ${{ inputs.cargo_build_args }} -- -D warnings
 
       - name: Build release
-        run: cargo build --workspace --release --target ${{ matrix.target }} ${{ inputs.cargo_build_args }}
+        shell: bash
+        run: |
+          exclude=""
+          # On musl/cross-compile targets, exclude cdylib crates (can't produce .so/.dll)
+          if [[ "${{ matrix.target }}" == *"musl"* ]] || [[ "${{ matrix.target }}" == "aarch64-pc-windows"* ]]; then
+            for toml in */Cargo.toml **/*/Cargo.toml; do
+              if grep -q 'crate-type.*cdylib' "$toml" 2>/dev/null; then
+                name=$(grep '^name' "$toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+                [ -n "$name" ] && exclude="$exclude --exclude $name"
+              fi
+            done
+          fi
+          cargo build --workspace --release --target ${{ matrix.target }} ${{ inputs.cargo_build_args }} $exclude
 
       - name: Test
         if: "!contains(matrix.target, 'aarch64-pc-windows') && !contains(matrix.target, 'musl')"
