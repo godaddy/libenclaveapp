@@ -3,6 +3,8 @@
 
 //! `LinuxTpmSigner` -- ECDSA P-256 signing backend using Linux TPM 2.0.
 
+#![allow(unused_qualifications, let_underscore_drop)]
+
 use crate::tpm::{self, TpmConfig};
 use enclaveapp_core::metadata::{self, DirLock};
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};

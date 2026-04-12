@@ -3,6 +3,8 @@
 
 //! Core TPM 2.0 operations shared between signing and encryption backends.
 
+#![allow(unused_qualifications, let_underscore_drop)]
+
 use enclaveapp_core::metadata;
 use enclaveapp_core::{Error, Result};
 use std::path::{Path, PathBuf};
