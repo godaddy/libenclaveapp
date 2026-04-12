@@ -1,6 +1,10 @@
 // Copyright 2024 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
+// The p256/elliptic-curve ecosystem uses deprecated generic-array APIs
+// during the 0.14 -> 1.0 transition. Allow until upstream resolves this.
+#![allow(deprecated)]
+
 //! Software-only key backend for Linux systems without hardware security.
 //!
 //! Keys are standard P-256 key pairs stored as files on disk with restrictive
