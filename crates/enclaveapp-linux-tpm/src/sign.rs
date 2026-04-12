@@ -167,14 +167,19 @@ impl EnclaveSigner for LinuxTpmSigner {
             detail: format!("digest conversion: {e}"),
         })?;
 
-        // Sign with the TPM -- unrestricted key, use default validation ticket
+        // Sign with the TPM -- unrestricted key needs a null hierarchy ticket
+        let ticket = tss_esapi::structures::HashcheckTicket::try_from(
+            tss_esapi::tss2_esys::TPMT_TK_HASHCHECK {
+                tag: tss_esapi::constants::tss::TPM2_ST_HASHCHECK,
+                hierarchy: tss_esapi::constants::tss::TPM2_RH_NULL,
+                digest: Default::default(),
+            },
+        )
+        .map_err(|e| Error::SignFailed {
+            detail: format!("ticket: {e}"),
+        })?;
         let signature = ctx
-            .sign(
-                key_handle,
-                digest,
-                SignatureScheme::Null,
-                tss_esapi::structures::HashcheckTicket::default(),
-            )
+            .sign(key_handle, digest, SignatureScheme::Null, ticket)
             .map_err(|e| Error::SignFailed {
                 detail: format!("TPM sign: {e}"),
             })?;
