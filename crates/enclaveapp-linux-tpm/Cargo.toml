@@ -26,5 +26,7 @@ aes-gcm = { workspace = true, optional = true }
 elliptic-curve = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# tss-esapi requires libtss2 C library, only available on glibc Linux.
+# On musl (Alpine), the crate compiles as empty stubs (is_available() = false).
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 tss-esapi = { workspace = true }
