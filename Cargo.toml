@@ -54,6 +54,9 @@ windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_
 # System
 libc = "0.2"
 
+# Keyring
+keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"] }
+
 # Testing
 rand = "0.8"
 

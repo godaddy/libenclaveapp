@@ -25,3 +25,4 @@ rand = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+keyring = { workspace = true }

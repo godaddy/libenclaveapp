@@ -2,12 +2,38 @@
 // SPDX-License-Identifier: MIT
 
 //! Shared key generation and file storage for the software backend.
+//!
+//! When a system keyring is available, private keys are encrypted at rest
+//! using AES-256-GCM with a random key encryption key (KEK) stored in the
+//! keyring. When the keyring is unavailable, keys are stored unencrypted
+//! with a one-time warning to stderr.
 
 use elliptic_curve::sec1::ToEncodedPoint;
 use enclaveapp_core::metadata::{self, KeyMeta};
 use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use p256::SecretKey;
 use std::path::PathBuf;
+use std::sync::Once;
+
+/// Version byte for encrypted key files.
+const ENCRYPTED_KEY_VERSION: u8 = 0x01;
+
+/// AES-256-GCM nonce size in bytes.
+const GCM_NONCE_SIZE: usize = 12;
+
+/// AES-256-GCM authentication tag size in bytes.
+const GCM_TAG_SIZE: usize = 16;
+
+/// Raw P-256 secret key size in bytes.
+const RAW_KEY_SIZE: usize = 32;
+
+/// KEK size in bytes (AES-256).
+const KEK_SIZE: usize = 32;
+
+/// Minimum encrypted key file size: version(1) + nonce(12) + encrypted_key(32) + tag(16).
+const MIN_ENCRYPTED_FILE_SIZE: usize = 1 + GCM_NONCE_SIZE + RAW_KEY_SIZE + GCM_TAG_SIZE;
+
+static UNENCRYPTED_WARNING: Once = Once::new();
 
 /// Software keys are always available.
 pub fn is_available() -> bool {
@@ -19,6 +45,10 @@ pub fn is_available() -> bool {
 pub struct SoftwareConfig {
     pub app_name: String,
     pub keys_dir_override: Option<PathBuf>,
+    /// Whether to attempt keyring-based encryption. Defaults to `true`.
+    /// Set to `false` for testing or environments where the keyring
+    /// is known to be unavailable.
+    pub use_keyring: bool,
 }
 
 impl SoftwareConfig {
@@ -26,6 +56,7 @@ impl SoftwareConfig {
         Self {
             app_name: app_name.to_string(),
             keys_dir_override: None,
+            use_keyring: true,
         }
     }
 
@@ -33,6 +64,7 @@ impl SoftwareConfig {
         Self {
             app_name: app_name.to_string(),
             keys_dir_override: Some(keys_dir),
+            use_keyring: true,
         }
     }
 
@@ -41,6 +73,184 @@ impl SoftwareConfig {
             .clone()
             .unwrap_or_else(|| metadata::keys_dir(&self.app_name))
     }
+}
+
+/// Probe whether the system keyring is functional.
+fn keyring_available(app_name: &str) -> bool {
+    let entry = match keyring::Entry::new(app_name, "__keyring_probe__") {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    match entry.set_secret(b"probe") {
+        Ok(()) => {
+            drop(entry.delete_credential());
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Save the private key bytes to a `.key` file, encrypting with a keyring-stored
+/// KEK when possible. Falls back to unencrypted storage with a stderr warning.
+fn save_private_key(
+    config: &SoftwareConfig,
+    key_path: &std::path::Path,
+    secret_bytes: &[u8],
+    label: &str,
+) -> Result<()> {
+    if config.use_keyring && keyring_available(&config.app_name) {
+        save_encrypted(&config.app_name, key_path, secret_bytes, label)
+    } else {
+        if config.use_keyring {
+            warn_unencrypted();
+        }
+        metadata::atomic_write(key_path, secret_bytes)?;
+        metadata::restrict_file_permissions(key_path)?;
+        Ok(())
+    }
+}
+
+/// Encrypt the secret key with a random KEK, store the KEK in the keyring,
+/// and write the encrypted key to disk.
+fn save_encrypted(
+    app_name: &str,
+    key_path: &std::path::Path,
+    secret_bytes: &[u8],
+    label: &str,
+) -> Result<()> {
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+    use rand::RngCore;
+
+    // Generate random KEK
+    let mut kek = [0_u8; KEK_SIZE];
+    rand::thread_rng().fill_bytes(&mut kek);
+
+    // Store KEK in keyring
+    let entry = keyring::Entry::new(app_name, label).map_err(|e| Error::KeyOperation {
+        operation: "keyring_entry".into(),
+        detail: e.to_string(),
+    })?;
+    entry.set_secret(&kek).map_err(|e| Error::KeyOperation {
+        operation: "keyring_store".into(),
+        detail: e.to_string(),
+    })?;
+
+    // Encrypt with AES-256-GCM
+    let cipher = Aes256Gcm::new_from_slice(&kek).map_err(|e| Error::KeyOperation {
+        operation: "aes_init".into(),
+        detail: e.to_string(),
+    })?;
+
+    let mut nonce_bytes = [0_u8; GCM_NONCE_SIZE];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let encrypted = cipher.encrypt(nonce, secret_bytes).map_err(|e| {
+        // Clean up keyring entry on failure
+        drop(entry.delete_credential());
+        Error::KeyOperation {
+            operation: "encrypt_key".into(),
+            detail: e.to_string(),
+        }
+    })?;
+
+    // File format: [version(1)] [nonce(12)] [encrypted_key + tag]
+    let mut file_data = Vec::with_capacity(1 + GCM_NONCE_SIZE + encrypted.len());
+    file_data.push(ENCRYPTED_KEY_VERSION);
+    file_data.extend_from_slice(&nonce_bytes);
+    file_data.extend_from_slice(&encrypted);
+
+    metadata::atomic_write(key_path, &file_data)?;
+    metadata::restrict_file_permissions(key_path)?;
+    Ok(())
+}
+
+/// Load the private key bytes from a `.key` file, decrypting if necessary.
+fn load_private_key_bytes(
+    app_name: &str,
+    key_path: &std::path::Path,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(key_path)?;
+
+    // Backward compatibility: raw 32-byte key (unencrypted)
+    if bytes.len() == RAW_KEY_SIZE {
+        return Ok(bytes);
+    }
+
+    // Encrypted format: version(1) + nonce(12) + encrypted_key(32) + tag(16) = 61
+    if bytes.len() >= MIN_ENCRYPTED_FILE_SIZE && bytes[0] == ENCRYPTED_KEY_VERSION {
+        return decrypt_private_key(app_name, &bytes, label);
+    }
+
+    // Unknown format
+    Err(Error::KeyOperation {
+        operation: "load_private_key".into(),
+        detail: format!(
+            "unrecognized key file format (size={}, version=0x{:02x})",
+            bytes.len(),
+            bytes.first().copied().unwrap_or(0)
+        ),
+    })
+}
+
+/// Decrypt an encrypted key file using the KEK from the keyring.
+fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<Vec<u8>> {
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+
+    let nonce_bytes = &file_data[1..1 + GCM_NONCE_SIZE];
+    let encrypted = &file_data[1 + GCM_NONCE_SIZE..];
+
+    // Retrieve KEK from keyring
+    let entry = keyring::Entry::new(app_name, label).map_err(|e| Error::KeyOperation {
+        operation: "keyring_entry".into(),
+        detail: e.to_string(),
+    })?;
+    let kek = entry.get_secret().map_err(|e| Error::KeyOperation {
+        operation: "keyring_retrieve".into(),
+        detail: format!("cannot retrieve key encryption key from keyring: {e}"),
+    })?;
+
+    if kek.len() != KEK_SIZE {
+        return Err(Error::KeyOperation {
+            operation: "keyring_retrieve".into(),
+            detail: format!(
+                "invalid KEK size from keyring: expected {KEK_SIZE}, got {}",
+                kek.len()
+            ),
+        });
+    }
+
+    let cipher = Aes256Gcm::new_from_slice(&kek).map_err(|e| Error::KeyOperation {
+        operation: "aes_init".into(),
+        detail: e.to_string(),
+    })?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    cipher
+        .decrypt(nonce, encrypted)
+        .map_err(|e| Error::KeyOperation {
+            operation: "decrypt_key".into(),
+            detail: format!("failed to decrypt private key: {e}"),
+        })
+}
+
+/// Delete the keyring entry for a key, ignoring errors (the entry may not exist
+/// if the key was stored unencrypted).
+fn delete_keyring_entry(app_name: &str, label: &str) {
+    if let Ok(entry) = keyring::Entry::new(app_name, label) {
+        drop(entry.delete_credential());
+    }
+}
+
+/// Print a one-time warning that keys are stored unencrypted.
+#[allow(clippy::print_stderr)]
+fn warn_unencrypted() {
+    UNENCRYPTED_WARNING.call_once(|| {
+        eprintln!(
+            "warning: system keyring unavailable; private keys will be stored unencrypted on disk"
+        );
+    });
 }
 
 /// Generate a new P-256 secret key, save it and its public key to disk.
@@ -70,10 +280,9 @@ pub fn generate_and_save(
     // SEC1 uncompressed public key (65 bytes: 0x04 || X || Y)
     let pub_bytes: Vec<u8> = public_key.to_encoded_point(false).as_bytes().to_vec();
 
-    // Save private key as raw 32-byte scalar
+    // Save private key (encrypted if keyring is available, plaintext otherwise)
     let secret_bytes = secret_key.to_bytes();
-    metadata::atomic_write(&key_path, &secret_bytes)?;
-    metadata::restrict_file_permissions(&key_path)?;
+    save_private_key(config, &key_path, &secret_bytes, label)?;
 
     // Save cached public key
     metadata::save_pub_key(&dir, label, &pub_bytes)?;
@@ -93,7 +302,7 @@ pub fn load_secret_key(config: &SoftwareConfig, label: &str) -> Result<SecretKey
             label: label.to_string(),
         });
     }
-    let bytes = std::fs::read(&key_path)?;
+    let bytes = load_private_key_bytes(&config.app_name, &key_path, label)?;
     SecretKey::from_slice(&bytes).map_err(|e| Error::KeyOperation {
         operation: "load_secret_key".into(),
         detail: e.to_string(),
@@ -127,6 +336,9 @@ pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     let dir = config.keys_dir();
     let _lock = metadata::DirLock::acquire(&dir)?;
 
+    // Remove the keyring entry (ignore errors -- may not exist)
+    delete_keyring_entry(&config.app_name, label);
+
     // Remove the private key file
     let key_path = dir.join(format!("{label}.key"));
     if key_path.exists() {
@@ -134,6 +346,41 @@ pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     }
 
     metadata::delete_key_files(&dir, label)
+}
+
+/// Encrypt a raw private key with the given KEK using AES-256-GCM.
+/// Returns the full encrypted file format bytes.
+#[cfg(test)]
+fn encrypt_key_bytes(kek: &[u8; KEK_SIZE], secret_bytes: &[u8]) -> Vec<u8> {
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+    use rand::RngCore;
+
+    let cipher = Aes256Gcm::new_from_slice(kek).expect("valid key size");
+    let mut nonce_bytes = [0_u8; GCM_NONCE_SIZE];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let encrypted = cipher.encrypt(nonce, secret_bytes).expect("encryption");
+
+    let mut file_data = Vec::with_capacity(1 + GCM_NONCE_SIZE + encrypted.len());
+    file_data.push(ENCRYPTED_KEY_VERSION);
+    file_data.extend_from_slice(&nonce_bytes);
+    file_data.extend_from_slice(&encrypted);
+    file_data
+}
+
+/// Decrypt an encrypted key file using the given KEK.
+/// Returns the raw private key bytes.
+#[cfg(test)]
+fn decrypt_key_bytes(kek: &[u8; KEK_SIZE], file_data: &[u8]) -> Vec<u8> {
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+
+    assert_eq!(file_data[0], ENCRYPTED_KEY_VERSION);
+    let nonce_bytes = &file_data[1..1 + GCM_NONCE_SIZE];
+    let encrypted = &file_data[1 + GCM_NONCE_SIZE..];
+
+    let cipher = Aes256Gcm::new_from_slice(kek).expect("valid key size");
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher.decrypt(nonce, encrypted).expect("decryption")
 }
 
 #[cfg(test)]
@@ -152,8 +399,13 @@ mod tests {
         dir
     }
 
+    /// Test config with keyring disabled to avoid system keychain prompts.
     fn test_config(dir: &std::path::Path) -> SoftwareConfig {
-        SoftwareConfig::with_keys_dir("test-app", dir.to_path_buf())
+        SoftwareConfig {
+            app_name: "test-app".to_string(),
+            keys_dir_override: Some(dir.to_path_buf()),
+            use_keyring: false,
+        }
     }
 
     #[test]
@@ -277,6 +529,109 @@ mod tests {
         match err {
             Error::KeyNotFound { label } => assert_eq!(label, "ghost"),
             other => panic!("expected KeyNotFound, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- Encrypted key format tests (no keyring needed) ---
+
+    #[test]
+    fn encrypt_decrypt_key_bytes_roundtrip() {
+        use rand::RngCore;
+
+        let mut kek = [0_u8; KEK_SIZE];
+        rand::thread_rng().fill_bytes(&mut kek);
+
+        let mut secret = [0_u8; RAW_KEY_SIZE];
+        rand::thread_rng().fill_bytes(&mut secret);
+
+        let encrypted = encrypt_key_bytes(&kek, &secret);
+        let decrypted = decrypt_key_bytes(&kek, &encrypted);
+        assert_eq!(decrypted, secret);
+    }
+
+    #[test]
+    fn encrypted_file_format_has_correct_structure() {
+        use rand::RngCore;
+
+        let mut kek = [0_u8; KEK_SIZE];
+        rand::thread_rng().fill_bytes(&mut kek);
+
+        let secret = [0xAB_u8; RAW_KEY_SIZE];
+        let encrypted = encrypt_key_bytes(&kek, &secret);
+
+        // version(1) + nonce(12) + encrypted_key(32) + tag(16) = 61
+        assert_eq!(encrypted.len(), MIN_ENCRYPTED_FILE_SIZE);
+        assert_eq!(encrypted[0], ENCRYPTED_KEY_VERSION);
+    }
+
+    #[test]
+    fn decrypt_fails_with_wrong_kek() {
+        use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+        use rand::RngCore;
+
+        let mut kek = [0_u8; KEK_SIZE];
+        rand::thread_rng().fill_bytes(&mut kek);
+
+        let secret = [0x42_u8; RAW_KEY_SIZE];
+        let encrypted = encrypt_key_bytes(&kek, &secret);
+
+        // Try with a different KEK
+        let mut wrong_kek = [0_u8; KEK_SIZE];
+        rand::thread_rng().fill_bytes(&mut wrong_kek);
+
+        let nonce_bytes = &encrypted[1..1 + GCM_NONCE_SIZE];
+        let ciphertext = &encrypted[1 + GCM_NONCE_SIZE..];
+
+        let cipher = Aes256Gcm::new_from_slice(&wrong_kek).unwrap();
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let result = cipher.decrypt(nonce, ciphertext);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn backward_compat_raw_key_file_loads() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        metadata::ensure_dir(&dir).unwrap();
+
+        // Generate a key and manually write it as a raw 32-byte file (old format)
+        let secret_key = SecretKey::random(&mut rand::thread_rng());
+        let secret_bytes = secret_key.to_bytes();
+        let key_path = dir.join("legacy.key");
+        std::fs::write(&key_path, &*secret_bytes).unwrap();
+
+        // Also write the metadata so the key is findable
+        let meta = KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
+        metadata::save_meta(&dir, "legacy", &meta).unwrap();
+
+        // load_secret_key should read the raw bytes directly
+        let loaded = load_secret_key(&config, "legacy").unwrap();
+        assert_eq!(loaded.to_bytes(), secret_bytes);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unrecognized_file_format_returns_error() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        metadata::ensure_dir(&dir).unwrap();
+
+        // Write a file that is neither 32 bytes nor starts with 0x01 + valid length
+        let key_path = dir.join("bad.key");
+        std::fs::write(&key_path, [0x00; 50]).unwrap();
+
+        let meta = KeyMeta::new("bad", KeyType::Signing, AccessPolicy::None);
+        metadata::save_meta(&dir, "bad", &meta).unwrap();
+
+        let err = load_secret_key(&config, "bad").unwrap_err();
+        match err {
+            Error::KeyOperation { operation, .. } => {
+                assert_eq!(operation, "load_private_key");
+            }
+            other => panic!("expected KeyOperation, got: {other}"),
         }
 
         std::fs::remove_dir_all(&dir).unwrap();

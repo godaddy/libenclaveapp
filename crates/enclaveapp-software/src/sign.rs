@@ -28,6 +28,13 @@ impl SoftwareSigner {
             config: SoftwareConfig::with_keys_dir(app_name, keys_dir),
         }
     }
+
+    /// Disable keyring-based key encryption (for testing or environments
+    /// without a keyring daemon).
+    pub fn without_keyring(mut self) -> Self {
+        self.config.use_keyring = false;
+        self
+    }
 }
 
 impl EnclaveKeyManager for SoftwareSigner {
@@ -91,7 +98,7 @@ mod tests {
     #[test]
     fn generate_and_sign_produces_valid_der() {
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
 
         signer
             .generate("sign-key", KeyType::Signing, AccessPolicy::None)
@@ -113,7 +120,7 @@ mod tests {
     #[test]
     fn sign_produces_different_output_for_different_data() {
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
 
         signer
             .generate("diff-data", KeyType::Signing, AccessPolicy::None)
@@ -128,7 +135,7 @@ mod tests {
     #[test]
     fn sign_fails_for_nonexistent_key() {
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
 
         let err = signer.sign("ghost", b"data").unwrap_err();
         match err {
@@ -142,7 +149,7 @@ mod tests {
     #[test]
     fn generate_rejects_encryption_key_type() {
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
 
         let err = signer
             .generate("enc-key", KeyType::Encryption, AccessPolicy::None)
@@ -158,7 +165,7 @@ mod tests {
     #[test]
     fn public_key_matches_generated() {
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
 
         let generated = signer
             .generate("pk-test", KeyType::Signing, AccessPolicy::None)
@@ -174,7 +181,7 @@ mod tests {
     #[test]
     fn list_and_delete_lifecycle() {
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
 
         assert!(signer.list_keys().unwrap().is_empty());
 
@@ -195,7 +202,7 @@ mod tests {
     #[test]
     fn is_available_returns_true() {
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
         assert!(signer.is_available());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -205,7 +212,7 @@ mod tests {
         use p256::ecdsa::{signature::Verifier, VerifyingKey};
 
         let dir = test_dir();
-        let signer = SoftwareSigner::with_keys_dir("test", dir.clone());
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
 
         let pub_bytes = signer
             .generate("verify-test", KeyType::Signing, AccessPolicy::None)
