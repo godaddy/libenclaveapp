@@ -4,7 +4,7 @@
 //! NCrypt provider management and RAII handle wrapper.
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
-#![allow(unsafe_code, unused_qualifications)]
+#![allow(unsafe_code, unused_qualifications, let_underscore_drop)]
 
 use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::*;

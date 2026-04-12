@@ -6,7 +6,13 @@
 // This module wraps BCrypt/NCrypt C APIs which require unsafe FFI calls.
 // The Windows crate's type conversions trigger trivial_casts and ptr_as_ptr
 // for API-required pointer casts that cannot be simplified.
-#![allow(unsafe_code, trivial_casts, clippy::ptr_as_ptr, unused_qualifications)]
+#![allow(
+    unsafe_code,
+    trivial_casts,
+    clippy::ptr_as_ptr,
+    unused_qualifications,
+    let_underscore_drop
+)]
 //!
 //! ## ECIES Wire Format
 //!

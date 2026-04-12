@@ -11,7 +11,8 @@
     unsafe_code,
     clippy::mem_forget,
     clippy::ptr_as_ptr,
-    unused_qualifications
+    unused_qualifications,
+    let_underscore_drop
 )]
 
 use crate::convert::key_name;
