@@ -145,9 +145,3 @@ impl EnclaveSigner for TpmSigner {
         Ok(p1363_to_der(&sig))
     }
 }
-
-/// Convenience alias for `key_name` used in tests.
-#[cfg(test)]
-fn _tpm_key_name(app: &str, label: &str) -> String {
-    key_name(app, label)
-}
