@@ -12,6 +12,7 @@ use sha2::{Digest as _, Sha256};
 use tss_esapi::structures::{
     Digest as TpmDigest, Public, Signature as TpmSignature, SignatureScheme,
 };
+use tss_esapi::traits::{Marshall, UnMarshall};
 
 /// Linux TPM 2.0-backed ECDSA P-256 signer.
 #[derive(Debug)]

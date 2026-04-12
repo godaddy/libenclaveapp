@@ -31,6 +31,7 @@ use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
 use enclaveapp_core::types::validate_label;
 use enclaveapp_core::{AccessPolicy, Error, KeyMeta, KeyType, Result};
 use tss_esapi::structures::{EccParameter, EccPoint, Public};
+use tss_esapi::traits::{Marshall, UnMarshall};
 
 const ECIES_VERSION: u8 = 0x01;
 const GCM_NONCE_SIZE: usize = 12;
