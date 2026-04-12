@@ -115,6 +115,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: release-${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Set version from tag
         id: version
@@ -133,12 +144,17 @@ jobs:
         run: |
           (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"${{ steps.version.outputs.version }}`"" | Set-Content Cargo.toml
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace ${{ inputs.cargo_build_args }} -- -D warnings
+
       - name: Build release
         run: cargo build --workspace --release --target ${{ matrix.target }} ${{ inputs.cargo_build_args }}
 
       - name: Test
-        if: inputs.test_args != ''
-        run: cargo test --workspace ${{ inputs.test_args }}
+        run: cargo test --workspace ${{ inputs.cargo_build_args }} ${{ inputs.test_args }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
