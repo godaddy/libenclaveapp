@@ -231,4 +231,142 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn generate_returns_valid_65_byte_pubkey() {
+        let dir = test_dir();
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
+
+        let pub_bytes = signer
+            .generate("gen-pubkey", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        assert_eq!(pub_bytes.len(), 65);
+        assert_eq!(pub_bytes[0], 0x04, "SEC1 uncompressed point prefix");
+
+        // Verify it's a valid P-256 point
+        let pk = p256::PublicKey::from_sec1_bytes(&pub_bytes);
+        assert!(pk.is_ok(), "must be a valid P-256 point");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sign_is_deterministic_for_same_key_and_data() {
+        let dir = test_dir();
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
+
+        signer
+            .generate("det-key", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+
+        // RFC 6979 deterministic signatures: same key + same data = same signature
+        let sig1 = signer.sign("det-key", b"deterministic data").unwrap();
+        let sig2 = signer.sign("det-key", b"deterministic data").unwrap();
+        assert_eq!(sig1, sig2, "RFC 6979 signatures should be deterministic");
+
+        // Different data should produce different signatures
+        let sig3 = signer.sign("det-key", b"different data").unwrap();
+        assert_ne!(sig1, sig3);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn list_keys_after_generate_includes_label() {
+        let dir = test_dir();
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
+
+        signer
+            .generate("listed-key", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+
+        let keys = signer.list_keys().unwrap();
+        assert!(
+            keys.contains(&"listed-key".to_string()),
+            "list_keys should include the generated label"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_key_then_sign_returns_key_not_found() {
+        let dir = test_dir();
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
+
+        signer
+            .generate("del-then-sign", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+
+        // Sign succeeds before deletion
+        signer.sign("del-then-sign", b"data").unwrap();
+
+        // Delete the key
+        signer.delete_key("del-then-sign").unwrap();
+
+        // Sign should now fail
+        let err = signer.sign("del-then-sign", b"data").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "del-then-sign"),
+            other => panic!("expected KeyNotFound, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn with_keys_dir_uses_custom_directory() {
+        let dir = test_dir();
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
+
+        signer
+            .generate("custom-dir-key", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+
+        // Key files should be in our custom directory
+        assert!(dir.join("custom-dir-key.key").exists());
+        assert!(dir.join("custom-dir-key.pub").exists());
+        assert!(dir.join("custom-dir-key.meta").exists());
+
+        // Should NOT be in the default directory
+        let default_dir = enclaveapp_core::metadata::keys_dir("test");
+        assert!(!default_dir.join("custom-dir-key.key").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn generate_with_invalid_label_returns_error() {
+        let dir = test_dir();
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
+
+        // Empty label
+        let err = signer
+            .generate("", KeyType::Signing, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::InvalidLabel { .. } => {}
+            other => panic!("expected InvalidLabel for empty label, got: {other}"),
+        }
+
+        // Label with special characters
+        let err = signer
+            .generate("bad/label", KeyType::Signing, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::InvalidLabel { .. } => {}
+            other => panic!("expected InvalidLabel for label with slash, got: {other}"),
+        }
+
+        // Label with spaces
+        let err = signer
+            .generate("bad label", KeyType::Signing, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::InvalidLabel { .. } => {}
+            other => panic!("expected InvalidLabel for label with space, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

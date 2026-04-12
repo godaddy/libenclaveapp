@@ -448,4 +448,265 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn generate_returns_valid_65_byte_pubkey() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        let pub_bytes = enc
+            .generate("gen-pubkey", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        assert_eq!(pub_bytes.len(), 65);
+        assert_eq!(pub_bytes[0], 0x04, "SEC1 uncompressed point prefix");
+
+        // Verify it's a valid P-256 point
+        let pk = p256::PublicKey::from_sec1_bytes(&pub_bytes);
+        assert!(pk.is_ok(), "must be a valid P-256 point");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_various_sizes() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("sizes-test", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        for size in [0, 1, 100, 10_000, 100_000] {
+            let plaintext: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+            let ciphertext = enc.encrypt("sizes-test", &plaintext).unwrap();
+            let decrypted = enc.decrypt("sizes-test", &ciphertext).unwrap();
+            assert_eq!(
+                decrypted, plaintext,
+                "roundtrip failed for size {size}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ciphertext_format_detailed_structure() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("struct-test", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        let plaintext = b"hello world";
+        let ciphertext = enc.encrypt("struct-test", plaintext).unwrap();
+
+        // Version byte
+        assert_eq!(ciphertext[0], 0x01);
+
+        // Ephemeral public key: 65 bytes starting with 0x04
+        assert_eq!(ciphertext[1], 0x04, "ephemeral pubkey should start with 0x04");
+        let eph_pub = &ciphertext[1..66];
+        assert_eq!(eph_pub.len(), 65);
+
+        // Verify ephemeral public key is a valid P-256 point
+        let pk = p256::PublicKey::from_sec1_bytes(eph_pub);
+        assert!(pk.is_ok());
+
+        // Nonce: 12 bytes at offset 66
+        let nonce = &ciphertext[66..78];
+        assert_eq!(nonce.len(), 12);
+
+        // Remaining: ciphertext (same length as plaintext) + 16-byte tag
+        let encrypted_portion = &ciphertext[78..];
+        assert_eq!(
+            encrypted_portion.len(),
+            plaintext.len() + 16,
+            "encrypted portion should be plaintext_len + 16 (GCM tag)"
+        );
+
+        // Total: 1 + 65 + 12 + plaintext_len + 16
+        assert_eq!(ciphertext.len(), 1 + 65 + 12 + plaintext.len() + 16);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ciphertext_is_different_each_time_due_to_random_nonce_and_ephemeral_key() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("nonce-diff", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        let plaintext = b"same plaintext";
+        let ct1 = enc.encrypt("nonce-diff", plaintext).unwrap();
+        let ct2 = enc.encrypt("nonce-diff", plaintext).unwrap();
+
+        // Full ciphertexts should differ
+        assert_ne!(ct1, ct2);
+
+        // Ephemeral public keys should differ (different random key each time)
+        let eph1 = &ct1[1..66];
+        let eph2 = &ct2[1..66];
+        assert_ne!(eph1, eph2, "ephemeral public keys should be different");
+
+        // Nonces should differ
+        let nonce1 = &ct1[66..78];
+        let nonce2 = &ct2[66..78];
+        assert_ne!(nonce1, nonce2, "nonces should be different");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn decrypt_corrupted_nonce_returns_error() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("nonce-corrupt", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        let mut ciphertext = enc.encrypt("nonce-corrupt", b"test").unwrap();
+        // Corrupt the nonce (bytes 66..78)
+        ciphertext[70] ^= 0xFF;
+
+        let err = enc.decrypt("nonce-corrupt", &ciphertext).unwrap_err();
+        match err {
+            Error::DecryptFailed { .. } => {}
+            other => panic!("expected DecryptFailed, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn decrypt_corrupted_ephemeral_key_returns_error() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("eph-corrupt", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        let mut ciphertext = enc.encrypt("eph-corrupt", b"test").unwrap();
+        // Corrupt a byte in the ephemeral public key (not the 0x04 prefix,
+        // as that would fail point parsing, but an interior byte)
+        ciphertext[10] ^= 0xFF;
+
+        let err = enc.decrypt("eph-corrupt", &ciphertext).unwrap_err();
+        match err {
+            Error::DecryptFailed { .. } => {}
+            other => panic!("expected DecryptFailed, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn generate_with_invalid_label_returns_error() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        // Empty label
+        let err = enc
+            .generate("", KeyType::Encryption, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::InvalidLabel { .. } => {}
+            other => panic!("expected InvalidLabel for empty label, got: {other}"),
+        }
+
+        // Label with special characters
+        let err = enc
+            .generate("bad/label", KeyType::Encryption, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::InvalidLabel { .. } => {}
+            other => panic!("expected InvalidLabel for label with slash, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn public_key_matches_generated() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        let generated = enc
+            .generate("pk-match", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        let retrieved = enc.public_key("pk-match").unwrap();
+        assert_eq!(generated, retrieved);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn list_keys_after_generate_includes_label() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("listed-enc-key", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        let keys = enc.list_keys().unwrap();
+        assert!(keys.contains(&"listed-enc-key".to_string()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_key_then_encrypt_returns_key_not_found() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("del-enc", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        enc.delete_key("del-enc").unwrap();
+
+        let err = enc.encrypt("del-enc", b"data").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "del-enc"),
+            other => panic!("expected KeyNotFound, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn one_byte_plaintext_roundtrip() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("one-byte", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        let plaintext = &[0x42_u8];
+        let ciphertext = enc.encrypt("one-byte", plaintext).unwrap();
+        let decrypted = enc.decrypt("one-byte", &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn decrypt_exactly_min_ciphertext_len_with_bad_data() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        enc.generate("min-len", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        // Exactly MIN_CIPHERTEXT_LEN bytes with version 0x01 but garbage data
+        let mut fake = vec![0x01_u8; MIN_CIPHERTEXT_LEN];
+        // Set the "ephemeral public key" first byte to 0x04 to look like a point
+        fake[1] = 0x04;
+
+        let err = enc.decrypt("min-len", &fake).unwrap_err();
+        match err {
+            Error::DecryptFailed { .. } => {}
+            other => panic!("expected DecryptFailed, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
