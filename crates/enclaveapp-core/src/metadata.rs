@@ -138,11 +138,11 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
 }
 
 /// Set restrictive file permissions (0600 on Unix).
-pub fn restrict_file_permissions(path: &Path) -> Result<()> {
+pub fn restrict_file_permissions(_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

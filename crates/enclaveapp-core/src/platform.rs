@@ -48,26 +48,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn platform_functions_are_consistent() {
+        // At most one of these can be true
+        let count = [is_macos(), is_windows()].iter().filter(|&&v| v).count();
+        assert!(count <= 1);
+    }
+
+    #[test]
+    fn hardware_name_is_not_empty() {
+        let name = hardware_name();
+        assert!(!name.is_empty());
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn is_macos_true_on_macos() {
         assert!(is_macos());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn is_windows_false_on_macos() {
         assert!(!is_windows());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn hardware_name_secure_enclave_on_macos() {
         assert_eq!(hardware_name(), "Secure Enclave");
+        assert!(!is_wsl());
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn is_wsl_false_on_macos() {
+    #[cfg(target_os = "windows")]
+    fn is_windows_true_on_windows() {
+        assert!(is_windows());
+        assert!(!is_macos());
+        assert_eq!(hardware_name(), "TPM 2.0");
         assert!(!is_wsl());
     }
 }
