@@ -24,13 +24,13 @@ jobs:
             features: "--features enclaveapp-windows/signing,enclaveapp-windows/encryption,enclaveapp-software/signing,enclaveapp-software/encryption"
           - name: Linux
             os: ubuntu-latest
-            features: "--features enclaveapp-software/signing,enclaveapp-software/encryption"
+            features: "--features enclaveapp-linux-tpm/signing,enclaveapp-linux-tpm/encryption,enclaveapp-software/signing,enclaveapp-software/encryption"
     steps:
       - uses: actions/checkout@v5
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libtss2-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

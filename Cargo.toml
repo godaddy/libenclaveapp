@@ -3,6 +3,7 @@ members = [
     "crates/enclaveapp-core",
     "crates/enclaveapp-apple",
     "crates/enclaveapp-windows",
+    "crates/enclaveapp-linux-tpm",
     "crates/enclaveapp-wsl",
     "crates/enclaveapp-bridge",
     "crates/enclaveapp-software",
@@ -25,6 +26,7 @@ enclaveapp-windows = { path = "crates/enclaveapp-windows" }
 enclaveapp-wsl = { path = "crates/enclaveapp-wsl" }
 enclaveapp-bridge = { path = "crates/enclaveapp-bridge" }
 enclaveapp-software = { path = "crates/enclaveapp-software" }
+enclaveapp-linux-tpm = { path = "crates/enclaveapp-linux-tpm" }
 enclaveapp-test-support = { path = "crates/enclaveapp-test-support" }
 
 # Serialization
@@ -50,6 +52,9 @@ elliptic-curve = { version = "0.13", features = ["sec1"] }
 
 # Windows
 windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+
+# Linux TPM
+tss-esapi = "7"
 
 # System
 libc = "0.2"

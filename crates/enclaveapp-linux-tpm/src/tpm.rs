@@ -1,0 +1,271 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! Core TPM 2.0 operations shared between signing and encryption backends.
+
+use enclaveapp_core::metadata;
+use enclaveapp_core::{Error, Result};
+use std::path::{Path, PathBuf};
+use tss_esapi::{
+    attributes::ObjectAttributesBuilder,
+    interface_types::{
+        algorithm::{HashingAlgorithm, PublicAlgorithm},
+        ecc::EccCurve,
+        resource_handles::Hierarchy,
+    },
+    structures::{
+        EccPoint, EccScheme, HashScheme, KeyDerivationFunctionScheme, Public, PublicBuilder,
+        PublicEccParametersBuilder, SymmetricDefinitionObject,
+    },
+    tcti_ldr::{DeviceConfig, TctiNameConf},
+    Context,
+};
+
+/// Try to open a TPM context.
+pub fn open_context() -> Result<Context> {
+    // Try kernel resource manager first (/dev/tpmrm0)
+    let device_path = std::path::Path::new("/dev/tpmrm0");
+    if device_path.exists() {
+        let tcti = TctiNameConf::Device("/dev/tpmrm0".parse::<DeviceConfig>().map_err(|e| {
+            Error::KeyOperation {
+                operation: "parse_device_config".into(),
+                detail: e.to_string(),
+            }
+        })?);
+        return Context::new(tcti).map_err(|e| Error::KeyOperation {
+            operation: "open_tpm".into(),
+            detail: format!("device TCTI: {e}"),
+        });
+    }
+
+    // Try tpm2-abrmd
+    let tcti = TctiNameConf::Tabrmd(Default::default());
+    Context::new(tcti).map_err(|e| Error::KeyOperation {
+        operation: "open_tpm".into(),
+        detail: format!("no TPM available (tried /dev/tpmrm0 and tpm2-abrmd): {e}"),
+    })
+}
+
+pub fn is_available() -> bool {
+    open_context().is_ok()
+}
+
+/// Build the primary ECC storage key template.
+///
+/// Uses ECC P-256 as a restricted decryption key under the owner hierarchy.
+/// The template is deterministic so the same primary is recreated every time.
+pub fn primary_key_template() -> Result<Public> {
+    let object_attributes = ObjectAttributesBuilder::new()
+        .with_fixed_tpm(true)
+        .with_fixed_parent(true)
+        .with_sensitive_data_origin(true)
+        .with_user_with_auth(true)
+        .with_decrypt(true)
+        .with_restricted(true)
+        .build()
+        .map_err(|e| Error::KeyOperation {
+            operation: "primary_template".into(),
+            detail: e.to_string(),
+        })?;
+
+    PublicBuilder::new()
+        .with_public_algorithm(PublicAlgorithm::Ecc)
+        .with_name_hashing_algorithm(HashingAlgorithm::Sha256)
+        .with_object_attributes(object_attributes)
+        .with_ecc_parameters(
+            PublicEccParametersBuilder::new_restricted_decryption_key(
+                SymmetricDefinitionObject::AES_128_CFB,
+                EccCurve::NistP256,
+            )
+            .build()
+            .map_err(|e| Error::KeyOperation {
+                operation: "primary_params".into(),
+                detail: e.to_string(),
+            })?,
+        )
+        .with_ecc_unique_identifier(EccPoint::default())
+        .build()
+        .map_err(|e| Error::KeyOperation {
+            operation: "primary_build".into(),
+            detail: e.to_string(),
+        })
+}
+
+/// Create the primary storage key. Returns its handle.
+pub fn create_primary(ctx: &mut Context) -> Result<tss_esapi::handles::KeyHandle> {
+    let template = primary_key_template()?;
+    let result = ctx
+        .create_primary(Hierarchy::Owner, template, None, None, None, None)
+        .map_err(|e| Error::KeyOperation {
+            operation: "create_primary".into(),
+            detail: e.to_string(),
+        })?;
+    Ok(result.key_handle)
+}
+
+/// Build a child ECDSA P-256 signing key template (unrestricted).
+pub fn signing_key_template() -> Result<Public> {
+    let object_attributes = ObjectAttributesBuilder::new()
+        .with_fixed_tpm(true)
+        .with_fixed_parent(true)
+        .with_sensitive_data_origin(true)
+        .with_user_with_auth(true)
+        .with_sign_encrypt(true)
+        .build()
+        .map_err(|e| Error::KeyOperation {
+            operation: "signing_template".into(),
+            detail: e.to_string(),
+        })?;
+
+    PublicBuilder::new()
+        .with_public_algorithm(PublicAlgorithm::Ecc)
+        .with_name_hashing_algorithm(HashingAlgorithm::Sha256)
+        .with_object_attributes(object_attributes)
+        .with_ecc_parameters(
+            PublicEccParametersBuilder::new_unrestricted_signing_key(
+                EccScheme::EcDsa(HashScheme::new(HashingAlgorithm::Sha256)),
+                EccCurve::NistP256,
+            )
+            .build()
+            .map_err(|e| Error::KeyOperation {
+                operation: "signing_params".into(),
+                detail: e.to_string(),
+            })?,
+        )
+        .with_ecc_unique_identifier(EccPoint::default())
+        .build()
+        .map_err(|e| Error::KeyOperation {
+            operation: "signing_build".into(),
+            detail: e.to_string(),
+        })
+}
+
+/// Build a child ECDH P-256 key template for encryption (unrestricted decryption).
+pub fn encryption_key_template() -> Result<Public> {
+    let object_attributes = ObjectAttributesBuilder::new()
+        .with_fixed_tpm(true)
+        .with_fixed_parent(true)
+        .with_sensitive_data_origin(true)
+        .with_user_with_auth(true)
+        .with_decrypt(true)
+        .build()
+        .map_err(|e| Error::KeyOperation {
+            operation: "encryption_template".into(),
+            detail: e.to_string(),
+        })?;
+
+    PublicBuilder::new()
+        .with_public_algorithm(PublicAlgorithm::Ecc)
+        .with_name_hashing_algorithm(HashingAlgorithm::Sha256)
+        .with_object_attributes(object_attributes)
+        .with_ecc_parameters(
+            PublicEccParametersBuilder::new()
+                .with_ecc_scheme(EccScheme::EcDh(HashScheme::new(HashingAlgorithm::Sha256)))
+                .with_curve(EccCurve::NistP256)
+                .with_key_derivation_function_scheme(KeyDerivationFunctionScheme::Null)
+                .with_is_decryption_key(true)
+                .build()
+                .map_err(|e| Error::KeyOperation {
+                    operation: "encryption_params".into(),
+                    detail: e.to_string(),
+                })?,
+        )
+        .with_ecc_unique_identifier(EccPoint::default())
+        .build()
+        .map_err(|e| Error::KeyOperation {
+            operation: "encryption_build".into(),
+            detail: e.to_string(),
+        })
+}
+
+/// Extract 65-byte SEC1 uncompressed public key from a TPM ECC public structure.
+pub fn extract_public_key(public: &Public) -> Result<Vec<u8>> {
+    match public {
+        Public::Ecc { unique, .. } => {
+            let x = unique.x().value();
+            let y = unique.y().value();
+            let mut point = Vec::with_capacity(65);
+            point.push(0x04);
+            // Pad to 32 bytes each (P-256 coordinates are 32 bytes)
+            let x_pad = 32usize.saturating_sub(x.len());
+            point.extend(std::iter::repeat(0u8).take(x_pad));
+            point.extend_from_slice(x);
+            let y_pad = 32usize.saturating_sub(y.len());
+            point.extend(std::iter::repeat(0u8).take(y_pad));
+            point.extend_from_slice(y);
+            Ok(point)
+        }
+        _ => Err(Error::KeyOperation {
+            operation: "extract_public_key".into(),
+            detail: "not an ECC key".into(),
+        }),
+    }
+}
+
+/// Configuration for the Linux TPM backend.
+#[derive(Debug)]
+pub struct TpmConfig {
+    pub app_name: String,
+    pub keys_dir_override: Option<PathBuf>,
+}
+
+impl TpmConfig {
+    pub fn new(app_name: &str) -> Self {
+        Self {
+            app_name: app_name.to_string(),
+            keys_dir_override: None,
+        }
+    }
+
+    pub fn with_keys_dir(app_name: &str, keys_dir: PathBuf) -> Self {
+        Self {
+            app_name: app_name.to_string(),
+            keys_dir_override: Some(keys_dir),
+        }
+    }
+
+    pub fn keys_dir(&self) -> PathBuf {
+        self.keys_dir_override
+            .clone()
+            .unwrap_or_else(|| metadata::keys_dir(&self.app_name))
+    }
+}
+
+/// Save TPM key blobs (public + private) to disk.
+/// The private blob is TPM-encrypted -- useless without the same physical TPM.
+pub fn save_key_blobs(
+    dir: &Path,
+    label: &str,
+    public_blob: &[u8],
+    private_blob: &[u8],
+) -> Result<()> {
+    metadata::atomic_write(&dir.join(format!("{label}.tpm_pub")), public_blob)?;
+    metadata::atomic_write(&dir.join(format!("{label}.tpm_priv")), private_blob)?;
+    metadata::restrict_file_permissions(&dir.join(format!("{label}.tpm_priv")))?;
+    Ok(())
+}
+
+/// Load TPM key blobs from disk.
+pub fn load_key_blobs(dir: &Path, label: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let pub_path = dir.join(format!("{label}.tpm_pub"));
+    let priv_path = dir.join(format!("{label}.tpm_priv"));
+    if !pub_path.exists() || !priv_path.exists() {
+        return Err(Error::KeyNotFound {
+            label: label.to_string(),
+        });
+    }
+    let public_blob = std::fs::read(&pub_path)?;
+    let private_blob = std::fs::read(&priv_path)?;
+    Ok((public_blob, private_blob))
+}
+
+/// Delete TPM key blob files.
+pub fn delete_key_blobs(dir: &Path, label: &str) -> Result<()> {
+    for ext in &["tpm_pub", "tpm_priv"] {
+        let path = dir.join(format!("{label}.{ext}"));
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}

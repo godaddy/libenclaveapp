@@ -1,0 +1,30 @@
+[package]
+name = "enclaveapp-linux-tpm"
+description = "Linux TPM 2.0 backend for libenclaveapp (tss-esapi)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+signing = ["sha2"]
+encryption = ["sha2", "p256", "aes-gcm", "elliptic-curve", "rand"]
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true, optional = true }
+p256 = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
+elliptic-curve = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tss-esapi = { workspace = true }
