@@ -167,9 +167,14 @@ impl EnclaveSigner for LinuxTpmSigner {
             detail: format!("digest conversion: {e}"),
         })?;
 
-        // Sign with the TPM -- unrestricted key, so pass None for validation ticket
+        // Sign with the TPM -- unrestricted key, use default validation ticket
         let signature = ctx
-            .sign(key_handle, digest, SignatureScheme::Null, None)
+            .sign(
+                key_handle,
+                digest,
+                SignatureScheme::Null,
+                tss_esapi::structures::HashcheckTicket::default(),
+            )
             .map_err(|e| Error::SignFailed {
                 detail: format!("TPM sign: {e}"),
             })?;
