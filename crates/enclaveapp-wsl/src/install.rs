@@ -316,22 +316,33 @@ fn install_bridge_deps(distro_name: &str, actions: &mut Vec<String>) -> Result<(
 
     // Check and install npiperelay
     if !wsl_has_command(distro_name, "npiperelay.exe") {
+        // npiperelay.exe is a Windows binary invoked from WSL via interop.
+        // The upstream releases are Windows zips (npiperelay_windows_amd64.zip).
+        // We download the Windows zip, extract the .exe, and place it on PATH
+        // inside WSL (e.g. /usr/local/bin) where WSL can invoke it via interop.
         let install_script = r#"
             set -e
             ARCH=$(uname -m)
             case "$ARCH" in
-                x86_64) GOARCH=amd64 ;;
-                aarch64) GOARCH=arm64 ;;
+                x86_64) WINARCH=amd64 ;;
+                aarch64) WINARCH=arm64 ;;
                 *) echo "unsupported arch: $ARCH"; exit 1 ;;
             esac
-            URL="https://github.com/jstarks/npiperelay/releases/latest/download/npiperelay_linux_${GOARCH}.tar.gz"
+            URL="https://github.com/jstarks/npiperelay/releases/latest/download/npiperelay_windows_${WINARCH}.zip"
             TMP=$(mktemp -d)
             if command -v curl >/dev/null 2>&1; then
-                curl -sL "$URL" | tar xz -C "$TMP" 2>/dev/null
+                curl -sL "$URL" -o "$TMP/npiperelay.zip"
             elif command -v wget >/dev/null 2>&1; then
-                wget -qO- "$URL" | tar xz -C "$TMP" 2>/dev/null
+                wget -q "$URL" -O "$TMP/npiperelay.zip"
             else
                 echo "no curl or wget"; exit 1
+            fi
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -qo "$TMP/npiperelay.zip" -d "$TMP" 2>/dev/null
+            elif command -v python3 >/dev/null 2>&1; then
+                python3 -c "import zipfile,sys; zipfile.ZipFile('$TMP/npiperelay.zip').extractall('$TMP')"
+            else
+                echo "no unzip or python3"; exit 1
             fi
             if [ -f "$TMP/npiperelay.exe" ]; then
                 sudo mv "$TMP/npiperelay.exe" /usr/local/bin/npiperelay.exe

@@ -116,15 +116,16 @@ pub fn delete_key(app_name: &str, label: &str) -> Result<()> {
 pub fn enumerate_keys(provider: &NcryptHandle, app_name: &str) -> Result<Vec<String>> {
     let prefix = format!("{app_name}-");
     let mut labels = Vec::new();
-    let mut enum_state: *mut NCryptKeyName = std::ptr::null_mut();
+    let mut enum_state: *mut std::ffi::c_void = std::ptr::null_mut();
 
     loop {
+        let mut key_name: *mut NCryptKeyName = std::ptr::null_mut();
         let result = unsafe {
             NCryptEnumKeys(
                 provider.as_prov(),
                 PCWSTR::null(),
+                &mut key_name,
                 &mut enum_state,
-                std::ptr::null_mut(),
                 NCRYPT_FLAGS::default(),
             )
         };
@@ -134,8 +135,8 @@ pub fn enumerate_keys(provider: &NcryptHandle, app_name: &str) -> Result<Vec<Str
             break;
         }
 
-        if !enum_state.is_null() {
-            let key_info = unsafe { &*enum_state };
+        if !key_name.is_null() {
+            let key_info = unsafe { &*key_name };
             let name = unsafe { key_info.pszName.to_string() };
             if let Ok(name_str) = name {
                 if let Some(stripped) = name_str.strip_prefix(&prefix) {
@@ -143,8 +144,15 @@ pub fn enumerate_keys(provider: &NcryptHandle, app_name: &str) -> Result<Vec<Str
                 }
             }
             unsafe {
-                let _ = NCryptFreeBuffer(enum_state as *mut _);
+                let _ = NCryptFreeBuffer(key_name as *mut _);
             }
+        }
+    }
+
+    // Free the enumeration state buffer.
+    if !enum_state.is_null() {
+        unsafe {
+            let _ = NCryptFreeBuffer(enum_state);
         }
     }
 
