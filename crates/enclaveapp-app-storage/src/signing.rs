@@ -7,6 +7,7 @@
 //! Exposes the underlying `EnclaveSigner` and `EnclaveKeyManager` traits
 //! so sshenc can build its richer `KeyBackend` on top.
 
+#[allow(unused_imports)]
 use crate::error::{Result, StorageError};
 use crate::platform::BackendKind;
 use crate::StorageConfig;

@@ -3,6 +3,9 @@
 
 //! Platform detection and backend identification.
 
+#[allow(unused_imports)]
+use std::path::PathBuf;
+
 /// Which hardware/software backend is in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
