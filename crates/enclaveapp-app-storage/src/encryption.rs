@@ -5,14 +5,17 @@
 //!
 //! Replaces the per-app `secure_storage` modules in awsenc and sso-jwt.
 
+#[allow(unused_imports)]
 use crate::error::{Result, StorageError};
 use crate::platform::BackendKind;
 use crate::StorageConfig;
+#[allow(unused_imports)]
 use enclaveapp_core::metadata;
+#[allow(unused_imports)]
 use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
-#[cfg(target_os = "linux")]
-use enclaveapp_core::types::AccessPolicy;
-use enclaveapp_core::types::KeyType;
+#[allow(unused_imports)]
+use enclaveapp_core::types::{AccessPolicy, KeyType};
+#[allow(unused_imports)]
 use tracing::{debug, warn};
 
 /// High-level encryption storage for consuming applications.
@@ -196,6 +199,7 @@ impl AppEncryptionStorage {
     /// Ensure a key exists with the correct access policy.
     /// If the key exists but has a different policy, re-generate it
     /// (encryption keys protect temporary cached data, so this is safe).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn ensure_key(encryptor: &impl EnclaveEncryptor, config: &StorageConfig) -> Result<()> {
         if encryptor.public_key(&config.key_label).is_ok() {
             // Key exists — check policy match.

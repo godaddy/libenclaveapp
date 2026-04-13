@@ -89,8 +89,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn find_bridge_executable_returns_none_on_dev_machine() {
-        let result = find_bridge_executable("test-app", &[]);
         // Should return None on most dev machines (not WSL with bridge installed).
-        let _ = result;
+        drop(find_bridge_executable("test-app", &[]));
     }
 }
