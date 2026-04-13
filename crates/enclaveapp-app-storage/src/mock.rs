@@ -1,0 +1,206 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! Mock encryption storage for testing without hardware.
+//!
+//! Uses AES-256-GCM with a random in-memory key. Provides no hardware
+//! backing; suitable only for tests and development.
+
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use rand::RngCore;
+
+use crate::encryption::EncryptionStorage;
+use crate::error::{Result, StorageError};
+use crate::platform::BackendKind;
+
+/// Nonce size for AES-256-GCM (96 bits).
+const NONCE_SIZE: usize = 12;
+
+/// Mock secure storage for testing.
+///
+/// Uses AES-256-GCM with a random in-memory key.
+/// Encrypts/decrypts in a format compatible with test assertions
+/// but does not provide hardware-backed security.
+pub struct MockEncryptionStorage {
+    cipher: Aes256Gcm,
+}
+
+impl std::fmt::Debug for MockEncryptionStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockEncryptionStorage")
+            .field("cipher", &"<Aes256Gcm>")
+            .finish()
+    }
+}
+
+impl MockEncryptionStorage {
+    /// Create a new mock storage with a randomly generated AES-256 key.
+    pub fn new() -> Self {
+        let mut key_bytes = [0_u8; 32];
+        rand::thread_rng().fill_bytes(&mut key_bytes);
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .expect("32-byte key is always valid for AES-256-GCM");
+        Self { cipher }
+    }
+}
+
+impl Default for MockEncryptionStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EncryptionStorage for MockEncryptionStorage {
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let mut nonce_bytes = [0_u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| StorageError::EncryptionFailed(e.to_string()))?;
+
+        let mut output = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+        output.extend_from_slice(&nonce_bytes);
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        if ciphertext.len() < NONCE_SIZE {
+            return Err(StorageError::DecryptionFailed(
+                "ciphertext too short to contain nonce".into(),
+            ));
+        }
+
+        let (nonce_bytes, encrypted) = ciphertext.split_at(NONCE_SIZE);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        self.cipher
+            .decrypt(nonce, encrypted)
+            .map_err(|e| StorageError::DecryptionFailed(e.to_string()))
+    }
+
+    fn destroy(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "Mock (AES-GCM)"
+    }
+
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Software
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let storage = MockEncryptionStorage::new();
+        let plaintext = b"hello, secure world!";
+
+        let ciphertext = storage.encrypt(plaintext).unwrap();
+        assert_ne!(ciphertext, plaintext);
+        assert!(ciphertext.len() > plaintext.len());
+
+        let decrypted = storage.decrypt(&ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_produces_different_ciphertexts() {
+        let storage = MockEncryptionStorage::new();
+        let plaintext = b"same input";
+
+        let ct1 = storage.encrypt(plaintext).unwrap();
+        let ct2 = storage.encrypt(plaintext).unwrap();
+        assert_ne!(ct1, ct2);
+    }
+
+    #[test]
+    fn decrypt_empty_input_fails() {
+        let storage = MockEncryptionStorage::new();
+        assert!(storage.decrypt(&[]).is_err());
+    }
+
+    #[test]
+    fn decrypt_short_input_fails() {
+        let storage = MockEncryptionStorage::new();
+        assert!(storage.decrypt(&[0_u8; 5]).is_err());
+    }
+
+    #[test]
+    fn decrypt_tampered_ciphertext_fails() {
+        let storage = MockEncryptionStorage::new();
+        let mut ciphertext = storage.encrypt(b"sensitive data").unwrap();
+        if let Some(byte) = ciphertext.get_mut(NONCE_SIZE + 1) {
+            *byte ^= 0xff;
+        }
+        assert!(storage.decrypt(&ciphertext).is_err());
+    }
+
+    #[test]
+    fn decrypt_wrong_key_fails() {
+        let s1 = MockEncryptionStorage::new();
+        let s2 = MockEncryptionStorage::new();
+
+        let ciphertext = s1.encrypt(b"key-specific").unwrap();
+        assert!(s2.decrypt(&ciphertext).is_err());
+    }
+
+    #[test]
+    fn encrypt_empty_plaintext() {
+        let storage = MockEncryptionStorage::new();
+        let ciphertext = storage.encrypt(b"").unwrap();
+        let decrypted = storage.decrypt(&ciphertext).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn encrypt_large_plaintext() {
+        let storage = MockEncryptionStorage::new();
+        let plaintext = vec![0xAB_u8; 100_000];
+        let ciphertext = storage.encrypt(&plaintext).unwrap();
+        let decrypted = storage.decrypt(&ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn trait_methods() {
+        let storage = MockEncryptionStorage::new();
+        assert!(storage.is_available());
+        assert_eq!(storage.backend_name(), "Mock (AES-GCM)");
+        assert_eq!(storage.backend_kind(), BackendKind::Software);
+        assert!(storage.destroy().is_ok());
+    }
+
+    #[test]
+    fn default_impl_works() {
+        let storage = MockEncryptionStorage::default();
+        let ciphertext = storage.encrypt(b"default test").unwrap();
+        let decrypted = storage.decrypt(&ciphertext).unwrap();
+        assert_eq!(decrypted, b"default test");
+    }
+
+    #[test]
+    fn encrypt_decrypt_various_sizes() {
+        let storage = MockEncryptionStorage::new();
+        for size in [0, 1, 100, 10_000] {
+            let plaintext = vec![0xAA_u8; size];
+            let ciphertext = storage.encrypt(&plaintext).unwrap();
+            let decrypted = storage.decrypt(&ciphertext).unwrap();
+            assert_eq!(decrypted, plaintext, "roundtrip failed for size {size}");
+        }
+    }
+}

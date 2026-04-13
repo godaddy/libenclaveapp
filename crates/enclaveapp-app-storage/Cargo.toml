@@ -1,0 +1,36 @@
+[package]
+name = "enclaveapp-app-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "High-level application storage for hardware-backed key management"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+mock = ["aes-gcm", "rand"]
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+
+# Mock backend (feature-gated)
+aes-gcm = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+enclaveapp-apple = { workspace = true, features = ["signing", "encryption"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+enclaveapp-windows = { workspace = true, features = ["signing", "encryption"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+enclaveapp-software = { workspace = true, features = ["signing", "encryption"] }
+enclaveapp-bridge = { workspace = true }
+enclaveapp-wsl = { workspace = true }
+enclaveapp-linux-tpm = { workspace = true, features = ["signing"] }

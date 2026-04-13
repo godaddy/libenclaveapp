@@ -45,6 +45,7 @@ Rust workspace under `crates/`:
 - **enclaveapp-wsl** — WSL detection (`is_wsl`, `detect_distros`), managed shell config block injection/removal for `.bashrc`/`.zshrc`, syntax validation. Parameterized by app name.
 - **enclaveapp-bridge** — JSON-RPC over stdin/stdout TPM bridge. Client side (WSL discovers and calls Windows bridge binary) and protocol types. Server implementation lives in consuming apps.
 - **enclaveapp-software** — Software-only P-256 backend for Linux (feature `signing` and `encryption`). Uses `p256` crate for real ECDSA/ECDH crypto and `aes-gcm` for symmetric encryption. Private keys stored as files on disk (not hardware-backed). Same ECIES wire format as hardware backends.
+- **enclaveapp-app-storage** — High-level shared application storage. Automatic platform detection, key initialization, policy mismatch handling, and encrypt/decrypt/sign wrapping. Used by all three consuming apps (awsenc, sso-jwt, sshenc) to eliminate duplicated secure storage code. Includes `MockEncryptionStorage` behind the `mock` feature.
 - **enclaveapp-test-support** — `MockKeyBackend` implementing all three traits with deterministic in-memory operations. XOR-based mock crypto for testing control flow without hardware.
 
 ### Key Patterns
