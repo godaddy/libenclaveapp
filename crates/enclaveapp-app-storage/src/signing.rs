@@ -30,7 +30,7 @@ enum SigningInner {
     #[cfg(target_os = "windows")]
     Tpm(enclaveapp_windows::TpmSigner),
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     LinuxTpm(enclaveapp_linux_tpm::LinuxTpmSigner),
 
     #[cfg(target_os = "linux")]
@@ -150,7 +150,7 @@ impl AppSigningBackend {
             #[cfg(target_os = "windows")]
             SigningInner::Tpm(s) => s,
 
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             SigningInner::LinuxTpm(s) => s,
 
             #[cfg(target_os = "linux")]
@@ -167,7 +167,7 @@ impl AppSigningBackend {
             #[cfg(target_os = "windows")]
             SigningInner::Tpm(s) => s,
 
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             SigningInner::LinuxTpm(s) => s,
 
             #[cfg(target_os = "linux")]
