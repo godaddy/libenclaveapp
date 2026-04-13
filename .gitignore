@@ -2,3 +2,6 @@
 .DS_Store
 *.swp
 *.swo
+/sshenc
+/awsenc
+/sso-jwt
