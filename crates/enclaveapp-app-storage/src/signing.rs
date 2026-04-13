@@ -7,8 +7,7 @@
 //! Exposes the underlying `EnclaveSigner` and `EnclaveKeyManager` traits
 //! so sshenc can build its richer `KeyBackend` on top.
 
-#[allow(unused_imports)]
-use crate::error::{Result, StorageError};
+use crate::error::Result;
 use crate::platform::BackendKind;
 use crate::StorageConfig;
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
@@ -69,7 +68,7 @@ impl AppSigningBackend {
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = config;
-            Err(StorageError::NotAvailable)
+            Err(crate::error::StorageError::NotAvailable)
         }
     }
 
@@ -82,13 +81,10 @@ impl AppSigningBackend {
         let signer =
             enclaveapp_apple::SecureEnclaveSigner::with_keys_dir(&config.app_name, keys_dir);
 
-        if !signer.is_available() {
-            return Err(StorageError::NotAvailable);
-        }
-
         debug!(
-            "Secure Enclave signing backend ready (app={})",
-            config.app_name
+            "Secure Enclave signing backend initialized (app={}, available={})",
+            config.app_name,
+            signer.is_available()
         );
         Ok(Self {
             kind: BackendKind::SecureEnclave,
@@ -104,11 +100,11 @@ impl AppSigningBackend {
             .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
         let signer = enclaveapp_windows::TpmSigner::with_keys_dir(&config.app_name, keys_dir);
 
-        if !signer.is_available() {
-            return Err(StorageError::NotAvailable);
-        }
-
-        debug!("TPM signing backend ready (app={})", config.app_name);
+        debug!(
+            "TPM signing backend initialized (app={}, available={})",
+            config.app_name,
+            signer.is_available()
+        );
         Ok(Self {
             kind: BackendKind::Tpm,
             inner: SigningInner::Tpm(signer),
