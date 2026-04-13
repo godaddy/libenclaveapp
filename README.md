@@ -8,9 +8,9 @@ libenclaveapp provides ECDSA P-256 signing and ECIES encryption using keys that 
 
 Three applications currently consume this library:
 
-- [sshenc](https://github.com/jgowdy/sshenc) -- SSH key management (signing)
-- [awsenc](https://github.com/jgowdy/awsenc) -- AWS credential caching (encryption)
-- [sso-jwt](https://github.com/jgowdy/sso-jwt) -- SSO JWT caching (encryption)
+- [sshenc](https://github.com/godaddy/sshenc) -- SSH key management (signing)
+- [awsenc](https://github.com/godaddy/awsenc) -- AWS credential caching (encryption)
+- [sso-jwt](https://github.com/godaddy/sso-jwt) -- SSO JWT caching (encryption)
 
 ## Crates
 

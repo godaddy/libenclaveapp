@@ -7,7 +7,7 @@ If you discover a security vulnerability in libenclaveapp, report it privately.
 **Do not open a public GitHub issue for security vulnerabilities.**
 
 Email: Report via GitHub's private vulnerability reporting feature on the
-[libenclaveapp repository](https://github.com/jgowdy/libenclaveapp/security/advisories/new),
+[libenclaveapp repository](https://github.com/godaddy/libenclaveapp/security/advisories/new),
 or contact the maintainer directly.
 
 Include:

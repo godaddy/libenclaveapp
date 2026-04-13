@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Clone libenclaveapp
-        run: git clone --depth 1 https://github.com/jgowdy/libenclaveapp.git ../libenclaveapp
+        run: git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
 
       - name: Install system dependencies (Linux glibc)
         if: runner.os == 'Linux' && inputs.linux_deps != '' && !contains(matrix.target, 'musl')
@@ -295,17 +295,17 @@ jobs:
           cat > /tmp/tap/Formula/${app}.rb << FORMULA
           class ${formula_class} < Formula
             desc "${description}"
-            homepage "https://github.com/jgowdy/${app}"
+            homepage "https://github.com/godaddy/${app}"
             version "${version}"
             license "MIT"
 
             on_arm do
-              url "https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-aarch64-apple-darwin.tar.gz"
+              url "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-aarch64-apple-darwin.tar.gz"
               sha256 "${arm_sha}"
             end
 
             on_intel do
-              url "https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-x86_64-apple-darwin.tar.gz"
+              url "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-x86_64-apple-darwin.tar.gz"
               sha256 "${intel_sha}"
             end
 
@@ -352,11 +352,11 @@ jobs:
           {
               "version": "${version}",
               "description": "${scoop_desc}",
-              "homepage": "https://github.com/jgowdy/${app}",
+              "homepage": "https://github.com/godaddy/${app}",
               "license": "MIT",
               "architecture": {
                   "64bit": {
-                      "url": "https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-x86_64-pc-windows-msvc.zip",
+                      "url": "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-x86_64-pc-windows-msvc.zip",
                       "hash": "${win_sha}"
                   }
               },
@@ -387,9 +387,9 @@ jobs:
           for f in winget/*.yaml; do
             [ -f "$f" ] || continue
             sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
-                -e "s|InstallerUrl: .*|InstallerUrl: https://github.com/jgowdy/${app}/releases/download/${tag}/${app}-x86_64-pc-windows-msvc.msi|" \
+                -e "s|InstallerUrl: .*|InstallerUrl: https://github.com/godaddy/${app}/releases/download/${tag}/${app}-x86_64-pc-windows-msvc.msi|" \
                 -e "s/InstallerSha256: .*/InstallerSha256: ${msi_sha}/" \
-                -e "s|ReleaseNotesUrl: .*|ReleaseNotesUrl: https://github.com/jgowdy/${app}/releases/tag/${tag}|" \
+                -e "s|ReleaseNotesUrl: .*|ReleaseNotesUrl: https://github.com/godaddy/${app}/releases/tag/${tag}|" \
               "$f" > "/tmp/winget/$(basename "$f")"
           done
 
