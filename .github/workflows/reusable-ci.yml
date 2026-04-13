@@ -39,7 +39,14 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Clone libenclaveapp
-        run: git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/godaddy/libenclaveapp.git ../libenclaveapp
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp -r ../libenclaveapp/crates ../crates
+          else
+            ln -s libenclaveapp/crates ../crates
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
