@@ -81,12 +81,7 @@ impl EnclaveKeyManager for LinuxTpmSigner {
         metadata::ensure_dir(&dir)?;
         let _lock = DirLock::acquire(&dir)?;
 
-        // Check for duplicates
-        if dir.join(format!("{label}.tpm_pub")).exists() {
-            return Err(Error::DuplicateLabel {
-                label: label.to_string(),
-            });
-        }
+        tpm::ensure_label_available(&dir, label)?;
 
         let mut ctx = tpm::open_context()?;
         let primary_handle = tpm::create_primary(&mut ctx)?;
@@ -153,7 +148,7 @@ impl EnclaveKeyManager for LinuxTpmSigner {
             });
         }
         let _lock = DirLock::acquire(&dir)?;
-        let blob_existed = tpm::key_blobs_exist(&dir, label);
+        let blob_existed = tpm::key_blobs_exist(&dir, label)?;
         let metadata_existed = metadata::key_files_exist(&dir, label);
         if !blob_existed && !metadata_existed {
             return Err(Error::KeyNotFound {
@@ -319,6 +314,30 @@ mod tests {
             Error::KeyOperation { .. } => {}
             other => panic!("expected KeyOperation, got: {other}"),
         }
+    }
+
+    #[test]
+    fn generate_rejects_duplicate_metadata_without_blob() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-tpm-test-sign-dup-{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let signer = LinuxTpmSigner::with_keys_dir("test", dir.clone());
+        let meta = KeyMeta::new("stray-sign", KeyType::Signing, AccessPolicy::None);
+        metadata::save_meta(&dir, "stray-sign", &meta).unwrap();
+
+        let err = signer
+            .generate("stray-sign", KeyType::Signing, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::DuplicateLabel { label } => assert_eq!(label, "stray-sign"),
+            other => panic!("expected DuplicateLabel, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // Integration tests that require actual TPM hardware.

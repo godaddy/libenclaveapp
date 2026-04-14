@@ -65,6 +65,34 @@ impl BridgeResponse {
             error: None,
         }
     }
+
+    /// Require that the response contains a success result payload.
+    pub fn require_result(&self, operation: &str) -> enclaveapp_core::Result<&str> {
+        if let Some(error) = &self.error {
+            return Err(enclaveapp_core::Error::KeyOperation {
+                operation: operation.into(),
+                detail: error.clone(),
+            });
+        }
+
+        self.result
+            .as_deref()
+            .ok_or_else(|| enclaveapp_core::Error::KeyOperation {
+                operation: operation.into(),
+                detail: "bridge response missing result payload".into(),
+            })
+    }
+
+    /// Require an acknowledged success response.
+    pub fn require_ok(&self, operation: &str) -> enclaveapp_core::Result<()> {
+        let _unused = self.require_result(operation)?;
+        Ok(())
+    }
+
+    /// Decode a base64-encoded success payload.
+    pub fn decode_result(&self, operation: &str) -> enclaveapp_core::Result<Vec<u8>> {
+        decode_data(self.require_result(operation)?)
+    }
 }
 
 /// Encode binary data as base64 for the bridge protocol.
