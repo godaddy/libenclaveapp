@@ -61,7 +61,7 @@ For WSL, discovery is layered:
 
 1. `enclaveapp_bridge::find_bridge(app_name)` for the generic `{app_name}-bridge.exe` path
 2. auto-derived `{app_name}-tpm-bridge.exe` paths under `Program Files` and `ProgramData`
-3. any app-specific `extra_bridge_paths`
+3. any app-specific absolute `extra_bridge_paths`
 
 That lets the shared crate support both the generic bridge naming used by `enclaveapp-bridge` and the app-specific `*-tpm-bridge.exe` binaries used by derived projects.
 
@@ -78,7 +78,7 @@ The duplication was not in the cryptography itself. It was in the surrounding ap
 - create or locate the right key
 - pick the right backend
 - handle WSL paths
-- map biometric flags into access policy
+- pass the full access policy and key label through the bridge protocol
 - convert backend errors into application-level errors
 
 `enclaveapp-app-storage` centralizes that glue while leaving application-specific behavior in the consuming repos.

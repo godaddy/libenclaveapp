@@ -10,6 +10,8 @@ use crate::detect::{detect_distros, WslDistro};
 use crate::shell_config::{install_block, uninstall_block, ShellBlockConfig};
 use std::path::{Path, PathBuf};
 
+pub use crate::detect::decode_wsl_output;
+
 /// Configuration for WSL installation.
 #[derive(Debug, Clone)]
 pub struct WslInstallConfig {
@@ -86,7 +88,10 @@ pub fn unconfigure_all_distros(config: &WslInstallConfig) -> Vec<DistroResult> {
 /// Tries `\\wsl$\<distro>\<path>` first, then `\\wsl.localhost\<distro>\<path>`.
 #[cfg(target_os = "windows")]
 pub fn find_wsl_home(distro: &str) -> Option<PathBuf> {
-    let linux_home = crate::detect::find_linux_home(distro)?;
+    let linux_home = find_linux_home(distro)?;
+    if linux_home.is_empty() {
+        return None;
+    }
 
     for prefix in &[r"\\wsl$", r"\\wsl.localhost"] {
         let win_path = format!(r"{}\{}{}", prefix, distro, linux_home.replace('/', r"\"));
@@ -103,6 +108,12 @@ pub fn find_wsl_home(distro: &str) -> Option<PathBuf> {
 #[cfg(not(target_os = "windows"))]
 pub fn find_wsl_home(_distro: &str) -> Option<PathBuf> {
     None
+}
+
+/// Get the Linux home path string for a distro (e.g., `/home/user`).
+#[cfg(target_os = "windows")]
+fn find_linux_home(distro: &str) -> Option<String> {
+    crate::detect::linux_home(distro)
 }
 
 /// Configure a single WSL distro.
@@ -254,7 +265,7 @@ fn copy_linux_binary(
     std::fs::copy(src, &dest).map_err(|e| format!("copy binary: {e}"))?;
 
     // Make executable via WSL
-    if let Some(linux_home) = crate::detect::find_linux_home(distro_name) {
+    if let Some(linux_home) = find_linux_home(distro_name) {
         let linux_path = format!("{linux_home}/{target}");
         drop(
             std::process::Command::new("wsl")
@@ -294,58 +305,10 @@ fn install_bridge_deps(distro_name: &str, actions: &mut Vec<String>) -> Result<(
 
     // Check and install npiperelay
     if !wsl_has_command(distro_name, "npiperelay.exe") {
-        // npiperelay.exe is a Windows binary invoked from WSL via interop.
-        // The upstream releases are Windows zips (npiperelay_windows_amd64.zip).
-        // We download the Windows zip, extract the .exe, and place it on PATH
-        // inside WSL (e.g. /usr/local/bin) where WSL can invoke it via interop.
-        let install_script = r#"
-            set -e
-            ARCH=$(uname -m)
-            case "$ARCH" in
-                x86_64) WINARCH=amd64 ;;
-                aarch64) WINARCH=arm64 ;;
-                *) echo "unsupported arch: $ARCH"; exit 1 ;;
-            esac
-            URL="https://github.com/jstarks/npiperelay/releases/latest/download/npiperelay_windows_${WINARCH}.zip"
-            TMP=$(mktemp -d)
-            if command -v curl >/dev/null 2>&1; then
-                curl -sL "$URL" -o "$TMP/npiperelay.zip"
-            elif command -v wget >/dev/null 2>&1; then
-                wget -q "$URL" -O "$TMP/npiperelay.zip"
-            else
-                echo "no curl or wget"; exit 1
-            fi
-            if command -v unzip >/dev/null 2>&1; then
-                unzip -qo "$TMP/npiperelay.zip" -d "$TMP" 2>/dev/null
-            elif command -v python3 >/dev/null 2>&1; then
-                python3 -c "import zipfile,sys; zipfile.ZipFile('$TMP/npiperelay.zip').extractall('$TMP')"
-            else
-                echo "no unzip or python3"; exit 1
-            fi
-            if [ -f "$TMP/npiperelay.exe" ]; then
-                sudo mv "$TMP/npiperelay.exe" /usr/local/bin/npiperelay.exe
-                sudo chmod +x /usr/local/bin/npiperelay.exe
-                echo "OK"
-            else
-                if command -v go >/dev/null 2>&1; then
-                    GOBIN=/usr/local/bin go install github.com/jstarks/npiperelay@latest 2>/dev/null && echo "OK" || echo "FAIL"
-                else
-                    echo "FAIL"
-                fi
-            fi
-            rm -rf "$TMP"
-        "#;
-        let output = std::process::Command::new("wsl")
-            .args(["-d", distro_name, "--", "bash", "-c", install_script])
-            .output();
-        match output {
-            Ok(o) if decode_wsl_output(&o.stdout).contains("OK") => {
-                actions.push("Installed npiperelay".to_string());
-            }
-            _ => {
-                actions.push("Warning: could not install npiperelay automatically".to_string());
-            }
-        }
+        actions.push(
+            "npiperelay not installed automatically; install a pinned, verified release manually"
+                .to_string(),
+        );
     } else {
         actions.push("npiperelay already installed".to_string());
     }
@@ -360,11 +323,6 @@ fn wsl_has_command(distro_name: &str, cmd: &str) -> bool {
         .args(["-d", distro_name, "--", "command", "-v", cmd])
         .output()
         .is_ok_and(|o| o.status.success())
-}
-
-/// Decode WSL output, handling both UTF-8 and UTF-16LE (with BOM).
-pub fn decode_wsl_output(bytes: &[u8]) -> String {
-    crate::detect::decode_wsl_output(bytes)
 }
 
 #[cfg(test)]

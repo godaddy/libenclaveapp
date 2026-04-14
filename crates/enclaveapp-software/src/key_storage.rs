@@ -8,6 +8,11 @@
 //! keyring. When the keyring is unavailable, keys are stored unencrypted
 //! with a one-time warning to stderr.
 
+#![cfg_attr(
+    not(any(feature = "signing", feature = "encryption")),
+    allow(dead_code)
+)]
+
 use elliptic_curve::sec1::ToEncodedPoint;
 use enclaveapp_core::metadata::{self, KeyMeta};
 use enclaveapp_core::types::validate_label;
