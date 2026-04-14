@@ -254,7 +254,7 @@ fn copy_linux_binary(
     std::fs::copy(src, &dest).map_err(|e| format!("copy binary: {e}"))?;
 
     // Make executable via WSL
-    if let Some(linux_home) = find_linux_home(distro_name) {
+    if let Some(linux_home) = crate::detect::find_linux_home(distro_name) {
         let linux_path = format!("{linux_home}/{target}");
         drop(
             std::process::Command::new("wsl")

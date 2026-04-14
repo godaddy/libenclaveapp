@@ -230,6 +230,7 @@ pub fn bridge_decrypt(
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn temp_script(name: &str, body: &str) -> PathBuf {
@@ -239,9 +240,12 @@ mod tests {
             name
         ));
         fs::write(&path, body).unwrap();
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        }
         path
     }
 

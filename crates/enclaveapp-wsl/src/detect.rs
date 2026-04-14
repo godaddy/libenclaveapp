@@ -43,10 +43,7 @@ pub fn detect_distros() -> Vec<WslDistro> {
     {
         // Run: wsl --list --quiet
         // Parse output (handle BOM, null bytes in UTF-16 output)
-        let output = match std::process::Command::new("wsl")
-            .args(["--list", "--quiet"])
-            .output()
-        {
+        let output = match Command::new("wsl").args(["--list", "--quiet"]).output() {
             Ok(o) if o.status.success() => o,
             _ => return Vec::new(),
         };
