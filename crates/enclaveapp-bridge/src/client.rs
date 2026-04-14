@@ -129,19 +129,25 @@ pub fn call_bridge(bridge_path: &Path, request: &BridgeRequest) -> Result<Bridge
     Ok(response)
 }
 
-fn init_request(app_name: &str, biometric: bool) -> BridgeRequest {
+fn init_request(app_name: &str, key_label: &str, biometric: bool) -> BridgeRequest {
     BridgeRequest {
         method: "init".to_string(),
         params: BridgeParams {
             data: String::new(),
             biometric,
             app_name: app_name.to_string(),
+            key_label: key_label.to_string(),
         },
     }
 }
 
-pub fn bridge_init(bridge_path: &Path, app_name: &str, biometric: bool) -> Result<()> {
-    let response = call_bridge(bridge_path, &init_request(app_name, biometric))?;
+pub fn bridge_init(
+    bridge_path: &Path,
+    app_name: &str,
+    key_label: &str,
+    biometric: bool,
+) -> Result<()> {
+    let response = call_bridge(bridge_path, &init_request(app_name, key_label, biometric))?;
     drop(response.result);
     Ok(())
 }
@@ -149,23 +155,25 @@ pub fn bridge_init(bridge_path: &Path, app_name: &str, biometric: bool) -> Resul
 fn call_bridge_after_init(
     bridge_path: &Path,
     app_name: &str,
+    key_label: &str,
     biometric: bool,
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
     let mut session = BridgeSession::spawn(bridge_path)?;
-    session.request(&init_request(app_name, biometric))?;
+    session.request(&init_request(app_name, key_label, biometric))?;
     let response = session.request(request)?;
     session.finish()?;
     Ok(response)
 }
 
-pub fn bridge_delete(bridge_path: &Path, app_name: &str) -> Result<()> {
+pub fn bridge_delete(bridge_path: &Path, app_name: &str, key_label: &str) -> Result<()> {
     let request = BridgeRequest {
         method: "delete".to_string(),
         params: BridgeParams {
             data: String::new(),
             biometric: false,
             app_name: app_name.to_string(),
+            key_label: key_label.to_string(),
         },
     };
     let response = call_bridge(bridge_path, &request)?;
@@ -177,6 +185,7 @@ pub fn bridge_delete(bridge_path: &Path, app_name: &str) -> Result<()> {
 pub fn bridge_encrypt(
     bridge_path: &Path,
     app_name: &str,
+    key_label: &str,
     plaintext: &[u8],
     biometric: bool,
 ) -> Result<Vec<u8>> {
@@ -186,9 +195,10 @@ pub fn bridge_encrypt(
             data: encode_data(plaintext),
             biometric,
             app_name: app_name.to_string(),
+            key_label: key_label.to_string(),
         },
     };
-    let response = call_bridge_after_init(bridge_path, app_name, biometric, &request)?;
+    let response = call_bridge_after_init(bridge_path, app_name, key_label, biometric, &request)?;
     let result = response.result.unwrap_or_default();
     decode_data(&result)
 }
@@ -197,6 +207,7 @@ pub fn bridge_encrypt(
 pub fn bridge_decrypt(
     bridge_path: &Path,
     app_name: &str,
+    key_label: &str,
     ciphertext: &[u8],
     biometric: bool,
 ) -> Result<Vec<u8>> {
@@ -206,9 +217,10 @@ pub fn bridge_decrypt(
             data: encode_data(ciphertext),
             biometric,
             app_name: app_name.to_string(),
+            key_label: key_label.to_string(),
         },
     };
-    let response = call_bridge_after_init(bridge_path, app_name, biometric, &request)?;
+    let response = call_bridge_after_init(bridge_path, app_name, key_label, biometric, &request)?;
     let result = response.result.unwrap_or_default();
     decode_data(&result)
 }
@@ -246,7 +258,10 @@ mod tests {
             "encrypt.sh",
             r#"#!/bin/sh
 read init_line
-printf '{"result":"","error":null}\n'
+case "$init_line" in
+  *'"method":"init"'*'"key_label":"cache-key"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
+esac
 read request_line
 case "$request_line" in
   *'"method":"encrypt"'*) printf '{"result":"aGVsbG8=","error":null}\n' ;;
@@ -255,7 +270,7 @@ esac
 "#,
         );
 
-        let plaintext = bridge_encrypt(&script, "awsenc", b"ignored", true).unwrap();
+        let plaintext = bridge_encrypt(&script, "awsenc", "cache-key", b"ignored", true).unwrap();
         assert_eq!(plaintext, b"hello");
         fs::remove_file(script).unwrap();
     }
@@ -267,13 +282,30 @@ esac
             r#"#!/bin/sh
 read request_line
 case "$request_line" in
-  *'"method":"delete"'*) printf '{"result":"","error":null}\n' ;;
+  *'"method":"delete"'*'"key_label":"cache-key"'*) printf '{"result":"","error":null}\n' ;;
   *) printf '{"result":null,"error":"unexpected request"}\n' ;;
 esac
 "#,
         );
 
-        bridge_delete(&script, "awsenc").unwrap();
+        bridge_delete(&script, "awsenc", "cache-key").unwrap();
+        fs::remove_file(script).unwrap();
+    }
+
+    #[test]
+    fn bridge_init_sends_key_label() {
+        let script = temp_script(
+            "init.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"init"'*'"app_name":"awsenc"'*'"key_label":"cache-key"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+
+        bridge_init(&script, "awsenc", "cache-key", true).unwrap();
         fs::remove_file(script).unwrap();
     }
 }

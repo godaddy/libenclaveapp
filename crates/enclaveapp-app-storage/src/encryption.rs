@@ -103,12 +103,10 @@ impl AppEncryptionStorage {
     #[cfg(target_os = "macos")]
     fn init_macos(config: &StorageConfig) -> Result<Self> {
         let encryptor = match &config.keys_dir {
-            Some(keys_dir) => {
-                enclaveapp_apple::SecureEnclaveEncryptor::with_keys_dir(
-                    &config.app_name,
-                    keys_dir.clone(),
-                )
-            }
+            Some(keys_dir) => enclaveapp_apple::SecureEnclaveEncryptor::with_keys_dir(
+                &config.app_name,
+                keys_dir.clone(),
+            ),
             None => enclaveapp_apple::SecureEnclaveEncryptor::new(&config.app_name),
         };
 
@@ -172,12 +170,10 @@ impl AppEncryptionStorage {
         }
 
         let encryptor = match &config.keys_dir {
-            Some(keys_dir) => {
-                enclaveapp_software::SoftwareEncryptor::with_keys_dir(
-                    &config.app_name,
-                    keys_dir.clone(),
-                )
-            }
+            Some(keys_dir) => enclaveapp_software::SoftwareEncryptor::with_keys_dir(
+                &config.app_name,
+                keys_dir.clone(),
+            ),
             None => enclaveapp_software::SoftwareEncryptor::new(&config.app_name),
         };
 
@@ -213,8 +209,13 @@ impl AppEncryptionStorage {
         );
 
         let biometric = config.access_policy != AccessPolicy::None;
-        enclaveapp_bridge::bridge_init(&bridge_path, &config.app_name, biometric)
-            .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
+        enclaveapp_bridge::bridge_init(
+            &bridge_path,
+            &config.app_name,
+            &config.key_label,
+            biometric,
+        )
+        .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
 
         Ok(Self {
             kind: BackendKind::TpmBridge,
@@ -311,6 +312,7 @@ impl EncryptionStorage for AppEncryptionStorage {
             } => enclaveapp_bridge::bridge_encrypt(
                 bridge_path,
                 &self.app_name,
+                &self.key_label,
                 plaintext,
                 *biometric,
             )
@@ -350,6 +352,7 @@ impl EncryptionStorage for AppEncryptionStorage {
             } => enclaveapp_bridge::bridge_decrypt(
                 bridge_path,
                 &self.app_name,
+                &self.key_label,
                 ciphertext,
                 *biometric,
             )
@@ -375,11 +378,10 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .map_err(|e| StorageError::KeyNotFound(e.to_string())),
 
             #[cfg(target_os = "linux")]
-            StorageInner::WslBridge { bridge_path, .. } => enclaveapp_bridge::bridge_delete(
-                bridge_path,
-                &self.app_name,
-            )
-            .map_err(|e| StorageError::KeyNotFound(e.to_string())),
+            StorageInner::WslBridge { bridge_path, .. } => {
+                enclaveapp_bridge::bridge_delete(bridge_path, &self.app_name, &self.key_label)
+                    .map_err(|e| StorageError::KeyNotFound(e.to_string()))
+            }
         }
     }
 
@@ -433,6 +435,9 @@ mod tests {
     fn resolved_keys_dir_uses_override_when_configured() {
         let mut config = test_config();
         config.keys_dir = Some(PathBuf::from("/tmp/custom-keys"));
-        assert_eq!(resolved_keys_dir(&config), PathBuf::from("/tmp/custom-keys"));
+        assert_eq!(
+            resolved_keys_dir(&config),
+            PathBuf::from("/tmp/custom-keys")
+        );
     }
 }

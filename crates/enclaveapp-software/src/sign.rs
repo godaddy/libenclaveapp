@@ -53,6 +53,7 @@ impl EnclaveKeyManager for SoftwareSigner {
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
+        validate_label(label)?;
         key_storage::load_public_key(&self.config, label)
     }
 
@@ -61,6 +62,7 @@ impl EnclaveKeyManager for SoftwareSigner {
     }
 
     fn delete_key(&self, label: &str) -> Result<()> {
+        validate_label(label)?;
         key_storage::delete_key(&self.config, label)
     }
 
@@ -73,6 +75,7 @@ impl EnclaveSigner for SoftwareSigner {
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         use p256::ecdsa::{signature::Signer, SigningKey};
 
+        validate_label(label)?;
         let secret = key_storage::load_secret_key(&self.config, label)?;
         let signing_key = SigningKey::from(&secret);
 
@@ -207,6 +210,23 @@ mod tests {
         let dir = test_dir();
         let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
         assert!(signer.is_available());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn software_signer_rejects_invalid_labels_across_operations() {
+        let dir = test_dir();
+        let signer = SoftwareSigner::with_keys_dir("test", dir.clone()).without_keyring();
+
+        let err = signer.public_key("../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = signer.delete_key("../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = signer.sign("../escape", b"payload").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

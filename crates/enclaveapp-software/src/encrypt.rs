@@ -60,6 +60,7 @@ impl EnclaveKeyManager for SoftwareEncryptor {
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
+        validate_label(label)?;
         key_storage::load_public_key(&self.config, label)
     }
 
@@ -68,6 +69,7 @@ impl EnclaveKeyManager for SoftwareEncryptor {
     }
 
     fn delete_key(&self, label: &str) -> Result<()> {
+        validate_label(label)?;
         key_storage::delete_key(&self.config, label)
     }
 
@@ -100,6 +102,7 @@ impl EnclaveEncryptor for SoftwareEncryptor {
         use p256::ecdh::diffie_hellman;
         use rand::RngCore;
 
+        validate_label(label)?;
         // Load the stored public key
         let pub_bytes = key_storage::load_public_key(&self.config, label)?;
         let stored_point =
@@ -153,6 +156,7 @@ impl EnclaveEncryptor for SoftwareEncryptor {
         use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
         use p256::ecdh::diffie_hellman;
 
+        validate_label(label)?;
         if ciphertext.len() < MIN_CIPHERTEXT_LEN {
             return Err(Error::DecryptFailed {
                 detail: "ciphertext too short".into(),
@@ -668,6 +672,26 @@ mod tests {
             Error::KeyNotFound { label } => assert_eq!(label, "del-enc"),
             other => panic!("expected KeyNotFound, got: {other}"),
         }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn software_encryptor_rejects_invalid_labels_across_operations() {
+        let dir = test_dir();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+
+        let err = enc.public_key("../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = enc.delete_key("../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = enc.encrypt("../escape", b"payload").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = enc.decrypt("../escape", b"ciphertext").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

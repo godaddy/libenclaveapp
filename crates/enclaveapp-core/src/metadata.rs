@@ -185,6 +185,7 @@ pub fn restrict_file_permissions(path: &Path) -> Result<()> {
 
 /// Save key metadata to a JSON file.
 pub fn save_meta(dir: &Path, label: &str, meta: &KeyMeta) -> Result<()> {
+    crate::types::validate_label(label)?;
     let meta_path = dir.join(format!("{label}.meta"));
     let json =
         serde_json::to_string_pretty(meta).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -193,6 +194,7 @@ pub fn save_meta(dir: &Path, label: &str, meta: &KeyMeta) -> Result<()> {
 
 /// Load key metadata from a JSON file. Returns a default if the file doesn't exist.
 pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
+    crate::types::validate_label(label)?;
     let meta_path = dir.join(format!("{label}.meta"));
     if !meta_path.exists() {
         return Ok(KeyMeta {
@@ -209,12 +211,14 @@ pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
 
 /// Save a cached public key file.
 pub fn save_pub_key(dir: &Path, label: &str, pub_key: &[u8]) -> Result<()> {
+    crate::types::validate_label(label)?;
     let path = dir.join(format!("{label}.pub"));
     atomic_write(&path, pub_key)
 }
 
 /// Load a cached public key file.
 pub fn load_pub_key(dir: &Path, label: &str) -> Result<Vec<u8>> {
+    crate::types::validate_label(label)?;
     let path = dir.join(format!("{label}.pub"));
     if !path.exists() {
         return Err(Error::KeyNotFound {
@@ -245,6 +249,7 @@ pub fn list_labels(dir: &Path) -> Result<Vec<String>> {
 
 /// Delete all files associated with a key label.
 pub fn delete_key_files(dir: &Path, label: &str) -> Result<()> {
+    crate::types::validate_label(label)?;
     let extensions = ["meta", "pub", "handle", "ssh.pub"];
     let mut found_any = false;
     for ext in &extensions {
@@ -283,6 +288,8 @@ fn rename_key_files_with_writer<F>(
 where
     F: Fn(&Path, &[u8]) -> Result<()>,
 {
+    crate::types::validate_label(old_label)?;
+    crate::types::validate_label(new_label)?;
     let extensions = ["meta", "pub", "handle", "ssh.pub"];
     let old_handle = dir.join(format!("{old_label}.handle"));
     let old_meta = dir.join(format!("{old_label}.meta"));
@@ -475,6 +482,33 @@ mod tests {
             Error::KeyNotFound { label } => assert_eq!(label, "missing"),
             other => panic!("expected KeyNotFound, got: {other}"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
+    fn metadata_label_operations_reject_invalid_labels() {
+        let dir = test_dir();
+        let meta = KeyMeta::new("valid", KeyType::Signing, AccessPolicy::None);
+
+        let err = save_meta(&dir, "../escape", &meta).unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = load_meta(&dir, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = save_pub_key(&dir, "../escape", b"pubkey").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = load_pub_key(&dir, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = delete_key_files(&dir, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = rename_key_files(&dir, "valid", "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

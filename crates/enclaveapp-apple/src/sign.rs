@@ -48,6 +48,7 @@ impl EnclaveKeyManager for SecureEnclaveSigner {
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
+        validate_label(label)?;
         keychain::load_pub_key(&self.config, label, KeyType::Signing)
     }
 
@@ -56,6 +57,7 @@ impl EnclaveKeyManager for SecureEnclaveSigner {
     }
 
     fn delete_key(&self, label: &str) -> Result<()> {
+        validate_label(label)?;
         keychain::delete_key(&self.config, label)
     }
 
@@ -67,6 +69,7 @@ impl EnclaveKeyManager for SecureEnclaveSigner {
 impl EnclaveSigner for SecureEnclaveSigner {
     #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
+        validate_label(label)?;
         let data_rep = keychain::load_handle(&self.config, label)?;
 
         let mut sig = vec![0_u8; 128]; // DER ECDSA P-256 sig is at most ~72 bytes
