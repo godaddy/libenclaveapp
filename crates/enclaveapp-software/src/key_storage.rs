@@ -10,6 +10,7 @@
 
 use elliptic_curve::sec1::ToEncodedPoint;
 use enclaveapp_core::metadata::{self, KeyMeta};
+use enclaveapp_core::types::validate_label;
 use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use p256::SecretKey;
 use std::path::PathBuf;
@@ -50,10 +51,12 @@ pub struct SoftwareConfig {
     /// the `keyring-storage` feature is enabled, `false` otherwise.
     /// Set to `false` for testing or environments where the keyring
     /// is known to be unavailable.
+    #[allow(dead_code)]
     pub use_keyring: bool,
 }
 
 impl SoftwareConfig {
+    #[allow(dead_code)]
     pub fn new(app_name: &str) -> Self {
         Self {
             app_name: app_name.to_string(),
@@ -287,13 +290,14 @@ pub fn generate_and_save(
     key_type: KeyType,
     policy: AccessPolicy,
 ) -> Result<Vec<u8>> {
+    validate_label(label)?;
     let dir = config.keys_dir();
     metadata::ensure_dir(&dir)?;
     let _lock = metadata::DirLock::acquire(&dir)?;
 
     // Check for duplicates
     let key_path = dir.join(format!("{label}.key"));
-    if key_path.exists() {
+    if key_path.exists() || metadata::key_files_exist(&dir, label) {
         return Err(Error::DuplicateLabel {
             label: label.to_string(),
         });
@@ -322,6 +326,7 @@ pub fn generate_and_save(
 
 /// Load a secret key from disk.
 pub fn load_secret_key(config: &SoftwareConfig, label: &str) -> Result<SecretKey> {
+    validate_label(label)?;
     let key_path = config.keys_dir().join(format!("{label}.key"));
     if !key_path.exists() {
         return Err(Error::KeyNotFound {
@@ -337,6 +342,7 @@ pub fn load_secret_key(config: &SoftwareConfig, label: &str) -> Result<SecretKey
 
 /// Load the cached public key, or derive it from the secret key.
 pub fn load_public_key(config: &SoftwareConfig, label: &str) -> Result<Vec<u8>> {
+    validate_label(label)?;
     let dir = config.keys_dir();
     match metadata::load_pub_key(&dir, label) {
         Ok(pub_key) => Ok(pub_key),
@@ -359,7 +365,15 @@ pub fn list_labels(config: &SoftwareConfig) -> Result<Vec<String>> {
 
 /// Delete a key and all associated files.
 pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
+    validate_label(label)?;
     let dir = config.keys_dir();
+    let key_path = dir.join(format!("{label}.key"));
+    let key_exists = dir.exists() && (key_path.exists() || metadata::key_files_exist(&dir, label));
+    if !key_exists {
+        return Err(Error::KeyNotFound {
+            label: label.to_string(),
+        });
+    }
     let _lock = metadata::DirLock::acquire(&dir)?;
 
     // Remove the keyring entry (ignore errors -- may not exist)
@@ -367,12 +381,14 @@ pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     delete_keyring_entry(&config.app_name, label);
 
     // Remove the private key file
-    let key_path = dir.join(format!("{label}.key"));
     if key_path.exists() {
         std::fs::remove_file(&key_path)?;
     }
 
-    metadata::delete_key_files(&dir, label)
+    match metadata::delete_key_files(&dir, label) {
+        Ok(()) | Err(Error::KeyNotFound { .. }) => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Encrypt a raw private key with the given KEK using AES-256-GCM.
@@ -516,6 +532,31 @@ mod tests {
 
         let loaded = load_public_key(&config, "fallback").unwrap();
         assert_eq!(loaded, generated);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn generate_and_save_rejects_duplicate_pub_or_meta_without_private_key() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        metadata::ensure_dir(&dir).unwrap();
+
+        std::fs::write(dir.join("orphan.pub"), b"existing-pub").unwrap();
+        let err =
+            generate_and_save(&config, "orphan", KeyType::Signing, AccessPolicy::None).unwrap_err();
+        assert!(matches!(err, Error::DuplicateLabel { label } if label == "orphan"));
+
+        std::fs::remove_file(dir.join("orphan.pub")).unwrap();
+        metadata::save_meta(
+            &dir,
+            "orphan",
+            &KeyMeta::new("orphan", KeyType::Signing, AccessPolicy::None),
+        )
+        .unwrap();
+        let err =
+            generate_and_save(&config, "orphan", KeyType::Signing, AccessPolicy::None).unwrap_err();
+        assert!(matches!(err, Error::DuplicateLabel { label } if label == "orphan"));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -682,26 +723,16 @@ mod tests {
 
     #[test]
     fn generate_with_invalid_label_returns_error() {
-        // generate_and_save itself does not call validate_label (that's
-        // done by the trait impls in sign.rs/encrypt.rs), but labels
-        // with path separators or special chars should still produce a
-        // file. We test via the trait impls in sign.rs/encrypt.rs tests
-        // instead. Here we verify that an empty-string label at least
-        // creates the file (the raw function doesn't validate).
-        //
-        // Actually, generate_and_save does NOT validate labels — it just
-        // creates files. The SoftwareSigner/SoftwareEncryptor wrappers
-        // call validate_label. So we verify that behavior in a separate
-        // test that uses the trait impls. Here we just confirm that the
-        // function succeeds with a regular label but test invalid labels
-        // via the signer/encryptor.
-        //
-        // For completeness, we verify the function works with a basic label.
         let dir = test_dir();
         let config = test_config(&dir);
-        let result =
-            generate_and_save(&config, "valid-label", KeyType::Signing, AccessPolicy::None);
-        assert!(result.is_ok());
+
+        let err = generate_and_save(&config, "", KeyType::Signing, AccessPolicy::None).unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = generate_and_save(&config, "bad/label", KeyType::Signing, AccessPolicy::None)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -729,6 +760,36 @@ mod tests {
             Error::KeyNotFound { label } => assert_eq!(label, "nonexistent"),
             other => panic!("expected KeyNotFound, got: {other}"),
         }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_key_missing_dir_returns_key_not_found() {
+        let dir =
+            std::env::temp_dir().join(format!("enclaveapp-sw-missing-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        let config = SoftwareConfig::with_keys_dir("test-app", dir);
+        let err = delete_key(&config, "ghost").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "ghost"),
+            other => panic!("expected KeyNotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn key_storage_operations_reject_invalid_labels() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+
+        let err = load_secret_key(&config, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = load_public_key(&config, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = delete_key(&config, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

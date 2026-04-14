@@ -7,7 +7,7 @@
 
 use crate::ffi;
 use enclaveapp_core::metadata::{self, KeyMeta};
-use enclaveapp_core::types::KeyType;
+use enclaveapp_core::types::{validate_label, KeyType};
 use enclaveapp_core::{Error, Result};
 use std::path::PathBuf;
 
@@ -169,6 +169,7 @@ pub fn save_key(
 
 /// Load a key's data representation from the keys directory.
 pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
+    validate_label(label)?;
     let path = config.keys_dir().join(format!("{label}.handle"));
     if !path.exists() {
         return Err(Error::KeyNotFound {
@@ -180,6 +181,7 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
 
 /// Load the cached public key for a label. Falls back to extracting from data rep.
 pub fn load_pub_key(config: &KeychainConfig, label: &str, key_type: KeyType) -> Result<Vec<u8>> {
+    validate_label(label)?;
     let dir = config.keys_dir();
     match metadata::load_pub_key(&dir, label) {
         Ok(pub_key) => Ok(pub_key),
@@ -197,13 +199,21 @@ pub fn list_labels(config: &KeychainConfig) -> Result<Vec<String>> {
 
 /// Delete a key and all associated files.
 pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
+    validate_label(label)?;
     let dir = config.keys_dir();
+    let key_exists = dir.exists()
+        && (dir.join(format!("{label}.handle")).exists() || metadata::key_files_exist(&dir, label));
+    if !key_exists {
+        return Err(Error::KeyNotFound {
+            label: label.to_string(),
+        });
+    }
     let _lock = metadata::DirLock::acquire(&dir)?;
     metadata::delete_key_files(&dir, label)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -242,5 +252,35 @@ mod tests {
         let custom = PathBuf::from("/tmp/my-custom-keys");
         let config = KeychainConfig::with_keys_dir("test-app", custom.clone());
         assert_eq!(config.keys_dir(), custom);
+    }
+
+    #[test]
+    fn delete_missing_key_in_missing_dir_returns_key_not_found() {
+        let dir =
+            std::env::temp_dir().join(format!("enclaveapp-apple-missing-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        let config = KeychainConfig::with_keys_dir("test-app", dir);
+        let err = delete_key(&config, "ghost").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "ghost"),
+            other => panic!("expected KeyNotFound, got {other}"),
+        }
+    }
+
+    #[test]
+    fn keychain_operations_reject_invalid_labels() {
+        let dir =
+            std::env::temp_dir().join(format!("enclaveapp-apple-invalid-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        let config = KeychainConfig::with_keys_dir("test-app", dir);
+
+        let err = load_handle(&config, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = load_pub_key(&config, "../escape", KeyType::Signing).unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+
+        let err = delete_key(&config, "../escape").unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
     }
 }

@@ -86,19 +86,7 @@ pub fn unconfigure_all_distros(config: &WslInstallConfig) -> Vec<DistroResult> {
 /// Tries `\\wsl$\<distro>\<path>` first, then `\\wsl.localhost\<distro>\<path>`.
 #[cfg(target_os = "windows")]
 pub fn find_wsl_home(distro: &str) -> Option<PathBuf> {
-    let output = std::process::Command::new("wsl")
-        .args(["-d", distro, "--", "echo", "$HOME"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let linux_home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if linux_home.is_empty() {
-        return None;
-    }
+    let linux_home = crate::detect::find_linux_home(distro)?;
 
     for prefix in &[r"\\wsl$", r"\\wsl.localhost"] {
         let win_path = format!(r"{}\{}{}", prefix, distro, linux_home.replace('/', r"\"));
@@ -115,16 +103,6 @@ pub fn find_wsl_home(distro: &str) -> Option<PathBuf> {
 #[cfg(not(target_os = "windows"))]
 pub fn find_wsl_home(_distro: &str) -> Option<PathBuf> {
     None
-}
-
-/// Get the Linux home path string for a distro (e.g., `/home/user`).
-#[cfg(target_os = "windows")]
-fn find_linux_home(distro: &str) -> Option<String> {
-    let output = std::process::Command::new("wsl")
-        .args(["-d", distro, "--", "echo", "$HOME"])
-        .output()
-        .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Configure a single WSL distro.
@@ -276,7 +254,7 @@ fn copy_linux_binary(
     std::fs::copy(src, &dest).map_err(|e| format!("copy binary: {e}"))?;
 
     // Make executable via WSL
-    if let Some(linux_home) = find_linux_home(distro_name) {
+    if let Some(linux_home) = crate::detect::find_linux_home(distro_name) {
         let linux_path = format!("{linux_home}/{target}");
         drop(
             std::process::Command::new("wsl")
@@ -361,7 +339,7 @@ fn install_bridge_deps(distro_name: &str, actions: &mut Vec<String>) -> Result<(
             .args(["-d", distro_name, "--", "bash", "-c", install_script])
             .output();
         match output {
-            Ok(o) if String::from_utf8_lossy(&o.stdout).contains("OK") => {
+            Ok(o) if decode_wsl_output(&o.stdout).contains("OK") => {
                 actions.push("Installed npiperelay".to_string());
             }
             _ => {
@@ -386,16 +364,7 @@ fn wsl_has_command(distro_name: &str, cmd: &str) -> bool {
 
 /// Decode WSL output, handling both UTF-8 and UTF-16LE (with BOM).
 pub fn decode_wsl_output(bytes: &[u8]) -> String {
-    // Check for UTF-16LE BOM (0xFF 0xFE)
-    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
-        String::from_utf16_lossy(&u16s)
-    } else {
-        String::from_utf8_lossy(bytes).to_string()
-    }
+    crate::detect::decode_wsl_output(bytes)
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Bridge request sent from WSL client to Windows server.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BridgeRequest {
-    /// Method: "init", "encrypt", "decrypt", "destroy"
+    /// Method: "init", "encrypt", "decrypt", "delete", "destroy"
     pub method: String,
     /// Parameters.
     pub params: BridgeParams,
@@ -27,6 +27,9 @@ pub struct BridgeParams {
     /// Application name (determines TPM key name).
     #[serde(default)]
     pub app_name: String,
+    /// Key label within the application namespace.
+    #[serde(default)]
+    pub key_label: String,
 }
 
 /// Bridge response from Windows server to WSL client.
@@ -89,6 +92,7 @@ mod tests {
                 data: "aGVsbG8=".to_string(),
                 biometric: true,
                 app_name: "test-app".to_string(),
+                key_label: "cache-key".to_string(),
             },
         };
         let json = serde_json::to_string(&request).unwrap();
@@ -97,6 +101,7 @@ mod tests {
         assert_eq!(parsed.params.data, "aGVsbG8=");
         assert!(parsed.params.biometric);
         assert_eq!(parsed.params.app_name, "test-app");
+        assert_eq!(parsed.params.key_label, "cache-key");
     }
 
     #[test]
@@ -107,6 +112,7 @@ mod tests {
         assert_eq!(parsed.params.data, "");
         assert!(!parsed.params.biometric);
         assert_eq!(parsed.params.app_name, "");
+        assert_eq!(parsed.params.key_label, "");
     }
 
     #[test]
@@ -171,13 +177,14 @@ mod tests {
 
     #[test]
     fn bridge_request_all_methods() {
-        for method in &["init", "encrypt", "decrypt", "destroy"] {
+        for method in &["init", "encrypt", "decrypt", "delete", "destroy"] {
             let request = BridgeRequest {
                 method: (*method).to_string(),
                 params: BridgeParams {
                     data: String::new(),
                     biometric: false,
                     app_name: "test".to_string(),
+                    key_label: "cache-key".to_string(),
                 },
             };
             let json = serde_json::to_string(&request).unwrap();

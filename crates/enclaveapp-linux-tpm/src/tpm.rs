@@ -263,6 +263,11 @@ pub fn load_key_blobs(dir: &Path, label: &str) -> Result<(Vec<u8>, Vec<u8>)> {
 
 /// Delete TPM key blob files.
 pub fn delete_key_blobs(dir: &Path, label: &str) -> Result<()> {
+    if !key_blobs_exist(dir, label) {
+        return Err(Error::KeyNotFound {
+            label: label.to_string(),
+        });
+    }
     for ext in &["tpm_pub", "tpm_priv"] {
         let path = dir.join(format!("{label}.{ext}"));
         if path.exists() {
@@ -270,6 +275,12 @@ pub fn delete_key_blobs(dir: &Path, label: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn key_blobs_exist(dir: &Path, label: &str) -> bool {
+    ["tpm_pub", "tpm_priv"]
+        .into_iter()
+        .any(|ext| dir.join(format!("{label}.{ext}")).exists())
 }
 
 #[cfg(test)]
@@ -341,6 +352,17 @@ mod tests {
     fn load_key_blobs_missing_returns_key_not_found() {
         let dir = test_dir();
         let err = load_key_blobs(&dir, "nonexistent").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "nonexistent"),
+            other => panic!("expected KeyNotFound, got: {other}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_key_blobs_missing_returns_key_not_found() {
+        let dir = test_dir();
+        let err = delete_key_blobs(&dir, "nonexistent").unwrap_err();
         match err {
             Error::KeyNotFound { label } => assert_eq!(label, "nonexistent"),
             other => panic!("expected KeyNotFound, got: {other}"),

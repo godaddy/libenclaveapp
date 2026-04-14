@@ -50,6 +50,7 @@ impl EnclaveKeyManager for SecureEnclaveEncryptor {
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
+        validate_label(label)?;
         keychain::load_pub_key(&self.config, label, KeyType::Encryption)
     }
 
@@ -58,6 +59,7 @@ impl EnclaveKeyManager for SecureEnclaveEncryptor {
     }
 
     fn delete_key(&self, label: &str) -> Result<()> {
+        validate_label(label)?;
         keychain::delete_key(&self.config, label)
     }
 
@@ -69,6 +71,7 @@ impl EnclaveKeyManager for SecureEnclaveEncryptor {
 impl EnclaveEncryptor for SecureEnclaveEncryptor {
     #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn encrypt(&self, label: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+        validate_label(label)?;
         let data_rep = keychain::load_handle(&self.config, label)?;
 
         let output_capacity = plaintext.len() + ECIES_OVERHEAD;
@@ -98,6 +101,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
 
     #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn decrypt(&self, label: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        validate_label(label)?;
         if ciphertext.len() < ECIES_OVERHEAD {
             return Err(Error::DecryptFailed {
                 detail: "ciphertext too short".into(),

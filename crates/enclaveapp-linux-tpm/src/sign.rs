@@ -147,10 +147,29 @@ impl EnclaveKeyManager for LinuxTpmSigner {
     fn delete_key(&self, label: &str) -> Result<()> {
         validate_label(label)?;
         let dir = self.config.keys_dir();
+        if !dir.exists() {
+            return Err(Error::KeyNotFound {
+                label: label.to_string(),
+            });
+        }
         let _lock = DirLock::acquire(&dir)?;
-        tpm::delete_key_blobs(&dir, label)?;
-        let _ = metadata::delete_key_files(&dir, label);
-        Ok(())
+        let blob_existed = tpm::key_blobs_exist(&dir, label);
+        let metadata_existed = metadata::key_files_exist(&dir, label);
+        if !blob_existed && !metadata_existed {
+            return Err(Error::KeyNotFound {
+                label: label.to_string(),
+            });
+        }
+        match tpm::delete_key_blobs(&dir, label) {
+            Ok(()) => {}
+            Err(Error::KeyNotFound { .. }) if metadata_existed => {}
+            Err(err) => return Err(err),
+        }
+        match metadata::delete_key_files(&dir, label) {
+            Ok(()) => Ok(()),
+            Err(Error::KeyNotFound { .. }) if blob_existed => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     fn is_available(&self) -> bool {

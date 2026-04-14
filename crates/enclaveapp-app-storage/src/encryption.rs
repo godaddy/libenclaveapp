@@ -15,6 +15,7 @@ use enclaveapp_core::metadata;
 use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
 #[allow(unused_imports)]
 use enclaveapp_core::types::{AccessPolicy, KeyType};
+use std::path::PathBuf;
 #[allow(unused_imports)]
 use tracing::{debug, warn};
 
@@ -48,7 +49,7 @@ enum StorageInner {
 
     #[cfg(target_os = "linux")]
     WslBridge {
-        bridge_path: std::path::PathBuf,
+        bridge_path: PathBuf,
         biometric: bool,
     },
 }
@@ -101,7 +102,13 @@ impl AppEncryptionStorage {
 
     #[cfg(target_os = "macos")]
     fn init_macos(config: &StorageConfig) -> Result<Self> {
-        let encryptor = enclaveapp_apple::SecureEnclaveEncryptor::new(&config.app_name);
+        let encryptor = match &config.keys_dir {
+            Some(keys_dir) => enclaveapp_apple::SecureEnclaveEncryptor::with_keys_dir(
+                &config.app_name,
+                keys_dir.clone(),
+            ),
+            None => enclaveapp_apple::SecureEnclaveEncryptor::new(&config.app_name),
+        };
 
         if !encryptor.is_available() {
             return Err(StorageError::NotAvailable);
@@ -124,7 +131,12 @@ impl AppEncryptionStorage {
 
     #[cfg(target_os = "windows")]
     fn init_windows(config: &StorageConfig) -> Result<Self> {
-        let encryptor = enclaveapp_windows::TpmEncryptor::new(&config.app_name);
+        let encryptor = match &config.keys_dir {
+            Some(keys_dir) => {
+                enclaveapp_windows::TpmEncryptor::with_keys_dir(&config.app_name, keys_dir.clone())
+            }
+            None => enclaveapp_windows::TpmEncryptor::new(&config.app_name),
+        };
 
         if !encryptor.is_available() {
             return Err(StorageError::NotAvailable);
@@ -157,7 +169,13 @@ impl AppEncryptionStorage {
             }
         }
 
-        let encryptor = enclaveapp_software::SoftwareEncryptor::new(&config.app_name);
+        let encryptor = match &config.keys_dir {
+            Some(keys_dir) => enclaveapp_software::SoftwareEncryptor::with_keys_dir(
+                &config.app_name,
+                keys_dir.clone(),
+            ),
+            None => enclaveapp_software::SoftwareEncryptor::new(&config.app_name),
+        };
 
         // Software backend: always generate with None policy (no hardware to enforce).
         if encryptor.public_key(&config.key_label).is_err() {
@@ -191,6 +209,13 @@ impl AppEncryptionStorage {
         );
 
         let biometric = config.access_policy != AccessPolicy::None;
+        enclaveapp_bridge::bridge_init(
+            &bridge_path,
+            &config.app_name,
+            &config.key_label,
+            biometric,
+        )
+        .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
 
         Ok(Self {
             kind: BackendKind::TpmBridge,
@@ -211,7 +236,7 @@ impl AppEncryptionStorage {
     fn ensure_key(encryptor: &impl EnclaveEncryptor, config: &StorageConfig) -> Result<()> {
         if encryptor.public_key(&config.key_label).is_ok() {
             // Key exists — check policy match.
-            let keys_dir = metadata::keys_dir(&config.app_name);
+            let keys_dir = resolved_keys_dir(config);
             if let Ok(meta) = metadata::load_meta(&keys_dir, &config.key_label) {
                 if meta.access_policy != config.access_policy {
                     warn!(
@@ -237,6 +262,14 @@ impl AppEncryptionStorage {
             .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
         Ok(())
     }
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+fn resolved_keys_dir(config: &StorageConfig) -> PathBuf {
+    config
+        .keys_dir
+        .clone()
+        .unwrap_or_else(|| metadata::keys_dir(&config.app_name))
 }
 
 /// Encryption storage trait for dynamic dispatch (used with mock backend).
@@ -280,6 +313,7 @@ impl EncryptionStorage for AppEncryptionStorage {
             } => enclaveapp_bridge::bridge_encrypt(
                 bridge_path,
                 &self.app_name,
+                &self.key_label,
                 plaintext,
                 *biometric,
             )
@@ -319,6 +353,7 @@ impl EncryptionStorage for AppEncryptionStorage {
             } => enclaveapp_bridge::bridge_decrypt(
                 bridge_path,
                 &self.app_name,
+                &self.key_label,
                 ciphertext,
                 *biometric,
             )
@@ -344,9 +379,9 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .map_err(|e| StorageError::KeyNotFound(e.to_string())),
 
             #[cfg(target_os = "linux")]
-            StorageInner::WslBridge { .. } => {
-                // Bridge does not expose key deletion; handled on the Windows host.
-                Ok(())
+            StorageInner::WslBridge { bridge_path, .. } => {
+                enclaveapp_bridge::bridge_delete(bridge_path, &self.app_name, &self.key_label)
+                    .map_err(|e| StorageError::KeyNotFound(e.to_string()))
             }
         }
     }
@@ -375,3 +410,35 @@ impl EncryptionStorage for AppEncryptionStorage {
 unsafe impl Send for AppEncryptionStorage {}
 #[allow(unsafe_code)]
 unsafe impl Sync for AppEncryptionStorage {}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> StorageConfig {
+        StorageConfig {
+            app_name: "test-app".into(),
+            key_label: "cache-key".into(),
+            access_policy: AccessPolicy::None,
+            extra_bridge_paths: vec![],
+            keys_dir: None,
+        }
+    }
+
+    #[test]
+    fn resolved_keys_dir_uses_default_when_not_overridden() {
+        let config = test_config();
+        assert_eq!(resolved_keys_dir(&config), metadata::keys_dir("test-app"));
+    }
+
+    #[test]
+    fn resolved_keys_dir_uses_override_when_configured() {
+        let mut config = test_config();
+        config.keys_dir = Some(PathBuf::from("/tmp/custom-keys"));
+        assert_eq!(
+            resolved_keys_dir(&config),
+            PathBuf::from("/tmp/custom-keys")
+        );
+    }
+}
