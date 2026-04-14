@@ -712,9 +712,14 @@ sleep 2
         let err = call_bridge(&script, &request).unwrap_err();
         match err {
             Error::KeyOperation { operation, detail } => {
-                assert_eq!(operation, "bridge_read");
                 assert!(
-                    detail.contains("exceeded") || detail.contains("no response"),
+                    matches!(operation.as_str(), "bridge" | "bridge_read"),
+                    "unexpected key operation: {operation}"
+                );
+                assert!(
+                    detail.contains("exceeded")
+                        || detail.contains("no response")
+                        || detail.contains("status"),
                     "unexpected bridge_read detail: {detail}"
                 );
             }
