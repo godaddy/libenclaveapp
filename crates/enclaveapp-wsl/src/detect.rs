@@ -131,8 +131,8 @@ fn looks_like_utf16le(bytes: &[u8]) -> bool {
         return false;
     }
 
-    let mut pairs = 0usize;
-    let mut nul_high_bytes = 0usize;
+    let mut pairs = 0_usize;
+    let mut nul_high_bytes = 0_usize;
     for chunk in bytes.chunks_exact(2).take(32) {
         pairs += 1;
         if chunk[1] == 0 {
