@@ -3,7 +3,7 @@
 
 //! Platform detection and backend identification.
 
-#[allow(unused_imports)]
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
 /// Which hardware/software backend is in use.
@@ -30,34 +30,12 @@ impl std::fmt::Display for BackendKind {
     }
 }
 
-/// Search for a WSL TPM bridge executable.
-///
-/// Tries in order:
-/// 1. `enclaveapp_bridge::find_bridge(app_name)` (standard libenclaveapp discovery)
-/// 2. Auto-derived paths: `/mnt/c/Program Files/{app_name}/{app_name}-tpm-bridge.exe`
-///    and `/mnt/c/ProgramData/{app_name}/{app_name}-tpm-bridge.exe`
-/// 3. Any extra paths provided by the caller
 #[cfg(target_os = "linux")]
 pub fn find_bridge_executable(app_name: &str, extra_paths: &[String]) -> Option<PathBuf> {
-    // Standard libenclaveapp discovery.
-    if let Some(path) = enclaveapp_bridge::find_bridge(app_name) {
-        return Some(path);
-    }
-
-    // Auto-derived paths.
-    let auto_paths = [
-        format!("/mnt/c/Program Files/{app_name}/{app_name}-tpm-bridge.exe"),
-        format!("/mnt/c/ProgramData/{app_name}/{app_name}-tpm-bridge.exe"),
-    ];
-
-    for path_str in auto_paths.iter().chain(extra_paths.iter()) {
-        let path = std::path::Path::new(path_str);
-        if path.exists() {
-            return Some(path.to_path_buf());
-        }
-    }
-
-    None
+    enclaveapp_bridge::find_bridge_with_paths(
+        app_name,
+        &extra_paths.iter().map(PathBuf::from).collect::<Vec<_>>(),
+    )
 }
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ use elliptic_curve::sec1::FromEncodedPoint;
 use enclaveapp_core::metadata::{self, DirLock};
 use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
 use enclaveapp_core::types::validate_label;
-use enclaveapp_core::{AccessPolicy, Error, KeyMeta, KeyType, Result};
+use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use tss_esapi::structures::{EccParameter, EccPoint, Public};
 use tss_esapi::traits::{Marshall, UnMarshall};
 
@@ -170,12 +170,9 @@ impl EnclaveKeyManager for LinuxTpmEncryptor {
                 detail: e.to_string(),
             })?;
         let priv_blob: Vec<u8> = result.out_private.to_vec();
-        tpm::save_key_blobs(&dir, label, &pub_blob, &priv_blob)?;
-
-        // Save cached public key and metadata
-        metadata::save_pub_key(&dir, label, &pub_key)?;
-        let meta = KeyMeta::new(label, key_type, policy);
-        metadata::save_meta(&dir, label, &meta)?;
+        tpm::persist_generated_key(
+            &dir, label, key_type, policy, &pub_key, &pub_blob, &priv_blob,
+        )?;
 
         Ok(pub_key)
     }
@@ -183,23 +180,11 @@ impl EnclaveKeyManager for LinuxTpmEncryptor {
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
         validate_label(label)?;
         let dir = self.config.keys_dir();
-        match metadata::load_pub_key(&dir, label) {
-            Ok(pk) => Ok(pk),
-            Err(_) => {
-                let (pub_blob, _) = tpm::load_key_blobs(&dir, label)?;
-                let public = Public::unmarshall(&pub_blob).map_err(|e| Error::KeyOperation {
-                    operation: "load_public".into(),
-                    detail: e.to_string(),
-                })?;
-                let pub_key = tpm::extract_public_key(&public)?;
-                let _ = metadata::save_pub_key(&dir, label, &pub_key);
-                Ok(pub_key)
-            }
-        }
+        tpm::load_public_key(&dir, label)
     }
 
     fn list_keys(&self) -> Result<Vec<String>> {
-        metadata::list_labels(&self.config.keys_dir())
+        tpm::list_labels(&self.config.keys_dir())
     }
 
     fn delete_key(&self, label: &str) -> Result<()> {

@@ -35,5 +35,7 @@ pub use sign::TpmSigner;
 // unused; they *are* used on the target platform.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod convert;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod state;
 
 pub use convert::{der_to_p1363, p1363_to_der};

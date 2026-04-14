@@ -29,6 +29,7 @@ let SE_ERR_BUFFER_TOO_SMALL: Int32 = 4
 let SE_ERR_NOT_AVAILABLE: Int32 = 5
 let SE_ERR_ENCRYPT: Int32 = 6
 let SE_ERR_DECRYPT: Int32 = 7
+let SE_ERR_DELETE: Int32 = 8
 
 // MARK: - ECIES format constants
 
@@ -236,6 +237,24 @@ public func enclaveapp_se_encryption_public_key(
         return copyUncompressedPubKey(key.publicKey.rawRepresentation, pub_key_out, pub_key_len)
     } catch {
         return SE_ERR_LOAD
+    }
+}
+
+/// Delete a Secure Enclave key referenced by its persistent data representation.
+@_cdecl("enclaveapp_se_delete_key")
+public func enclaveapp_se_delete_key(
+    _ data_rep: UnsafePointer<UInt8>,
+    _ data_rep_len: Int32
+) -> Int32 {
+    let keyRef = Data(bytes: data_rep, count: Int(data_rep_len))
+    let query: [String: Any] = [kSecValuePersistentRef as String: keyRef]
+    let status = SecItemDelete(query as CFDictionary)
+
+    switch status {
+    case errSecSuccess, errSecItemNotFound:
+        return SE_OK
+    default:
+        return SE_ERR_DELETE
     }
 }
 

@@ -6,6 +6,7 @@
 use crate::error::{Error, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -228,23 +229,47 @@ pub fn load_pub_key(dir: &Path, label: &str) -> Result<Vec<u8>> {
     Ok(std::fs::read(&path)?)
 }
 
+/// Refresh the cached public key from authoritative source bytes.
+pub fn sync_pub_key(dir: &Path, label: &str, pub_key: &[u8]) -> Result<Vec<u8>> {
+    crate::types::validate_label(label)?;
+    crate::types::validate_p256_point(pub_key)?;
+
+    match load_pub_key(dir, label) {
+        Ok(existing) if existing == pub_key => Ok(existing),
+        _ => {
+            save_pub_key(dir, label, pub_key)?;
+            Ok(pub_key.to_vec())
+        }
+    }
+}
+
 /// List all key labels by scanning for `.meta` files in the directory.
 pub fn list_labels(dir: &Path) -> Result<Vec<String>> {
+    list_labels_for_extensions(dir, &["meta"])
+}
+
+/// List key labels by scanning for any of the provided file extensions.
+pub fn list_labels_for_extensions(dir: &Path, extensions: &[&str]) -> Result<Vec<String>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let mut labels = Vec::new();
+    let mut labels = BTreeSet::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("meta") {
+        if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+            if !extensions.contains(&extension) {
+                continue;
+            }
             if let Some(stem) = path.file_stem() {
-                labels.push(stem.to_string_lossy().to_string());
+                let label = stem.to_string_lossy().to_string();
+                if crate::types::validate_label(&label).is_ok() {
+                    labels.insert(label);
+                }
             }
         }
     }
-    labels.sort();
-    Ok(labels)
+    Ok(labels.into_iter().collect())
 }
 
 /// Delete all files associated with a key label.
@@ -488,6 +513,35 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
+    fn sync_pub_key_writes_missing_cache() {
+        let dir = test_dir();
+        let pub_key = vec![0x04; 65];
+
+        let synced = sync_pub_key(&dir, "sync", &pub_key).unwrap();
+        assert_eq!(synced, pub_key);
+        assert_eq!(load_pub_key(&dir, "sync").unwrap(), pub_key);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
+    fn sync_pub_key_repairs_mismatched_cache() {
+        let dir = test_dir();
+        let mut authoritative = vec![0x04];
+        authoritative.extend_from_slice(&[0x11; 64]);
+
+        save_pub_key(&dir, "sync", &[0x04; 65]).unwrap();
+
+        let synced = sync_pub_key(&dir, "sync", &authoritative).unwrap();
+        assert_eq!(synced, authoritative);
+        assert_eq!(load_pub_key(&dir, "sync").unwrap(), authoritative);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn metadata_label_operations_reject_invalid_labels() {
         let dir = test_dir();
         let meta = KeyMeta::new("valid", KeyType::Signing, AccessPolicy::None);
@@ -534,6 +588,35 @@ mod tests {
         std::fs::write(dir.join("alpha.pub"), b"pubkey").unwrap();
         let labels = list_labels(&dir).unwrap();
         assert_eq!(labels, vec!["alpha", "beta"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn list_labels_for_extensions_includes_unique_sorted_stems() {
+        let dir = test_dir();
+        std::fs::write(dir.join("alpha.handle"), b"handle").unwrap();
+        std::fs::write(dir.join("beta.meta"), b"{}").unwrap();
+        std::fs::write(dir.join("beta.handle"), b"handle").unwrap();
+        std::fs::write(dir.join("gamma.pub"), b"pub").unwrap();
+
+        let labels = list_labels_for_extensions(&dir, &["meta", "handle"]).unwrap();
+        assert_eq!(labels, vec!["alpha", "beta"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn list_labels_for_extensions_skips_invalid_labels() {
+        let dir = test_dir();
+        std::fs::write(dir.join("valid.handle"), b"handle").unwrap();
+        std::fs::write(dir.join("bad label.handle"), b"handle").unwrap();
+        std::fs::write(dir.join("also.bad.handle"), b"handle").unwrap();
+
+        let labels = list_labels_for_extensions(&dir, &["handle"]).unwrap();
+        assert_eq!(labels, vec!["valid"]);
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

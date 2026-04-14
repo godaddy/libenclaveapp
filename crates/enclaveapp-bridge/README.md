@@ -38,7 +38,16 @@ if let Some(bridge) = find_bridge("awsenc") {
 Discovery paths:
 - `/mnt/c/Program Files/<app_name>/<app_name>-bridge.exe`
 - `/mnt/c/ProgramData/<app_name>/<app_name>-bridge.exe`
-- `$PATH`
+
+To prefer an explicit trusted path before standard install locations:
+
+```rust
+use std::path::PathBuf;
+use enclaveapp_bridge::find_bridge_with_paths;
+
+let trusted = vec![PathBuf::from("/mnt/c/Trusted/awsenc/awsenc-tpm-bridge.exe")];
+let bridge = find_bridge_with_paths("awsenc", &trusted);
+```
 
 ## Server
 
