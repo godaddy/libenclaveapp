@@ -40,6 +40,10 @@ Discovery paths:
 - `/mnt/c/ProgramData/<app_name>/<app_name>-bridge.exe`
 - `$PATH`
 
+The higher-level `enclaveapp-app-storage` crate also adds app-specific
+`<app_name>-tpm-bridge.exe` fallbacks for consumers such as `awsenc` and
+`sso-jwt`.
+
 ## Server
 
 This crate provides protocol types and the client. The server binary (which runs on Windows and performs actual TPM operations) is implemented by consuming applications using `enclaveapp-windows` for the crypto.

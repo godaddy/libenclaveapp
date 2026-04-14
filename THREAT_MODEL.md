@@ -18,16 +18,18 @@ libenclaveapp as a shared library for hardware-backed key management.
 
 ```
 +-------------------------------------------------------------------+
-| Application (sshenc, awsenc, sso-jwt)                              |
+| Consuming application (sshenc, awsenc, sso-jwt, npmenc, etc.)     |
 |                                                                    |
-|  +-------------------+    +-------------------+                   |
-|  | enclaveapp-core   |    | enclaveapp-apple  |                   |
-|  | (traits, types)   |    | enclaveapp-windows|                   |
-|  |                   |    | enclaveapp-linux-  |                   |
-|  |                   |    |   tpm              |                   |
-|  |                   |    | enclaveapp-software|                   |
-|  +-------------------+    +---------+---------+                   |
-|                                     |                              |
+|  +-------------------+    +-------------------+                  |
+|  | enclaveapp-core   |    | enclaveapp-app-   |                  |
+|  | (traits, types)   |    | storage           |                  |
+|  +-------------------+    +---------+---------+                  |
+|                                     |                             |
+|                       +-------------+-------------+               |
+|                       | apple / windows / linux   |               |
+|                       | tpm / software backends   |               |
+|                       +-------------+-------------+               |
+|                                     |                             |
 |                           +---------+---------+                   |
 |                           | Hardware Security |  <-- Trust boundary|
 |                           | Module (SE/TPM)   |                   |
