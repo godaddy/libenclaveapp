@@ -3,6 +3,9 @@
 
 //! Platform detection and backend identification.
 
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+
 /// Which hardware/software backend is in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {

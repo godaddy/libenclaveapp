@@ -232,7 +232,7 @@ impl AppEncryptionStorage {
     /// Ensure a key exists with the correct access policy.
     /// If the key exists but has a different policy, re-generate it
     /// (encryption keys protect temporary cached data, so this is safe).
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     fn ensure_key(encryptor: &impl EnclaveEncryptor, config: &StorageConfig) -> Result<()> {
         if encryptor.public_key(&config.key_label).is_ok() {
             // Key exists — check policy match.
