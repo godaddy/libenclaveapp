@@ -236,6 +236,7 @@ mod tests {
 
     static SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(unix)]
     fn temp_script(name: &str, body: &str) -> PathBuf {
         let id = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = std::env::temp_dir().join(format!(
@@ -254,6 +255,34 @@ mod tests {
         path
     }
 
+    #[cfg(windows)]
+    fn temp_script(name: &str, body: &str) -> PathBuf {
+        let id = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!(
+            "enclaveapp-bridge-test-{}-{}-{}",
+            std::process::id(),
+            id,
+            name
+        ));
+        let script_path = base.with_extension("ps1");
+        let wrapper_path = base.with_extension("cmd");
+        fs::write(&script_path, body).unwrap();
+        let wrapper = format!(
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\n",
+            script_path.display()
+        );
+        fs::write(&wrapper_path, wrapper).unwrap();
+        wrapper_path
+    }
+
+    fn cleanup_script(path: &Path) {
+        drop(fs::remove_file(path));
+        #[cfg(windows)]
+        {
+            drop(fs::remove_file(path.with_extension("ps1")));
+        }
+    }
+
     #[test]
     fn find_bridge_returns_none_when_not_found() {
         // On macOS (or any non-WSL environment), no bridge binary should exist
@@ -263,6 +292,7 @@ mod tests {
 
     #[test]
     fn bridge_encrypt_initializes_before_encrypting() {
+        #[cfg(unix)]
         let script = temp_script(
             "encrypt.sh",
             r#"#!/bin/sh
@@ -278,14 +308,33 @@ case "$request_line" in
 esac
 "#,
         );
+        #[cfg(windows)]
+        let script = temp_script(
+            "encrypt",
+            r#"$initLine = [Console]::In.ReadLine()
+if ($initLine -like '*"method":"init"*' -and $initLine -like '*"key_label":"cache-key"*') {
+  [Console]::Out.WriteLine('{"result":"","error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected init request"}')
+  exit 0
+}
+$requestLine = [Console]::In.ReadLine()
+if ($requestLine -like '*"method":"encrypt"*') {
+  [Console]::Out.WriteLine('{"result":"aGVsbG8=","error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected request"}')
+}
+"#,
+        );
 
         let plaintext = bridge_encrypt(&script, "awsenc", "cache-key", b"ignored", true).unwrap();
         assert_eq!(plaintext, b"hello");
-        fs::remove_file(script).unwrap();
+        cleanup_script(&script);
     }
 
     #[test]
     fn bridge_delete_sends_delete_request() {
+        #[cfg(unix)]
         let script = temp_script(
             "delete.sh",
             r#"#!/bin/sh
@@ -296,13 +345,25 @@ case "$request_line" in
 esac
 "#,
         );
+        #[cfg(windows)]
+        let script = temp_script(
+            "delete",
+            r#"$requestLine = [Console]::In.ReadLine()
+if ($requestLine -like '*"method":"delete"*' -and $requestLine -like '*"key_label":"cache-key"*') {
+  [Console]::Out.WriteLine('{"result":"","error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected request"}')
+}
+"#,
+        );
 
         bridge_delete(&script, "awsenc", "cache-key").unwrap();
-        fs::remove_file(script).unwrap();
+        cleanup_script(&script);
     }
 
     #[test]
     fn bridge_init_sends_key_label() {
+        #[cfg(unix)]
         let script = temp_script(
             "init.sh",
             r#"#!/bin/sh
@@ -313,8 +374,19 @@ case "$request_line" in
 esac
 "#,
         );
+        #[cfg(windows)]
+        let script = temp_script(
+            "init",
+            r#"$requestLine = [Console]::In.ReadLine()
+if ($requestLine -like '*"method":"init"*' -and $requestLine -like '*"app_name":"awsenc"*' -and $requestLine -like '*"key_label":"cache-key"*') {
+  [Console]::Out.WriteLine('{"result":"","error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected request"}')
+}
+"#,
+        );
 
         bridge_init(&script, "awsenc", "cache-key", true).unwrap();
-        fs::remove_file(script).unwrap();
+        cleanup_script(&script);
     }
 }
