@@ -18,7 +18,7 @@ mod key;
 #[cfg(target_os = "windows")]
 mod provider;
 #[cfg(target_os = "windows")]
-mod ui_policy;
+pub mod ui_policy;
 
 #[cfg(all(target_os = "windows", feature = "encryption"))]
 mod encrypt;
