@@ -20,6 +20,7 @@ use tss_esapi::{
         PublicEccParametersBuilder, SymmetricDefinitionObject,
     },
     tcti_ldr::{DeviceConfig, TctiNameConf},
+    traits::UnMarshall,
     Context,
 };
 
