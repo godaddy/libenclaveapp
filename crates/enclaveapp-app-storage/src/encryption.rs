@@ -28,6 +28,10 @@ pub struct AppEncryptionStorage {
     kind: BackendKind,
     app_name: String,
     key_label: String,
+    /// Whether decrypt operations require user presence verification.
+    /// Read on Windows (Windows Hello) and macOS (Touch ID); unused on Linux.
+    #[allow(dead_code)]
+    requires_user_presence: bool,
     inner: StorageInner,
 }
 
@@ -113,6 +117,7 @@ impl AppEncryptionStorage {
             kind: BackendKind::SecureEnclave,
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
+            requires_user_presence: config.access_policy != AccessPolicy::None,
             inner: StorageInner::SecureEnclave(encryptor),
         })
     }
@@ -135,6 +140,7 @@ impl AppEncryptionStorage {
             kind: BackendKind::Tpm,
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
+            requires_user_presence: config.access_policy != AccessPolicy::None,
             inner: StorageInner::Tpm(encryptor),
         })
     }
@@ -167,6 +173,7 @@ impl AppEncryptionStorage {
             kind: BackendKind::Software,
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
+            requires_user_presence: false, // Software backend has no user presence
             inner: StorageInner::Software(encryptor),
         })
     }
@@ -189,6 +196,7 @@ impl AppEncryptionStorage {
             kind: BackendKind::TpmBridge,
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
+            requires_user_presence: biometric,
             inner: StorageInner::WslBridge {
                 bridge_path,
                 biometric,
@@ -280,6 +288,14 @@ impl EncryptionStorage for AppEncryptionStorage {
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        // Verify user presence before decryption if required.
+        #[cfg(target_os = "windows")]
+        if self.requires_user_presence {
+            let msg = format!("Verify your identity to decrypt {} data", self.app_name);
+            enclaveapp_windows::ui_policy::verify_user_presence(&msg)
+                .map_err(|e| StorageError::DecryptionFailed(format!("user presence: {e}")))?;
+        }
+
         match &self.inner {
             #[cfg(target_os = "macos")]
             StorageInner::SecureEnclave(enc) => enc
