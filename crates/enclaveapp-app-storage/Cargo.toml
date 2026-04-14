@@ -33,4 +33,4 @@ enclaveapp-windows = { workspace = true, features = ["signing", "encryption"] }
 enclaveapp-software = { workspace = true, features = ["signing", "encryption"] }
 enclaveapp-bridge = { workspace = true }
 enclaveapp-wsl = { workspace = true }
-enclaveapp-linux-tpm = { workspace = true, features = ["signing"] }
+enclaveapp-linux-tpm = { workspace = true, features = ["signing", "encryption"] }

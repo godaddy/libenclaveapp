@@ -119,8 +119,8 @@ of these components are out of scope.
 decrypt using the application's key.
 
 **Mitigation:**
-- Access policies (biometric, password) require physical presence for
-  each operation when configured.
+- Access policies require physical presence on backends that successfully
+  apply a user-authentication policy during key creation.
 - Without access policy: the key is usable by any process running as the
   user when the device is unlocked.
 
@@ -134,7 +134,8 @@ against offline attacks, not a fully compromised running system.
 host.
 
 **Mitigation:**
-- The bridge path is fixed to a system directory requiring admin rights.
+- Default bridge discovery is limited to trusted system locations.
+- Any nonstandard bridge path must be supplied explicitly by the caller.
 - The bridge communicates via JSON-RPC over stdin/stdout with
   base64-encoded payloads.
 

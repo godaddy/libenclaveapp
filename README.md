@@ -92,7 +92,7 @@ cargo build --workspace
 cargo test --workspace
 
 # Lint
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Format check
 cargo fmt --all -- --check

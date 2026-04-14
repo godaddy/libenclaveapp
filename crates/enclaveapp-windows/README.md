@@ -29,7 +29,7 @@ enclaveapp-windows = { version = "0.1", features = ["signing"] }
 
 ### Windows Hello
 
-When `AccessPolicy` is not `None`, the key is created with `NCRYPT_UI_POLICY_PROPERTY` requiring user authentication before key use.
+When `AccessPolicy` is not `None`, the key is created with `NCRYPT_UI_POLICY_PROPERTY` requiring user authentication before key use. If the UI policy cannot be applied, key creation fails rather than silently falling back to an unprotected key.
 
 ## Cross-platform modules
 

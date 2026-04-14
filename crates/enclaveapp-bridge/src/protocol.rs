@@ -4,26 +4,27 @@
 //! JSON-RPC protocol types shared between server and client.
 
 use base64::Engine;
+use enclaveapp_core::AccessPolicy;
 use serde::{Deserialize, Serialize};
 
 /// Bridge request sent from WSL client to Windows server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BridgeRequest {
-    /// Method: "init", "encrypt", "decrypt", "delete", "destroy"
+    /// Method: "init", "encrypt", "decrypt", "destroy"
     pub method: String,
     /// Parameters.
     pub params: BridgeParams,
 }
 
 /// Bridge request parameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BridgeParams {
     /// Base64-encoded data (plaintext for encrypt, ciphertext for decrypt).
     #[serde(default)]
     pub data: String,
-    /// Whether to require biometric authentication.
+    /// Access policy to enforce on key use.
     #[serde(default)]
-    pub biometric: bool,
+    pub access_policy: AccessPolicy,
     /// Application name (determines TPM key name).
     #[serde(default)]
     pub app_name: String,
@@ -65,34 +66,6 @@ impl BridgeResponse {
             error: None,
         }
     }
-
-    /// Require that the response contains a success result payload.
-    pub fn require_result(&self, operation: &str) -> enclaveapp_core::Result<&str> {
-        if let Some(error) = &self.error {
-            return Err(enclaveapp_core::Error::KeyOperation {
-                operation: operation.into(),
-                detail: error.clone(),
-            });
-        }
-
-        self.result
-            .as_deref()
-            .ok_or_else(|| enclaveapp_core::Error::KeyOperation {
-                operation: operation.into(),
-                detail: "bridge response missing result payload".into(),
-            })
-    }
-
-    /// Require an acknowledged success response.
-    pub fn require_ok(&self, operation: &str) -> enclaveapp_core::Result<()> {
-        let _unused = self.require_result(operation)?;
-        Ok(())
-    }
-
-    /// Decode a base64-encoded success payload.
-    pub fn decode_result(&self, operation: &str) -> enclaveapp_core::Result<Vec<u8>> {
-        decode_data(self.require_result(operation)?)
-    }
 }
 
 /// Encode binary data as base64 for the bridge protocol.
@@ -118,7 +91,7 @@ mod tests {
             method: "encrypt".to_string(),
             params: BridgeParams {
                 data: "aGVsbG8=".to_string(),
-                biometric: true,
+                access_policy: AccessPolicy::BiometricOnly,
                 app_name: "test-app".to_string(),
                 key_label: "cache-key".to_string(),
             },
@@ -127,7 +100,7 @@ mod tests {
         let parsed: BridgeRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.method, "encrypt");
         assert_eq!(parsed.params.data, "aGVsbG8=");
-        assert!(parsed.params.biometric);
+        assert_eq!(parsed.params.access_policy, AccessPolicy::BiometricOnly);
         assert_eq!(parsed.params.app_name, "test-app");
         assert_eq!(parsed.params.key_label, "cache-key");
     }
@@ -138,7 +111,7 @@ mod tests {
         let parsed: BridgeRequest = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.method, "init");
         assert_eq!(parsed.params.data, "");
-        assert!(!parsed.params.biometric);
+        assert_eq!(parsed.params.access_policy, AccessPolicy::None);
         assert_eq!(parsed.params.app_name, "");
         assert_eq!(parsed.params.key_label, "");
     }
@@ -205,14 +178,14 @@ mod tests {
 
     #[test]
     fn bridge_request_all_methods() {
-        for method in &["init", "encrypt", "decrypt", "delete", "destroy"] {
+        for method in &["init", "encrypt", "decrypt", "destroy"] {
             let request = BridgeRequest {
                 method: (*method).to_string(),
                 params: BridgeParams {
                     data: String::new(),
-                    biometric: false,
+                    access_policy: AccessPolicy::None,
                     app_name: "test".to_string(),
-                    key_label: "cache-key".to_string(),
+                    key_label: "default".to_string(),
                 },
             };
             let json = serde_json::to_string(&request).unwrap();
@@ -280,8 +253,9 @@ mod tests {
         let json = r#"{}"#;
         let params: BridgeParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.data, "");
-        assert!(!params.biometric);
+        assert_eq!(params.access_policy, AccessPolicy::None);
         assert_eq!(params.app_name, "");
+        assert_eq!(params.key_label, "");
     }
 
     #[test]
