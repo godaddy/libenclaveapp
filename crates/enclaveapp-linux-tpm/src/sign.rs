@@ -9,7 +9,7 @@ use crate::tpm::{self, TpmConfig};
 use enclaveapp_core::metadata::{self, DirLock};
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
 use enclaveapp_core::types::validate_label;
-use enclaveapp_core::{AccessPolicy, Error, KeyMeta, KeyType, Result};
+use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use sha2::{Digest as _, Sha256};
 use tss_esapi::structures::{
     Digest as TpmDigest, Public, Signature as TpmSignature, SignatureScheme,
@@ -254,6 +254,7 @@ fn encode_der_length(out: &mut Vec<u8>, len: usize) {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use enclaveapp_core::KeyMeta;
 
     #[test]
     fn encode_der_integer_no_padding() {
