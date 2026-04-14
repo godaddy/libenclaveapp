@@ -85,6 +85,13 @@ pub fn config_dir(app_name: &str) -> PathBuf {
 
 /// Write data atomically: write to a temp file, then rename into place.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    atomic_write_with_sync(path, data, sync_parent_dir)
+}
+
+fn atomic_write_with_sync<F>(path: &Path, data: &[u8], sync_parent: F) -> Result<()>
+where
+    F: Fn(&Path) -> Result<()>,
+{
     let parent = path.parent().ok_or_else(|| {
         Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -103,6 +110,19 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
         std::fs::remove_file(&tmp).ok();
         return Err(e.into());
     }
+    sync_parent(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let dir = std::fs::File::open(path)?;
+    dir.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -271,8 +291,7 @@ where
             label: old_label.to_string(),
         });
     }
-    let new_meta = dir.join(format!("{new_label}.meta"));
-    if new_meta.exists() {
+    if key_files_exist(dir, new_label) {
         return Err(Error::DuplicateLabel {
             label: new_label.to_string(),
         });
@@ -389,6 +408,27 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
         assert_eq!(std::fs::read_to_string(&legacy_tmp).unwrap(), "legacy");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn atomic_write_syncs_parent_directory_after_rename() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = test_dir();
+        let path = dir.join("test.txt");
+        let synced = AtomicBool::new(false);
+
+        atomic_write_with_sync(&path, b"hello world", |parent| {
+            assert_eq!(parent, dir.as_path());
+            synced.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(synced.load(Ordering::SeqCst));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -522,6 +562,24 @@ mod tests {
             Error::DuplicateLabel { label } => assert_eq!(label, "dst"),
             other => panic!("expected DuplicateLabel, got: {other}"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn rename_key_files_rejects_existing_target_pub_without_meta() {
+        let dir = test_dir();
+        let meta = KeyMeta::new("src", KeyType::Signing, AccessPolicy::None);
+        save_meta(&dir, "src", &meta).unwrap();
+        save_pub_key(&dir, "dst", b"existing").unwrap();
+
+        let err = rename_key_files(&dir, "src", "dst").unwrap_err();
+        match err {
+            Error::DuplicateLabel { label } => assert_eq!(label, "dst"),
+            other => panic!("expected DuplicateLabel, got: {other}"),
+        }
+        assert!(dir.join("src.meta").exists());
+        assert!(dir.join("dst.pub").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
