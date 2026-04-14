@@ -146,12 +146,7 @@ impl EnclaveKeyManager for LinuxTpmEncryptor {
         metadata::ensure_dir(&dir)?;
         let _lock = DirLock::acquire(&dir)?;
 
-        // Check for duplicates
-        if dir.join(format!("{label}.tpm_pub")).exists() {
-            return Err(Error::DuplicateLabel {
-                label: label.to_string(),
-            });
-        }
+        tpm::ensure_label_available(&dir, label)?;
 
         let mut ctx = tpm::open_context()?;
         let primary_handle = tpm::create_primary(&mut ctx)?;
@@ -216,7 +211,7 @@ impl EnclaveKeyManager for LinuxTpmEncryptor {
             });
         }
         let _lock = DirLock::acquire(&dir)?;
-        let blob_existed = tpm::key_blobs_exist(&dir, label);
+        let blob_existed = tpm::key_blobs_exist(&dir, label)?;
         let metadata_existed = metadata::key_files_exist(&dir, label);
         if !blob_existed && !metadata_existed {
             return Err(Error::KeyNotFound {
@@ -413,6 +408,29 @@ mod tests {
             Error::KeyOperation { .. } => {}
             other => panic!("expected KeyOperation, got: {other}"),
         }
+    }
+
+    #[test]
+    fn generate_rejects_duplicate_private_blob_without_public_blob() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-tpm-test-enc-dup-{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let enc = LinuxTpmEncryptor::with_keys_dir("test", dir.clone());
+        metadata::atomic_write(&dir.join("stray-enc.tpm_priv"), b"priv").unwrap();
+
+        let err = enc
+            .generate("stray-enc", KeyType::Encryption, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::DuplicateLabel { label } => assert_eq!(label, "stray-enc"),
+            other => panic!("expected DuplicateLabel, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // Integration tests that require actual TPM hardware.

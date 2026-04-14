@@ -233,6 +233,33 @@ impl TpmConfig {
     }
 }
 
+const TPM_BLOB_EXTENSIONS: [&str; 2] = ["tpm_pub", "tpm_priv"];
+
+fn blob_path(dir: &Path, label: &str, extension: &str) -> Result<PathBuf> {
+    enclaveapp_core::types::validate_label(label)?;
+    Ok(dir.join(format!("{label}.{extension}")))
+}
+
+fn blob_paths(dir: &Path, label: &str) -> Result<[PathBuf; 2]> {
+    Ok([
+        blob_path(dir, label, TPM_BLOB_EXTENSIONS[0])?,
+        blob_path(dir, label, TPM_BLOB_EXTENSIONS[1])?,
+    ])
+}
+
+pub fn key_artifacts_exist(dir: &Path, label: &str) -> Result<bool> {
+    Ok(key_blobs_exist(dir, label)? || metadata::key_files_exist(dir, label))
+}
+
+pub fn ensure_label_available(dir: &Path, label: &str) -> Result<()> {
+    if key_artifacts_exist(dir, label)? {
+        return Err(Error::DuplicateLabel {
+            label: label.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Save TPM key blobs (public + private) to disk.
 /// The private blob is TPM-encrypted -- useless without the same physical TPM.
 pub fn save_key_blobs(
@@ -241,16 +268,16 @@ pub fn save_key_blobs(
     public_blob: &[u8],
     private_blob: &[u8],
 ) -> Result<()> {
-    metadata::atomic_write(&dir.join(format!("{label}.tpm_pub")), public_blob)?;
-    metadata::atomic_write(&dir.join(format!("{label}.tpm_priv")), private_blob)?;
-    metadata::restrict_file_permissions(&dir.join(format!("{label}.tpm_priv")))?;
+    let [pub_path, priv_path] = blob_paths(dir, label)?;
+    metadata::atomic_write(&pub_path, public_blob)?;
+    metadata::atomic_write(&priv_path, private_blob)?;
+    metadata::restrict_file_permissions(&priv_path)?;
     Ok(())
 }
 
 /// Load TPM key blobs from disk.
 pub fn load_key_blobs(dir: &Path, label: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-    let pub_path = dir.join(format!("{label}.tpm_pub"));
-    let priv_path = dir.join(format!("{label}.tpm_priv"));
+    let [pub_path, priv_path] = blob_paths(dir, label)?;
     if !pub_path.exists() || !priv_path.exists() {
         return Err(Error::KeyNotFound {
             label: label.to_string(),
@@ -263,13 +290,13 @@ pub fn load_key_blobs(dir: &Path, label: &str) -> Result<(Vec<u8>, Vec<u8>)> {
 
 /// Delete TPM key blob files.
 pub fn delete_key_blobs(dir: &Path, label: &str) -> Result<()> {
-    if !key_blobs_exist(dir, label) {
+    let [pub_path, priv_path] = blob_paths(dir, label)?;
+    if !pub_path.exists() && !priv_path.exists() {
         return Err(Error::KeyNotFound {
             label: label.to_string(),
         });
     }
-    for ext in &["tpm_pub", "tpm_priv"] {
-        let path = dir.join(format!("{label}.{ext}"));
+    for path in [pub_path, priv_path] {
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -277,10 +304,9 @@ pub fn delete_key_blobs(dir: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn key_blobs_exist(dir: &Path, label: &str) -> bool {
-    ["tpm_pub", "tpm_priv"]
-        .into_iter()
-        .any(|ext| dir.join(format!("{label}.{ext}")).exists())
+pub fn key_blobs_exist(dir: &Path, label: &str) -> Result<bool> {
+    let [pub_path, priv_path] = blob_paths(dir, label)?;
+    Ok(pub_path.exists() || priv_path.exists())
 }
 
 #[cfg(test)]
@@ -367,6 +393,17 @@ mod tests {
             Error::KeyNotFound { label } => assert_eq!(label, "nonexistent"),
             other => panic!("expected KeyNotFound, got: {other}"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn blob_helpers_reject_invalid_labels() {
+        let dir = test_dir();
+        assert!(save_key_blobs(&dir, "../bad", b"pub", b"priv").is_err());
+        assert!(load_key_blobs(&dir, "../bad").is_err());
+        assert!(delete_key_blobs(&dir, "../bad").is_err());
+        assert!(key_blobs_exist(&dir, "../bad").is_err());
+        assert!(ensure_label_available(&dir, "../bad").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

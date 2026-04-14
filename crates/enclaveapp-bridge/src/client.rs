@@ -148,8 +148,7 @@ pub fn bridge_init(
     biometric: bool,
 ) -> Result<()> {
     let response = call_bridge(bridge_path, &init_request(app_name, key_label, biometric))?;
-    drop(response.result);
-    Ok(())
+    response.require_ok("bridge_init")
 }
 
 fn call_bridge_after_init(
@@ -177,8 +176,7 @@ pub fn bridge_delete(bridge_path: &Path, app_name: &str, key_label: &str) -> Res
         },
     };
     let response = call_bridge(bridge_path, &request)?;
-    drop(response.result);
-    Ok(())
+    response.require_ok("bridge_delete")
 }
 
 /// Convenience: encrypt data via the bridge.
@@ -199,8 +197,7 @@ pub fn bridge_encrypt(
         },
     };
     let response = call_bridge_after_init(bridge_path, app_name, key_label, biometric, &request)?;
-    let result = response.result.unwrap_or_default();
-    decode_data(&result)
+    response.decode_result("bridge_encrypt")
 }
 
 /// Convenience: decrypt data via the bridge.
@@ -221,8 +218,7 @@ pub fn bridge_decrypt(
         },
     };
     let response = call_bridge_after_init(bridge_path, app_name, key_label, biometric, &request)?;
-    let result = response.result.unwrap_or_default();
-    decode_data(&result)
+    response.decode_result("bridge_decrypt")
 }
 
 #[cfg(test)]
@@ -392,6 +388,80 @@ if ($requestLine -like '*"method":"init"*' -and $requestLine -like '*"app_name":
         );
 
         bridge_init(&script, "awsenc", "cache-key", true).unwrap();
+        cleanup_script(&script);
+    }
+
+    #[test]
+    fn bridge_encrypt_rejects_missing_result_payload() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        #[cfg(unix)]
+        let script = temp_script(
+            "encrypt-missing-result.sh",
+            r#"#!/bin/sh
+read init_line
+case "$init_line" in
+  *'"method":"init"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
+esac
+read request_line
+case "$request_line" in
+  *'"method":"encrypt"'*) printf '{"result":null,"error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        #[cfg(windows)]
+        let script = temp_script(
+            "encrypt-missing-result",
+            r#"$initLine = [Console]::In.ReadLine()
+if ($initLine -like '*"method":"init"*') {
+  [Console]::Out.WriteLine('{"result":"","error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected init request"}')
+  exit 0
+}
+$requestLine = [Console]::In.ReadLine()
+if ($requestLine -like '*"method":"encrypt"*') {
+  [Console]::Out.WriteLine('{"result":null,"error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected request"}')
+}
+"#,
+        );
+
+        let error = bridge_encrypt(&script, "awsenc", "cache-key", b"ignored", true).unwrap_err();
+        assert!(error.to_string().contains("missing result payload"));
+        cleanup_script(&script);
+    }
+
+    #[test]
+    fn bridge_init_rejects_missing_result_payload() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        #[cfg(unix)]
+        let script = temp_script(
+            "init-missing-result.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"init"'*) printf '{"result":null,"error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        #[cfg(windows)]
+        let script = temp_script(
+            "init-missing-result",
+            r#"$requestLine = [Console]::In.ReadLine()
+if ($requestLine -like '*"method":"init"*') {
+  [Console]::Out.WriteLine('{"result":null,"error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected request"}')
+}
+"#,
+        );
+
+        let error = bridge_init(&script, "awsenc", "cache-key", true).unwrap_err();
+        assert!(error.to_string().contains("missing result payload"));
         cleanup_script(&script);
     }
 }
