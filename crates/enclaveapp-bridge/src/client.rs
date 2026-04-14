@@ -425,7 +425,7 @@ mod tests {
     #[cfg(windows)]
     fn temp_script(name: &str, body: &str) -> PathBuf {
         let id = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!(
+        let base = env::temp_dir().join(format!(
             "enclaveapp-bridge-test-{}-{}-{}",
             std::process::id(),
             id,
