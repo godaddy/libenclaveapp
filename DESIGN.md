@@ -2,141 +2,113 @@
 
 ## Goal
 
-Shared Rust library for hardware-backed key management, extracted from
-duplicated infrastructure across `sshenc`, `awsenc`, and `sso-jwt`. All
-three applications depend on libenclaveapp for platform crypto, key
-lifecycle, metadata storage, and cross-platform abstractions.
+Provide a shared Rust substrate for hardware-backed key management so derived applications do not each reimplement:
 
-## Architecture
+- platform detection
+- Secure Enclave / TPM bootstrap
+- key lifecycle and metadata storage
+- WSL bridge discovery
+- software fallback behavior
+
+The current workspace supports four active consumers:
+
+| Application | Primary use |
+|---|---|
+| `sshenc` | signing |
+| `awsenc` | encrypted credential caching |
+| `sso-jwt` | encrypted token caching |
+| `npmenc` | encrypted secret storage through an adapter layer |
+
+## Workspace layout
 
 ```
 libenclaveapp/
   crates/
-    enclaveapp-core/          Platform-agnostic types, traits, utilities
-    enclaveapp-apple/         macOS Secure Enclave (CryptoKit Swift bridge)
-    enclaveapp-windows/       Windows TPM 2.0 (CNG NCrypt/BCrypt)
-    enclaveapp-linux-tpm/     Linux TPM 2.0 (tss-esapi)
-    enclaveapp-software/      Software fallback (P-256 on disk)
-    enclaveapp-wsl/           WSL detection and shell configuration
-    enclaveapp-bridge/        JSON-RPC TPM bridge for WSL
-    enclaveapp-test-support/  Mock backend for testing without hardware
+    enclaveapp-core/          Traits, types, metadata, shared utilities
+    enclaveapp-app-storage/   App-level bootstrap for encryption/signing
+    enclaveapp-apple/         macOS Secure Enclave backend
+    enclaveapp-windows/       Windows TPM backend
+    enclaveapp-linux-tpm/     Linux TPM backend
+    enclaveapp-software/      Software fallback backend
+    enclaveapp-wsl/           WSL detection and shell/profile helpers
+    enclaveapp-bridge/        JSON-RPC bridge protocol + WSL client
+    enclaveapp-test-support/  Mock backend for tests
 ```
 
-### enclaveapp-core
+## Layering
 
-Platform-agnostic abstractions. No FFI, no platform-specific code.
+### `enclaveapp-core`
 
-Key types:
-- `KeyType` -- `Signing` (ECDSA) or `Encryption` (ECIES via ECDH)
-- `AccessPolicy` -- `None`, `Any`, `BiometricOnly`, `PasswordOnly`
-- `KeyMeta` -- label, key type, access policy, timestamps, app-specific data
+Defines the durable contracts:
 
-Key traits:
-- `EnclaveKeyManager` -- generate, public_key, list_keys, delete_key, is_available
-- `EnclaveSigner` -- sign (extends EnclaveKeyManager)
-- `EnclaveEncryptor` -- encrypt, decrypt (extends EnclaveKeyManager)
+- `EnclaveKeyManager`
+- `EnclaveSigner`
+- `EnclaveEncryptor`
+- `KeyType`
+- `AccessPolicy`
+- metadata and config helpers
 
-Utilities: atomic file writes, directory locking, config/metadata TOML
-helpers, SEC1 P-256 point validation, standard app data directory resolution.
+This crate has no platform FFI.
 
-### enclaveapp-apple
+### `enclaveapp-app-storage`
 
-macOS Secure Enclave via CryptoKit Swift bridge. Compiled as a static
-library via `build.rs` (swiftc). No Apple Developer certificate or
-entitlements required -- CryptoKit works with ad-hoc linker signatures.
+This is the application-facing integration layer. It wraps platform selection and key initialization so application code can say:
 
-Supports both key types:
-- `SecureEnclave.P256.Signing.PrivateKey` for ECDSA signing (sshenc)
-- `SecureEnclave.P256.KeyAgreement.PrivateKey` for ECIES encryption (awsenc, sso-jwt)
+- create encryption storage for app `awsenc`
+- create signing backend for app `sshenc`
 
-ECIES implementation: ECDH key agreement + X9.63 KDF + AES-GCM. Keys
-are stored as opaque `.handle` files (CryptoKit data representations).
+It also centralizes WSL bridge lookup, access-policy handling, and app-specific key names.
 
-### enclaveapp-windows
+### Platform backends
 
-Windows TPM 2.0 via CNG (`Microsoft Platform Crypto Provider`). Supports
-both `BCRYPT_ECDSA_P256_ALGORITHM` (signing) and `BCRYPT_ECDH_P256_ALGORITHM`
-(encryption). Key lifecycle, Windows Hello policy, and public key export
-are shared between both modes.
+- `enclaveapp-apple`: Secure Enclave via CryptoKit Swift bridge
+- `enclaveapp-windows`: TPM 2.0 via CNG
+- `enclaveapp-linux-tpm`: TPM 2.0 via `tss-esapi`
+- `enclaveapp-software`: software fallback for unsupported or non-hardware environments
 
-### enclaveapp-linux-tpm
+### WSL support
 
-Linux TPM 2.0 via `tss-esapi` (TPM2 Software Stack). Uses the kernel TPM
-resource manager (`/dev/tpmrm0`). Keys are stored as TPM-wrapped blobs --
-the private portion is encrypted by the TPM and useless on another machine.
+- `enclaveapp-bridge` defines the JSON-RPC bridge client and protocol
+- `enclaveapp-wsl` handles WSL detection, distro enumeration, shell/profile changes, and install helpers
 
-Supports both signing and encryption. Available on Linux systems with
-TPM 2.0 hardware.
+## Access policy model
 
-### enclaveapp-software
+All backends share the same policy vocabulary:
 
-Software-only P-256 backend for environments without hardware security
-modules. Uses the `p256` and `aes-gcm` crates. Keys are stored as files
-on disk with restrictive permissions (0600). Provides the same API as
-hardware backends but without hardware isolation.
+- `None`
+- `Any`
+- `BiometricOnly`
+- `PasswordOnly`
 
-Intended for CI, containers, and development environments. Applications
-print a one-time warning when using this backend.
+Applications decide which policy to request. Platform backends map that policy to the best native behavior available.
 
-### enclaveapp-wsl
+## ECIES format
 
-WSL detection and shell configuration. Parameterized by app name so all
-three applications share the same WSL integration code.
-
-Provides: `is_wsl()` detection, distro enumeration, shell profile
-configuration (managed block insertion/removal), dependency installation
-(socat, bridge binaries).
-
-### enclaveapp-bridge
-
-JSON-RPC TPM bridge binary for WSL. Runs on the Windows host, accepts
-encrypt/decrypt/sign requests over stdin/stdout from WSL processes. The
-key name is the only app-specific parameter.
-
-### enclaveapp-test-support
-
-Mock backend implementing all traits with deterministic key generation
-and signature production. Used by all three consuming applications for
-testing without hardware.
-
-## Feature Flags
-
-Platform crates expose `signing` and `encryption` features:
-
-```toml
-# SSH key signing (sshenc)
-enclaveapp-apple = { features = ["signing"] }
-
-# Credential encryption (awsenc, sso-jwt)
-enclaveapp-apple = { features = ["encryption"] }
-```
-
-## ECIES Ciphertext Format
+Encryption backends use the shared ciphertext format:
 
 ```
 [0x01 version] [65-byte ephemeral pubkey] [12-byte nonce] [ciphertext] [16-byte GCM tag]
 ```
 
-The version byte allows future format evolution. The explicit nonce is more
-robust than derived nonces. AES-GCM provides authenticated encryption.
+This keeps ciphertext portable across the derived applications that use encryption storage.
 
-## Platform Support
+## Platform support
 
-| Platform | Hardware | Signing | Encryption |
+| Platform | Signing | Encryption | Notes |
 |---|---|---|---|
-| macOS (Apple Silicon / T2) | Secure Enclave | Yes | Yes |
-| Windows | TPM 2.0 | Yes | Yes |
-| Linux | TPM 2.0 | Yes | Yes |
-| Linux (no TPM) | Software | Yes | Yes |
-| WSL | Windows TPM via bridge | Yes* | Yes |
+| macOS | Yes | Yes | Secure Enclave |
+| Windows | Yes | Yes | TPM 2.0 / CNG |
+| Linux with TPM | Yes | Yes | TPM 2.0 / `tss-esapi` |
+| Linux without TPM | Yes | Yes | software fallback |
+| WSL | consumer-specific | Yes | Windows host bridge for encryption workloads |
 
-*WSL signing for sshenc uses the agent bridge (socat + npiperelay) rather
-than the JSON-RPC bridge.
+For `sshenc`, WSL signing is handled by the ssh agent bridge path rather than the JSON-RPC encryption bridge.
 
-## Consumers
+## Consumer mapping
 
-| Application | Key Type | Backend Features |
-|---|---|---|
-| sshenc | Signing | ECDSA P-256, SSH agent protocol |
-| awsenc | Encryption | ECIES, AWS credential caching |
-| sso-jwt | Encryption | ECIES, JWT caching |
+| Consumer | Integration style |
+|---|---|
+| `sshenc` | `enclaveapp-app-storage` signing bootstrap plus SSH-specific metadata and agent logic |
+| `awsenc` | `enclaveapp-app-storage` encryption storage |
+| `sso-jwt` | `enclaveapp-app-storage` encryption storage |
+| `npmenc` | encrypted secret storage built on the same shared key-management stack |
