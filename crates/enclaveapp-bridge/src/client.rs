@@ -16,6 +16,8 @@ use std::process::{Command, Stdio};
 /// to `which` for PATH-based discovery.
 pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
     let candidates = [
+        format!("/mnt/c/Program Files/{app_name}/{app_name}-tpm-bridge.exe"),
+        format!("/mnt/c/ProgramData/{app_name}/{app_name}-tpm-bridge.exe"),
         format!("/mnt/c/Program Files/{app_name}/{app_name}-bridge.exe"),
         format!("/mnt/c/ProgramData/{app_name}/{app_name}-bridge.exe"),
     ];
@@ -25,80 +27,150 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    // Try which
-    if let Ok(output) = Command::new("which")
-        .arg(format!("{app_name}-bridge.exe"))
-        .output()
-    {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
+    for name in [
+        format!("{app_name}-tpm-bridge.exe"),
+        format!("{app_name}-bridge.exe"),
+    ] {
+        if let Ok(output) = Command::new("which").arg(&name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
+                }
             }
         }
     }
     None
 }
 
+struct BridgeSession {
+    child: std::process::Child,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl BridgeSession {
+    fn spawn(bridge_path: &Path) -> Result<Self> {
+        let mut child = Command::new(bridge_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| enclaveapp_core::Error::KeyOperation {
+                operation: "bridge_spawn".into(),
+                detail: e.to_string(),
+            })?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| enclaveapp_core::Error::KeyOperation {
+                operation: "bridge_read".into(),
+                detail: "no stdout".into(),
+            })?;
+
+        Ok(Self {
+            child,
+            stdout: std::io::BufReader::new(stdout),
+        })
+    }
+
+    fn request(&mut self, request: &BridgeRequest) -> Result<BridgeResponse> {
+        let request_json = serde_json::to_string(request)
+            .map_err(|e| enclaveapp_core::Error::Serialization(e.to_string()))?;
+
+        if let Some(ref mut stdin) = self.child.stdin {
+            writeln!(stdin, "{request_json}").map_err(enclaveapp_core::Error::Io)?;
+            stdin.flush().map_err(enclaveapp_core::Error::Io)?;
+        }
+
+        let mut line = String::new();
+        self.stdout
+            .read_line(&mut line)
+            .map_err(enclaveapp_core::Error::Io)?;
+        if line.trim().is_empty() {
+            return Err(enclaveapp_core::Error::KeyOperation {
+                operation: "bridge_read".into(),
+                detail: "bridge returned no response".into(),
+            });
+        }
+
+        let response: BridgeResponse = serde_json::from_str(&line)
+            .map_err(|e| enclaveapp_core::Error::Serialization(format!("bridge response: {e}")))?;
+
+        if let Some(ref err) = response.error {
+            return Err(enclaveapp_core::Error::KeyOperation {
+                operation: "bridge".into(),
+                detail: err.clone(),
+            });
+        }
+
+        Ok(response)
+    }
+
+    fn finish(mut self) -> Result<()> {
+        drop(self.child.stdin.take());
+        let status = self.child.wait().map_err(enclaveapp_core::Error::Io)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(enclaveapp_core::Error::KeyOperation {
+                operation: "bridge".into(),
+                detail: format!("bridge exited with status {status}"),
+            })
+        }
+    }
+}
+
 /// Call the bridge with a request and return the response.
-///
-/// Spawns the bridge binary, writes the JSON request to its stdin,
-/// closes stdin, and reads a single-line JSON response from stdout.
 pub fn call_bridge(bridge_path: &Path, request: &BridgeRequest) -> Result<BridgeResponse> {
-    let mut child = Command::new(bridge_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| enclaveapp_core::Error::KeyOperation {
-            operation: "bridge_spawn".into(),
-            detail: e.to_string(),
-        })?;
-
-    // Write request
-    let request_json = serde_json::to_string(request)
-        .map_err(|e| enclaveapp_core::Error::Serialization(e.to_string()))?;
-
-    if let Some(ref mut stdin) = child.stdin {
-        writeln!(stdin, "{request_json}").map_err(enclaveapp_core::Error::Io)?;
-    }
-    // Close stdin to signal end of input
-    drop(child.stdin.take());
-
-    // Read response
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| enclaveapp_core::Error::KeyOperation {
-            operation: "bridge_read".into(),
-            detail: "no stdout".into(),
-        })?;
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(enclaveapp_core::Error::Io)?;
-
-    // Wait for child
-    let status = child.wait().map_err(enclaveapp_core::Error::Io)?;
-    if !status.success() && line.is_empty() {
-        return Err(enclaveapp_core::Error::KeyOperation {
-            operation: "bridge".into(),
-            detail: format!("bridge exited with status {status}"),
-        });
-    }
-
-    let response: BridgeResponse = serde_json::from_str(&line)
-        .map_err(|e| enclaveapp_core::Error::Serialization(format!("bridge response: {e}")))?;
-
-    if let Some(ref err) = response.error {
-        return Err(enclaveapp_core::Error::KeyOperation {
-            operation: "bridge".into(),
-            detail: err.clone(),
-        });
-    }
-
+    let mut session = BridgeSession::spawn(bridge_path)?;
+    let response = session.request(request)?;
+    session.finish()?;
     Ok(response)
+}
+
+fn init_request(app_name: &str, biometric: bool) -> BridgeRequest {
+    BridgeRequest {
+        method: "init".to_string(),
+        params: BridgeParams {
+            data: String::new(),
+            biometric,
+            app_name: app_name.to_string(),
+        },
+    }
+}
+
+pub fn bridge_init(bridge_path: &Path, app_name: &str, biometric: bool) -> Result<()> {
+    let response = call_bridge(bridge_path, &init_request(app_name, biometric))?;
+    drop(response.result);
+    Ok(())
+}
+
+fn call_bridge_after_init(
+    bridge_path: &Path,
+    app_name: &str,
+    biometric: bool,
+    request: &BridgeRequest,
+) -> Result<BridgeResponse> {
+    let mut session = BridgeSession::spawn(bridge_path)?;
+    session.request(&init_request(app_name, biometric))?;
+    let response = session.request(request)?;
+    session.finish()?;
+    Ok(response)
+}
+
+pub fn bridge_delete(bridge_path: &Path, app_name: &str) -> Result<()> {
+    let request = BridgeRequest {
+        method: "delete".to_string(),
+        params: BridgeParams {
+            data: String::new(),
+            biometric: false,
+            app_name: app_name.to_string(),
+        },
+    };
+    let response = call_bridge(bridge_path, &request)?;
+    drop(response.result);
+    Ok(())
 }
 
 /// Convenience: encrypt data via the bridge.
@@ -116,7 +188,7 @@ pub fn bridge_encrypt(
             app_name: app_name.to_string(),
         },
     };
-    let response = call_bridge(bridge_path, &request)?;
+    let response = call_bridge_after_init(bridge_path, app_name, biometric, &request)?;
     let result = response.result.unwrap_or_default();
     decode_data(&result)
 }
@@ -136,7 +208,7 @@ pub fn bridge_decrypt(
             app_name: app_name.to_string(),
         },
     };
-    let response = call_bridge(bridge_path, &request)?;
+    let response = call_bridge_after_init(bridge_path, app_name, biometric, &request)?;
     let result = response.result.unwrap_or_default();
     decode_data(&result)
 }
@@ -145,11 +217,63 @@ pub fn bridge_decrypt(
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn temp_script(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "enclaveapp-bridge-test-{}-{}",
+            std::process::id(),
+            name
+        ));
+        fs::write(&path, body).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
 
     #[test]
     fn find_bridge_returns_none_when_not_found() {
         // On macOS (or any non-WSL environment), no bridge binary should exist
         let result = find_bridge("enclaveapp-nonexistent-test-app");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn bridge_encrypt_initializes_before_encrypting() {
+        let script = temp_script(
+            "encrypt.sh",
+            r#"#!/bin/sh
+read init_line
+printf '{"result":"","error":null}\n'
+read request_line
+case "$request_line" in
+  *'"method":"encrypt"'*) printf '{"result":"aGVsbG8=","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+
+        let plaintext = bridge_encrypt(&script, "awsenc", b"ignored", true).unwrap();
+        assert_eq!(plaintext, b"hello");
+        fs::remove_file(script).unwrap();
+    }
+
+    #[test]
+    fn bridge_delete_sends_delete_request() {
+        let script = temp_script(
+            "delete.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"delete"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+
+        bridge_delete(&script, "awsenc").unwrap();
+        fs::remove_file(script).unwrap();
     }
 }

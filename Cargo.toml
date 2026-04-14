@@ -60,6 +60,7 @@ tss-esapi = "7"
 
 # System
 libc = "0.2"
+fs2 = "0.4"
 
 # Keyring
 keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"] }

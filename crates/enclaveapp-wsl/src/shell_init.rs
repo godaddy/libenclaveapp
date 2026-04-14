@@ -154,7 +154,7 @@ __{prefix}_debug() {{
 
 # Chain with existing DEBUG trap if present
 __{prefix}_existing_trap=$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '//;s/' DEBUG$//")
-if [[ -n "${prefix}_existing_trap" ]]; then
+if [[ -n "$__{prefix}_existing_trap" ]]; then
     eval "trap '${{__{prefix}_existing_trap}}; __{prefix}_debug' DEBUG"
 else
     trap '__{prefix}_debug' DEBUG
@@ -548,6 +548,7 @@ mod tests {
         let script = generate_shell_init("bash", &ssojwt_config()).unwrap();
         assert!(script.contains("trap -p DEBUG"));
         assert!(script.contains("__sso_jwt_existing_trap"));
+        assert!(script.contains("if [[ -n \"$__sso_jwt_existing_trap\" ]]; then"));
     }
 
     #[test]

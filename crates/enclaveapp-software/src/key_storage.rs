@@ -50,10 +50,12 @@ pub struct SoftwareConfig {
     /// the `keyring-storage` feature is enabled, `false` otherwise.
     /// Set to `false` for testing or environments where the keyring
     /// is known to be unavailable.
+    #[allow(dead_code)]
     pub use_keyring: bool,
 }
 
 impl SoftwareConfig {
+    #[allow(dead_code)]
     pub fn new(app_name: &str) -> Self {
         Self {
             app_name: app_name.to_string(),
@@ -360,6 +362,13 @@ pub fn list_labels(config: &SoftwareConfig) -> Result<Vec<String>> {
 /// Delete a key and all associated files.
 pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     let dir = config.keys_dir();
+    let key_path = dir.join(format!("{label}.key"));
+    let key_exists = dir.exists() && (key_path.exists() || metadata::key_files_exist(&dir, label));
+    if !key_exists {
+        return Err(Error::KeyNotFound {
+            label: label.to_string(),
+        });
+    }
     let _lock = metadata::DirLock::acquire(&dir)?;
 
     // Remove the keyring entry (ignore errors -- may not exist)
@@ -367,12 +376,15 @@ pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     delete_keyring_entry(&config.app_name, label);
 
     // Remove the private key file
-    let key_path = dir.join(format!("{label}.key"));
     if key_path.exists() {
         std::fs::remove_file(&key_path)?;
     }
 
-    metadata::delete_key_files(&dir, label)
+    match metadata::delete_key_files(&dir, label) {
+        Ok(()) => Ok(()),
+        Err(Error::KeyNotFound { .. }) => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Encrypt a raw private key with the given KEK using AES-256-GCM.
@@ -731,6 +743,21 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_key_missing_dir_returns_key_not_found() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-sw-missing-{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        let config = SoftwareConfig::with_keys_dir("test-app", dir);
+        let err = delete_key(&config, "ghost").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "ghost"),
+            other => panic!("expected KeyNotFound, got: {other}"),
+        }
     }
 
     #[test]

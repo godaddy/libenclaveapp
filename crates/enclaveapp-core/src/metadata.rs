@@ -4,7 +4,9 @@
 //! Key metadata and file operations for hardware-backed key management.
 
 use crate::error::{Error, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Metadata stored alongside a hardware-bound key.
@@ -83,13 +85,38 @@ pub fn config_dir(app_name: &str) -> PathBuf {
 
 /// Write data atomically: write to a temp file, then rename into place.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data)?;
+    let parent = path.parent().ok_or_else(|| {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic_write path has no parent directory",
+        ))
+    })?;
+    let tmp = unique_temp_path(parent, path);
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    drop(file);
     if let Err(e) = std::fs::rename(&tmp, path) {
         std::fs::remove_file(&tmp).ok();
         return Err(e.into());
     }
     Ok(())
+}
+
+fn unique_temp_path(parent: &Path, path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tmp");
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    parent.join(format!(".{file_name}.{pid}.{nanos}.tmp"))
 }
 
 /// File-based directory lock using flock (Unix) or LockFile (Windows).
@@ -105,41 +132,18 @@ impl DirLock {
         let lock_path = dir.join(".lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            // Safety: calling libc::flock with a valid file descriptor to acquire
-            // an exclusive file lock. This is the standard POSIX locking mechanism.
-            #[allow(unsafe_code)]
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(Error::Io(std::io::Error::last_os_error()));
-            }
-        }
-        // On Windows, opening with write access provides basic mutual exclusion.
-        // For stronger guarantees, we could use LockFileEx, but for our use case
-        // (protecting against concurrent CLI invocations) this is sufficient.
+        file.lock_exclusive().map_err(Error::Io)?;
         Ok(DirLock { _file: file })
     }
 }
 
 /// Ensure a directory exists with restrictive permissions (0700 on Unix).
 pub fn ensure_dir(dir: &Path) -> Result<()> {
-    // Safety: calling libc::umask to temporarily set a restrictive umask while
-    // creating directories. umask is a simple syscall with no memory safety concerns.
-    #[cfg(unix)]
-    #[allow(unsafe_code)]
-    let old_umask = unsafe { libc::umask(0o077) };
     std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    #[allow(unsafe_code)]
-    // Safety: restoring the original umask value obtained above.
-    unsafe {
-        libc::umask(old_umask);
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -238,8 +242,27 @@ pub fn delete_key_files(dir: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Returns true if any metadata/public/handle files exist for the given label.
+pub fn key_files_exist(dir: &Path, label: &str) -> bool {
+    ["meta", "pub", "handle", "ssh.pub"]
+        .into_iter()
+        .any(|ext| dir.join(format!("{label}.{ext}")).exists())
+}
+
 /// Rename all files associated with a key label.
 pub fn rename_key_files(dir: &Path, old_label: &str, new_label: &str) -> Result<()> {
+    rename_key_files_with_writer(dir, old_label, new_label, atomic_write)
+}
+
+fn rename_key_files_with_writer<F>(
+    dir: &Path,
+    old_label: &str,
+    new_label: &str,
+    metadata_writer: F,
+) -> Result<()>
+where
+    F: Fn(&Path, &[u8]) -> Result<()>,
+{
     let extensions = ["meta", "pub", "handle", "ssh.pub"];
     let old_handle = dir.join(format!("{old_label}.handle"));
     let old_meta = dir.join(format!("{old_label}.meta"));
@@ -254,23 +277,39 @@ pub fn rename_key_files(dir: &Path, old_label: &str, new_label: &str) -> Result<
             label: new_label.to_string(),
         });
     }
+    let mut renamed = Vec::new();
     for ext in &extensions {
         let old = dir.join(format!("{old_label}.{ext}"));
         let new = dir.join(format!("{new_label}.{ext}"));
         if old.exists() {
-            std::fs::rename(&old, &new)?;
+            if let Err(err) = std::fs::rename(&old, &new) {
+                rollback_renames(&renamed)?;
+                return Err(err.into());
+            }
+            renamed.push((old, new));
         }
     }
     // Update the label in the metadata file
     let new_meta_path = dir.join(format!("{new_label}.meta"));
     if new_meta_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&new_meta_path) {
-            if let Ok(mut meta) = serde_json::from_str::<KeyMeta>(&content) {
-                meta.label = new_label.to_string();
-                if let Ok(json) = serde_json::to_string_pretty(&meta) {
-                    atomic_write(&new_meta_path, json.as_bytes()).ok();
-                }
-            }
+        let content = std::fs::read_to_string(&new_meta_path)?;
+        let mut meta: KeyMeta =
+            serde_json::from_str(&content).map_err(|e| Error::Serialization(e.to_string()))?;
+        meta.label = new_label.to_string();
+        let json =
+            serde_json::to_string_pretty(&meta).map_err(|e| Error::Serialization(e.to_string()))?;
+        if let Err(err) = metadata_writer(&new_meta_path, json.as_bytes()) {
+            rollback_renames(&renamed)?;
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn rollback_renames(renamed: &[(PathBuf, PathBuf)]) -> Result<()> {
+    for (old, new) in renamed.iter().rev() {
+        if new.exists() {
+            std::fs::rename(new, old)?;
         }
     }
     Ok(())
@@ -329,19 +368,32 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
     fn atomic_write_creates_file() {
         let dir = test_dir();
         let path = dir.join("test.txt");
         atomic_write(&path, b"hello world").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
-        // Temp file should not exist
-        assert!(!path.with_extension("tmp").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn atomic_write_ignores_preexisting_legacy_tmp_file() {
+        let dir = test_dir();
+        let path = dir.join("test.txt");
+        let legacy_tmp = path.with_extension("tmp");
+        std::fs::write(&legacy_tmp, b"legacy").unwrap();
+
+        atomic_write(&path, b"fresh").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+        assert_eq!(std::fs::read_to_string(&legacy_tmp).unwrap(), "legacy");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
     fn save_load_meta_roundtrip() {
         let dir = test_dir();
         let meta = KeyMeta::new("mykey", KeyType::Signing, AccessPolicy::Any);
@@ -364,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
     fn save_load_pub_key_roundtrip() {
         let dir = test_dir();
         let pub_key = vec![0x04; 65];
@@ -437,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
     fn rename_key_files_renames_and_updates_meta() {
         let dir = test_dir();
         let meta = KeyMeta::new("old-name", KeyType::Signing, AccessPolicy::None);
@@ -457,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // File I/O + libc::umask not supported by Miri
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
     fn rename_key_files_rejects_existing_target() {
         let dir = test_dir();
         let meta = KeyMeta::new("src", KeyType::Signing, AccessPolicy::None);
@@ -470,6 +522,28 @@ mod tests {
             Error::DuplicateLabel { label } => assert_eq!(label, "dst"),
             other => panic!("expected DuplicateLabel, got: {other}"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn rename_key_files_rolls_back_when_metadata_update_fails() {
+        let dir = test_dir();
+        let meta = KeyMeta::new("old-name", KeyType::Signing, AccessPolicy::None);
+        save_meta(&dir, "old-name", &meta).unwrap();
+        save_pub_key(&dir, "old-name", b"pubkey").unwrap();
+
+        let err = rename_key_files_with_writer(&dir, "old-name", "new-name", |_, _| {
+            Err(Error::Serialization("forced failure".into()))
+        })
+        .unwrap_err();
+        assert!(matches!(err, Error::Serialization(_)));
+        assert!(dir.join("old-name.meta").exists());
+        assert!(dir.join("old-name.pub").exists());
+        assert!(!dir.join("new-name.meta").exists());
+        assert!(!dir.join("new-name.pub").exists());
+        let loaded = load_meta(&dir, "old-name").unwrap();
+        assert_eq!(loaded.label, "old-name");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -503,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // libc::umask not supported by Miri
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
     fn ensure_dir_creates_nested() {
         let dir = test_dir();
         let nested = dir.join("a").join("b").join("c");
@@ -517,9 +591,38 @@ mod tests {
     #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn dir_lock_acquire_and_drop() {
         let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
         let _lock = DirLock::acquire(&dir).unwrap();
         assert!(dir.join(".lock").exists());
         drop(_lock);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Threaded file locking not supported under Miri isolation
+    fn dir_lock_blocks_until_first_holder_releases() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = DirLock::acquire(&dir).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let thread_dir = dir.clone();
+
+        let handle = thread::spawn(move || {
+            tx.send(Instant::now()).unwrap();
+            let _second = DirLock::acquire(&thread_dir).unwrap();
+            tx.send(Instant::now()).unwrap();
+        });
+
+        let start = rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(150));
+        drop(first);
+        let acquired = rx.recv().unwrap();
+        assert!(acquired.duration_since(start) >= Duration::from_millis(100));
+        handle.join().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

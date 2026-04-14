@@ -198,6 +198,13 @@ pub fn list_labels(config: &KeychainConfig) -> Result<Vec<String>> {
 /// Delete a key and all associated files.
 pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
     let dir = config.keys_dir();
+    let key_exists = dir.exists()
+        && (dir.join(format!("{label}.handle")).exists() || metadata::key_files_exist(&dir, label));
+    if !key_exists {
+        return Err(Error::KeyNotFound {
+            label: label.to_string(),
+        });
+    }
     let _lock = metadata::DirLock::acquire(&dir)?;
     metadata::delete_key_files(&dir, label)
 }
@@ -242,5 +249,20 @@ mod tests {
         let custom = PathBuf::from("/tmp/my-custom-keys");
         let config = KeychainConfig::with_keys_dir("test-app", custom.clone());
         assert_eq!(config.keys_dir(), custom);
+    }
+
+    #[test]
+    fn delete_missing_key_in_missing_dir_returns_key_not_found() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-apple-missing-{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        let config = KeychainConfig::with_keys_dir("test-app", dir);
+        let err = delete_key(&config, "ghost").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "ghost"),
+            other => panic!("expected KeyNotFound, got {other}"),
+        }
     }
 }

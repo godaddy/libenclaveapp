@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Bridge request sent from WSL client to Windows server.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BridgeRequest {
-    /// Method: "init", "encrypt", "decrypt", "destroy"
+    /// Method: "init", "encrypt", "decrypt", "delete", "destroy"
     pub method: String,
     /// Parameters.
     pub params: BridgeParams,
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn bridge_request_all_methods() {
-        for method in &["init", "encrypt", "decrypt", "destroy"] {
+        for method in &["init", "encrypt", "decrypt", "delete", "destroy"] {
             let request = BridgeRequest {
                 method: (*method).to_string(),
                 params: BridgeParams {
