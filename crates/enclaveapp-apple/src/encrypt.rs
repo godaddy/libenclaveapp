@@ -44,9 +44,7 @@ impl EnclaveKeyManager for SecureEnclaveEncryptor {
             });
         }
 
-        let (pub_key, data_rep) = keychain::generate_key(key_type, policy.as_ffi_value())?;
-        keychain::save_key(&self.config, label, key_type, policy, &data_rep, &pub_key)?;
-        Ok(pub_key)
+        keychain::generate_and_save_key(&self.config, label, key_type, policy)
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {

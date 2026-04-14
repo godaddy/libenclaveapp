@@ -10,10 +10,11 @@ use crate::convert::p1363_to_der;
 use crate::export::export_public_key;
 use crate::key;
 use crate::provider;
+use crate::state;
 use enclaveapp_core::metadata;
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
 use enclaveapp_core::types::validate_label;
-use enclaveapp_core::{AccessPolicy, Error, KeyMeta, KeyType, Result};
+use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use sha2::{Digest, Sha256};
 use windows::Win32::Security::Cryptography::*;
 
@@ -61,7 +62,16 @@ impl EnclaveKeyManager for TpmSigner {
             });
         }
 
+        let dir = self.keys_dir();
         let provider = provider::open_provider()?;
+        let state = state::KeyMaterialState::acquire(&dir)?;
+        state.ensure_label_available(label, || {
+            match key::open_key(&provider, &self.app_name, label) {
+                Ok(_key) => Ok(state::AuthoritativeKeyState::Present),
+                Err(Error::KeyNotFound { .. }) => Ok(state::AuthoritativeKeyState::Missing),
+                Err(error) => Err(error),
+            }
+        })?;
         let (_key_handle, pub_key) = key::create_key(
             &provider,
             &self.app_name,
@@ -70,31 +80,21 @@ impl EnclaveKeyManager for TpmSigner {
             policy,
         )?;
 
-        // Persist metadata and cached public key to disk.
-        let dir = self.keys_dir();
-        metadata::ensure_dir(&dir)?;
-        let meta = KeyMeta::new(label, key_type, policy);
-        metadata::save_meta(&dir, label, &meta)?;
-        metadata::save_pub_key(&dir, label, &pub_key)?;
+        state.persist_generated_key(label, key_type, policy, &pub_key, || {
+            key::delete_key(&self.app_name, label)
+        })?;
 
         Ok(pub_key)
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
         validate_label(label)?;
-        // Try the cached file first; fall back to exporting from the TPM.
         let dir = self.keys_dir();
-        match metadata::load_pub_key(&dir, label) {
-            Ok(pk) => Ok(pk),
-            Err(_) => {
-                let provider = provider::open_provider()?;
-                let key_handle = key::open_key(&provider, &self.app_name, label)?;
-                let pub_key = export_public_key(&key_handle)?;
-                // Cache for next time.
-                let _ = metadata::save_pub_key(&dir, label, &pub_key);
-                Ok(pub_key)
-            }
-        }
+        let state = state::KeyMaterialState::acquire(&dir)?;
+        let provider = provider::open_provider()?;
+        let key_handle = key::open_key(&provider, &self.app_name, label)?;
+        let pub_key = export_public_key(&key_handle)?;
+        metadata::sync_pub_key(state.dir(), label, &pub_key)
     }
 
     fn list_keys(&self) -> Result<Vec<String>> {
@@ -104,10 +104,13 @@ impl EnclaveKeyManager for TpmSigner {
 
     fn delete_key(&self, label: &str) -> Result<()> {
         validate_label(label)?;
-        key::delete_key(&self.app_name, label)?;
         let dir = self.keys_dir();
-        let _ = metadata::delete_key_files(&dir, label);
-        Ok(())
+        let state = state::KeyMaterialState::acquire(&dir)?;
+        state.reconcile_deleted_key(label, || match key::delete_key(&self.app_name, label) {
+            Ok(()) => Ok(state::AuthoritativeKeyState::Present),
+            Err(Error::KeyNotFound { .. }) => Ok(state::AuthoritativeKeyState::Missing),
+            Err(error) => Err(error),
+        })
     }
 
     fn is_available(&self) -> bool {

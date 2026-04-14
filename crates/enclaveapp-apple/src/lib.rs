@@ -21,7 +21,5 @@ mod sign;
 
 #[cfg(all(target_os = "macos", feature = "encryption"))]
 pub use encrypt::SecureEnclaveEncryptor;
-#[cfg(target_os = "macos")]
-pub use keychain::*;
 #[cfg(all(target_os = "macos", feature = "signing"))]
 pub use sign::SecureEnclaveSigner;

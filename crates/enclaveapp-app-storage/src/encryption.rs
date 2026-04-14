@@ -251,8 +251,13 @@ impl AppEncryptionStorage {
                     return Ok(());
                 }
             } else {
-                // Metadata missing but key exists — use as-is.
-                return Ok(());
+                warn!(
+                    "key metadata unreadable for label {}; re-generating key to enforce requested policy",
+                    config.key_label
+                );
+                encryptor
+                    .delete_key(&config.key_label)
+                    .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
             }
         }
 
@@ -415,6 +420,82 @@ unsafe impl Sync for AppEncryptionStorage {}
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use enclaveapp_core::{Error, Result as CoreResult};
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct FakeEncryptor {
+        key_exists: bool,
+        deleted_labels: Mutex<Vec<String>>,
+        generated_policies: Mutex<Vec<AccessPolicy>>,
+    }
+
+    impl FakeEncryptor {
+        fn existing_key() -> Self {
+            Self {
+                key_exists: true,
+                deleted_labels: Mutex::new(Vec::new()),
+                generated_policies: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl EnclaveKeyManager for FakeEncryptor {
+        fn generate(
+            &self,
+            _label: &str,
+            _key_type: KeyType,
+            policy: AccessPolicy,
+        ) -> CoreResult<Vec<u8>> {
+            self.generated_policies
+                .lock()
+                .map_err(|_| Error::KeyOperation {
+                    operation: "test_generate".into(),
+                    detail: "generated_policies mutex poisoned".into(),
+                })?
+                .push(policy);
+            Ok(vec![0x04; 65])
+        }
+
+        fn public_key(&self, label: &str) -> CoreResult<Vec<u8>> {
+            if self.key_exists {
+                Ok(vec![0x04; 65])
+            } else {
+                Err(Error::KeyNotFound {
+                    label: label.to_string(),
+                })
+            }
+        }
+
+        fn list_keys(&self) -> CoreResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn delete_key(&self, label: &str) -> CoreResult<()> {
+            self.deleted_labels
+                .lock()
+                .map_err(|_| Error::KeyOperation {
+                    operation: "test_delete_key".into(),
+                    detail: "deleted_labels mutex poisoned".into(),
+                })?
+                .push(label.to_string());
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    impl EnclaveEncryptor for FakeEncryptor {
+        fn encrypt(&self, _label: &str, _plaintext: &[u8]) -> CoreResult<Vec<u8>> {
+            unreachable!("not used in ensure_key tests")
+        }
+
+        fn decrypt(&self, _label: &str, _ciphertext: &[u8]) -> CoreResult<Vec<u8>> {
+            unreachable!("not used in ensure_key tests")
+        }
+    }
 
     fn test_config() -> StorageConfig {
         StorageConfig {
@@ -424,6 +505,16 @@ mod tests {
             extra_bridge_paths: vec![],
             keys_dir: None,
         }
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-app-storage-{name}-{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -440,5 +531,29 @@ mod tests {
             resolved_keys_dir(&config),
             PathBuf::from("/tmp/custom-keys")
         );
+    }
+
+    #[test]
+    fn ensure_key_regenerates_when_metadata_is_unreadable() {
+        let temp_dir = test_dir("unreadable-meta");
+        let mut config = test_config();
+        config.keys_dir = Some(temp_dir.clone());
+        config.access_policy = AccessPolicy::BiometricOnly;
+
+        std::fs::write(temp_dir.join("cache-key.meta"), b"{not valid json").unwrap();
+
+        let encryptor = FakeEncryptor::existing_key();
+        AppEncryptionStorage::ensure_key(&encryptor, &config).unwrap();
+
+        assert_eq!(
+            encryptor.deleted_labels.lock().unwrap().as_slice(),
+            ["cache-key"]
+        );
+        assert_eq!(
+            encryptor.generated_policies.lock().unwrap().as_slice(),
+            [AccessPolicy::BiometricOnly]
+        );
+
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 }

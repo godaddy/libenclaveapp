@@ -7,7 +7,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 /// Bridge request sent from WSL client to Windows server.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeRequest {
     /// Method: "init", "encrypt", "decrypt", "delete", "destroy"
     pub method: String,
@@ -16,7 +16,7 @@ pub struct BridgeRequest {
 }
 
 /// Bridge request parameters.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeParams {
     /// Base64-encoded data (plaintext for encrypt, ciphertext for decrypt).
     #[serde(default)]

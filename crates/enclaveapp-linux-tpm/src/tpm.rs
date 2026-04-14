@@ -6,7 +6,7 @@
 #![allow(unused_qualifications, let_underscore_drop)]
 
 use enclaveapp_core::metadata;
-use enclaveapp_core::{Error, Result};
+use enclaveapp_core::{AccessPolicy, Error, KeyMeta, KeyType, Result};
 use std::path::{Path, PathBuf};
 use tss_esapi::{
     attributes::ObjectAttributesBuilder,
@@ -270,8 +270,34 @@ pub fn save_key_blobs(
 ) -> Result<()> {
     let [pub_path, priv_path] = blob_paths(dir, label)?;
     metadata::atomic_write(&pub_path, public_blob)?;
-    metadata::atomic_write(&priv_path, private_blob)?;
-    metadata::restrict_file_permissions(&priv_path)?;
+    if let Err(error) = write_private_blob(&priv_path, private_blob) {
+        cleanup_blob_files(&[pub_path, priv_path])?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Persist a newly generated TPM key and its cached metadata/public-key artifacts.
+///
+/// If any cached artifact write fails after the TPM blobs are persisted, all newly
+/// written files for the label are removed so callers do not observe a partially
+/// created key after a failed generate operation.
+pub fn persist_generated_key(
+    dir: &Path,
+    label: &str,
+    key_type: KeyType,
+    policy: AccessPolicy,
+    public_key: &[u8],
+    public_blob: &[u8],
+    private_blob: &[u8],
+) -> Result<()> {
+    save_key_blobs(dir, label, public_blob, private_blob)?;
+
+    if let Err(error) = persist_cached_key_artifacts(dir, label, key_type, policy, public_key) {
+        cleanup_generated_key_artifacts(dir, label)?;
+        return Err(error);
+    }
+
     Ok(())
 }
 
@@ -286,6 +312,25 @@ pub fn load_key_blobs(dir: &Path, label: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     let public_blob = std::fs::read(&pub_path)?;
     let private_blob = std::fs::read(&priv_path)?;
     Ok((public_blob, private_blob))
+}
+
+/// Load the public key for a TPM-backed label, requiring backing TPM blobs to exist.
+///
+/// A cached `.pub` file is only trusted after the TPM blobs are confirmed present.
+/// If the cache is missing, the public key is derived from the TPM public blob and
+/// written back for subsequent lookups.
+pub fn load_public_key(dir: &Path, label: &str) -> Result<Vec<u8>> {
+    let (public_blob, _) = load_key_blobs(dir, label)?;
+    let public = Public::unmarshall(&public_blob).map_err(|e| Error::KeyOperation {
+        operation: "load_public".into(),
+        detail: e.to_string(),
+    })?;
+    let public_key = extract_public_key(&public)?;
+    metadata::sync_pub_key(dir, label, &public_key)
+}
+
+pub fn list_labels(dir: &Path) -> Result<Vec<String>> {
+    metadata::list_labels_for_extensions(dir, &["meta", "tpm_pub", "tpm_priv"])
 }
 
 /// Delete TPM key blob files.
@@ -307,6 +352,43 @@ pub fn delete_key_blobs(dir: &Path, label: &str) -> Result<()> {
 pub fn key_blobs_exist(dir: &Path, label: &str) -> Result<bool> {
     let [pub_path, priv_path] = blob_paths(dir, label)?;
     Ok(pub_path.exists() || priv_path.exists())
+}
+
+fn persist_cached_key_artifacts(
+    dir: &Path,
+    label: &str,
+    key_type: KeyType,
+    policy: AccessPolicy,
+    public_key: &[u8],
+) -> Result<()> {
+    metadata::save_pub_key(dir, label, public_key)?;
+    let meta = KeyMeta::new(label, key_type, policy);
+    metadata::save_meta(dir, label, &meta)
+}
+
+fn cleanup_generated_key_artifacts(dir: &Path, label: &str) -> Result<()> {
+    let [pub_blob_path, priv_blob_path] = blob_paths(dir, label)?;
+    let cached_pub = dir.join(format!("{label}.pub"));
+    let meta = dir.join(format!("{label}.meta"));
+
+    cleanup_blob_files(&[pub_blob_path, priv_blob_path, cached_pub, meta])?;
+
+    Ok(())
+}
+
+fn write_private_blob(path: &Path, private_blob: &[u8]) -> Result<()> {
+    metadata::atomic_write(path, private_blob)?;
+    metadata::restrict_file_permissions(path)?;
+    Ok(())
+}
+
+fn cleanup_blob_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        if path.is_file() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -404,6 +486,82 @@ mod tests {
         assert!(delete_key_blobs(&dir, "../bad").is_err());
         assert!(key_blobs_exist(&dir, "../bad").is_err());
         assert!(ensure_label_available(&dir, "../bad").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn persist_generated_key_cleans_up_on_cached_metadata_failure() {
+        let dir = test_dir();
+        std::fs::create_dir(dir.join("partial.meta")).unwrap();
+
+        let err = persist_generated_key(
+            &dir,
+            "partial",
+            KeyType::Encryption,
+            AccessPolicy::None,
+            &[0x04; 65],
+            b"public-blob",
+            b"private-blob",
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Io(_)));
+        assert!(!dir.join("partial.tpm_pub").exists());
+        assert!(!dir.join("partial.tpm_priv").exists());
+        assert!(!dir.join("partial.pub").exists());
+        assert!(dir.join("partial.meta").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_public_key_rejects_stale_cache_without_tpm_blobs() {
+        let dir = test_dir();
+        metadata::save_pub_key(&dir, "orphaned", &[0x04; 65]).unwrap();
+
+        let err = load_public_key(&dir, "orphaned").unwrap_err();
+        match err {
+            Error::KeyNotFound { label } => assert_eq!(label, "orphaned"),
+            other => panic!("expected KeyNotFound, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_public_key_rejects_stale_cache_when_blob_is_invalid() {
+        let dir = test_dir();
+        save_key_blobs(&dir, "cached", b"ignored-public-blob", b"private-blob").unwrap();
+        let cached = vec![0x04; 65];
+        metadata::save_pub_key(&dir, "cached", &cached).unwrap();
+
+        let err = load_public_key(&dir, "cached").unwrap_err();
+        assert!(matches!(err, Error::KeyOperation { .. }));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn list_labels_includes_labels_from_tpm_blobs_without_metadata() {
+        let dir = test_dir();
+        std::fs::write(dir.join("alpha.tpm_pub"), b"pub").unwrap();
+        std::fs::write(dir.join("alpha.tpm_priv"), b"priv").unwrap();
+        std::fs::write(dir.join("beta.meta"), b"{}").unwrap();
+
+        assert_eq!(list_labels(&dir).unwrap(), vec!["alpha", "beta"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_key_blobs_rolls_back_when_private_blob_write_fails() {
+        let dir = test_dir();
+        std::fs::create_dir(dir.join("partial.tpm_priv")).unwrap();
+
+        let err = save_key_blobs(&dir, "partial", b"public-blob", b"private-blob").unwrap_err();
+        assert!(matches!(err, Error::Io(_)));
+        assert!(!dir.join("partial.tpm_pub").exists());
+        assert!(dir.join("partial.tpm_priv").is_dir());
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

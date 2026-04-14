@@ -74,8 +74,8 @@ pub struct StorageConfig {
     /// Access policy for key operations.
     pub access_policy: AccessPolicy,
     /// Extra WSL bridge paths beyond the auto-derived defaults.
-    /// The standard discovery and auto-derived paths are tried first.
-    /// These are additional fallbacks for app-specific legacy locations.
+    /// These are preferred ahead of standard discovery so callers can pin a
+    /// trusted bridge location explicitly.
     pub extra_bridge_paths: Vec<String>,
     /// Override the keys directory (default: `~/.config/<app_name>/keys/`).
     /// sshenc uses `~/.sshenc/keys/` which differs from the standard layout.
