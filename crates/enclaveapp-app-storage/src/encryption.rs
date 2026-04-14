@@ -49,7 +49,7 @@ enum StorageInner {
 
     #[cfg(target_os = "linux")]
     WslBridge {
-        bridge_path: std::path::PathBuf,
+        bridge_path: PathBuf,
         biometric: bool,
     },
 }
@@ -264,6 +264,7 @@ impl AppEncryptionStorage {
     }
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn resolved_keys_dir(config: &StorageConfig) -> PathBuf {
     config
         .keys_dir
