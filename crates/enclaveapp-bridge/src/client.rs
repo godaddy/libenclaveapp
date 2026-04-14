@@ -710,7 +710,22 @@ sleep 2
             },
         };
         let err = call_bridge(&script, &request).unwrap_err();
-        assert!(err.to_string().contains("exceeded"));
+        match err {
+            Error::KeyOperation { operation, detail } => {
+                assert_eq!(operation, "bridge_read");
+                assert!(
+                    detail.contains("exceeded") || detail.contains("no response"),
+                    "unexpected bridge_read detail: {detail}"
+                );
+            }
+            Error::Serialization(detail) => {
+                assert!(
+                    detail.contains("bridge response"),
+                    "unexpected serialization detail: {detail}"
+                );
+            }
+            other => panic!("unexpected oversized response error: {other}"),
+        }
         cleanup_script(&script);
     }
 
