@@ -297,7 +297,7 @@ pub fn generate_and_save(
 
     // Check for duplicates
     let key_path = dir.join(format!("{label}.key"));
-    if key_path.exists() || metadata::key_files_exist(&dir, label) {
+    if key_path.exists() || metadata::key_files_exist(&dir, label)? {
         return Err(Error::DuplicateLabel {
             label: label.to_string(),
         });
@@ -368,7 +368,7 @@ pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     validate_label(label)?;
     let dir = config.keys_dir();
     let key_path = dir.join(format!("{label}.key"));
-    let key_exists = dir.exists() && (key_path.exists() || metadata::key_files_exist(&dir, label));
+    let key_exists = dir.exists() && (key_path.exists() || metadata::key_files_exist(&dir, label)?);
     if !key_exists {
         return Err(Error::KeyNotFound {
             label: label.to_string(),

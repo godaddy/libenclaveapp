@@ -268,10 +268,11 @@ pub fn delete_key_files(dir: &Path, label: &str) -> Result<()> {
 }
 
 /// Returns true if any metadata/public/handle files exist for the given label.
-pub fn key_files_exist(dir: &Path, label: &str) -> bool {
-    ["meta", "pub", "handle", "ssh.pub"]
+pub fn key_files_exist(dir: &Path, label: &str) -> Result<bool> {
+    crate::types::validate_label(label)?;
+    Ok(["meta", "pub", "handle", "ssh.pub"]
         .into_iter()
-        .any(|ext| dir.join(format!("{label}.{ext}")).exists())
+        .any(|ext| dir.join(format!("{label}.{ext}")).exists()))
 }
 
 /// Rename all files associated with a key label.
@@ -298,7 +299,7 @@ where
             label: old_label.to_string(),
         });
     }
-    if key_files_exist(dir, new_label) {
+    if key_files_exist(dir, new_label)? {
         return Err(Error::DuplicateLabel {
             label: new_label.to_string(),
         });

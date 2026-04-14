@@ -149,7 +149,7 @@ impl EnclaveKeyManager for LinuxTpmSigner {
         }
         let _lock = DirLock::acquire(&dir)?;
         let blob_existed = tpm::key_blobs_exist(&dir, label)?;
-        let metadata_existed = metadata::key_files_exist(&dir, label);
+        let metadata_existed = metadata::key_files_exist(&dir, label)?;
         if !blob_existed && !metadata_existed {
             return Err(Error::KeyNotFound {
                 label: label.to_string(),
