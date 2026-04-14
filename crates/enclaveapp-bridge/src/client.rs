@@ -46,6 +46,7 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
 struct BridgeSession {
     child: std::process::Child,
     stdout: std::io::BufReader<std::process::ChildStdout>,
+    finished: bool,
 }
 
 impl BridgeSession {
@@ -71,6 +72,7 @@ impl BridgeSession {
         Ok(Self {
             child,
             stdout: std::io::BufReader::new(stdout),
+            finished: false,
         })
     }
 
@@ -97,19 +99,13 @@ impl BridgeSession {
         let response: BridgeResponse = serde_json::from_str(&line)
             .map_err(|e| enclaveapp_core::Error::Serialization(format!("bridge response: {e}")))?;
 
-        if let Some(ref err) = response.error {
-            return Err(enclaveapp_core::Error::KeyOperation {
-                operation: "bridge".into(),
-                detail: err.clone(),
-            });
-        }
-
         Ok(response)
     }
 
     fn finish(mut self) -> Result<()> {
         drop(self.child.stdin.take());
         let status = self.child.wait().map_err(enclaveapp_core::Error::Io)?;
+        self.finished = true;
         if status.success() {
             Ok(())
         } else {
@@ -121,12 +117,30 @@ impl BridgeSession {
     }
 }
 
+impl Drop for BridgeSession {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        drop(self.child.stdin.take());
+        drop(self.child.kill());
+        drop(self.child.wait());
+    }
+}
+
+fn finish_session<T>(session: BridgeSession, result: Result<T>) -> Result<T> {
+    let finish_result = session.finish();
+    match (result, finish_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 /// Call the bridge with a request and return the response.
 pub fn call_bridge(bridge_path: &Path, request: &BridgeRequest) -> Result<BridgeResponse> {
     let mut session = BridgeSession::spawn(bridge_path)?;
-    let response = session.request(request)?;
-    session.finish()?;
-    Ok(response)
+    let response = session.request(request);
+    finish_session(session, response)
 }
 
 fn init_request(app_name: &str, key_label: &str, biometric: bool) -> BridgeRequest {
@@ -159,10 +173,13 @@ fn call_bridge_after_init(
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
     let mut session = BridgeSession::spawn(bridge_path)?;
-    session.request(&init_request(app_name, key_label, biometric))?;
-    let response = session.request(request)?;
-    session.finish()?;
-    Ok(response)
+    let response = (|| -> Result<BridgeResponse> {
+        session
+            .request(&init_request(app_name, key_label, biometric))?
+            .require_ok("bridge_init")?;
+        session.request(request)
+    })();
+    finish_session(session, response)
 }
 
 pub fn bridge_delete(bridge_path: &Path, app_name: &str, key_label: &str) -> Result<()> {
@@ -463,5 +480,87 @@ if ($requestLine -like '*"method":"init"*') {
         let error = bridge_init(&script, "awsenc", "cache-key", true).unwrap_err();
         assert!(error.to_string().contains("missing result payload"));
         cleanup_script(&script);
+    }
+
+    #[test]
+    fn bridge_encrypt_rejects_missing_init_result_payload() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        #[cfg(unix)]
+        let script = temp_script(
+            "encrypt-missing-init-result.sh",
+            r#"#!/bin/sh
+read init_line
+case "$init_line" in
+  *'"method":"init"'*) printf '{"result":null,"error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
+esac
+"#,
+        );
+        #[cfg(windows)]
+        let script = temp_script(
+            "encrypt-missing-init-result",
+            r#"$initLine = [Console]::In.ReadLine()
+if ($initLine -like '*"method":"init"*') {
+  [Console]::Out.WriteLine('{"result":null,"error":null}')
+} else {
+  [Console]::Out.WriteLine('{"result":null,"error":"unexpected init request"}')
+  exit 0
+}
+"#,
+        );
+
+        let error = bridge_encrypt(&script, "awsenc", "cache-key", b"ignored", true).unwrap_err();
+        assert!(error.to_string().contains("missing result payload"));
+        cleanup_script(&script);
+    }
+
+    #[test]
+    fn bridge_delete_reaps_child_after_error_response() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let sentinel = std::env::temp_dir().join(format!(
+            "enclaveapp-bridge-test-sentinel-{}-{}",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        drop(fs::remove_file(&sentinel));
+        #[cfg(unix)]
+        let script = temp_script(
+            "delete-error.sh",
+            &format!(
+                r#"#!/bin/sh
+sentinel="{}"
+trap 'printf done > "$sentinel"' EXIT
+read request_line
+printf '{{"result":null,"error":"boom"}}\n'
+while IFS= read -r _line; do :; done
+"#,
+                sentinel.display()
+            ),
+        );
+        #[cfg(windows)]
+        let script = temp_script(
+            "delete-error",
+            &format!(
+                r#"$sentinel = '{}'
+try {{
+  $requestLine = [Console]::In.ReadLine()
+  [Console]::Out.WriteLine('{{"result":null,"error":"boom"}}')
+  while (($line = [Console]::In.ReadLine()) -ne $null) {{ }}
+}} finally {{
+  [System.IO.File]::WriteAllText($sentinel, 'done')
+}}
+"#,
+                sentinel.display()
+            ),
+        );
+
+        let error = bridge_delete(&script, "awsenc", "cache-key").unwrap_err();
+        assert!(error.to_string().contains("boom"));
+        assert!(
+            sentinel.exists(),
+            "bridge process should be reaped before returning"
+        );
+        cleanup_script(&script);
+        drop(fs::remove_file(sentinel));
     }
 }

@@ -140,6 +140,7 @@ pub fn save_key(
     data_rep: &[u8],
     pub_key: &[u8],
 ) -> Result<()> {
+    validate_label(label)?;
     let dir = config.keys_dir();
     metadata::ensure_dir(&dir)?;
 
@@ -147,7 +148,7 @@ pub fn save_key(
 
     // Check for duplicate
     let handle_path = dir.join(format!("{label}.handle"));
-    if handle_path.exists() {
+    if handle_path.exists() || metadata::key_files_exist(&dir, label)? {
         return Err(Error::DuplicateLabel {
             label: label.to_string(),
         });
@@ -202,7 +203,8 @@ pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
     validate_label(label)?;
     let dir = config.keys_dir();
     let key_exists = dir.exists()
-        && (dir.join(format!("{label}.handle")).exists() || metadata::key_files_exist(&dir, label));
+        && (dir.join(format!("{label}.handle")).exists()
+            || metadata::key_files_exist(&dir, label)?);
     if !key_exists {
         return Err(Error::KeyNotFound {
             label: label.to_string(),
@@ -282,5 +284,56 @@ mod tests {
 
         let err = delete_key(&config, "../escape").unwrap_err();
         assert!(matches!(err, Error::InvalidLabel { .. }));
+    }
+
+    #[test]
+    fn save_key_rejects_invalid_labels() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-apple-save-invalid-{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        let config = KeychainConfig::with_keys_dir("test-app", dir);
+
+        let err = save_key(
+            &config,
+            "../escape",
+            KeyType::Signing,
+            enclaveapp_core::AccessPolicy::None,
+            b"handle",
+            b"pub",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidLabel { .. }));
+    }
+
+    #[test]
+    fn save_key_rejects_existing_metadata_artifacts() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-apple-duplicate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("existing.pub"), b"pub").unwrap();
+
+        let config = KeychainConfig::with_keys_dir("test-app", dir.clone());
+        let err = save_key(
+            &config,
+            "existing",
+            KeyType::Signing,
+            enclaveapp_core::AccessPolicy::None,
+            b"handle",
+            b"pub",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::DuplicateLabel { .. }));
+        assert!(!dir.join("existing.handle").exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

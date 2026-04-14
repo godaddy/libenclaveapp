@@ -248,7 +248,7 @@ fn blob_paths(dir: &Path, label: &str) -> Result<[PathBuf; 2]> {
 }
 
 pub fn key_artifacts_exist(dir: &Path, label: &str) -> Result<bool> {
-    Ok(key_blobs_exist(dir, label)? || metadata::key_files_exist(dir, label))
+    Ok(key_blobs_exist(dir, label)? || metadata::key_files_exist(dir, label)?)
 }
 
 pub fn ensure_label_available(dir: &Path, label: &str) -> Result<()> {
