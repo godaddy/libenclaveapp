@@ -233,8 +233,10 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     static SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static SCRIPT_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[cfg(unix)]
     fn temp_script(name: &str, body: &str) -> PathBuf {
@@ -292,6 +294,7 @@ mod tests {
 
     #[test]
     fn bridge_encrypt_initializes_before_encrypting() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         #[cfg(unix)]
         let script = temp_script(
             "encrypt.sh",
@@ -334,6 +337,7 @@ if ($requestLine -like '*"method":"encrypt"*') {
 
     #[test]
     fn bridge_delete_sends_delete_request() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         #[cfg(unix)]
         let script = temp_script(
             "delete.sh",
@@ -363,6 +367,7 @@ if ($requestLine -like '*"method":"delete"*' -and $requestLine -like '*"key_labe
 
     #[test]
     fn bridge_init_sends_key_label() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         #[cfg(unix)]
         let script = temp_script(
             "init.sh",
