@@ -9,6 +9,7 @@ members = [
     "crates/enclaveapp-software",
     "crates/enclaveapp-test-support",
     "crates/enclaveapp-app-storage",
+    "crates/enclaveapp-app-adapter",
 ]
 resolver = "2"
 
@@ -30,6 +31,7 @@ enclaveapp-software = { path = "crates/enclaveapp-software" }
 enclaveapp-linux-tpm = { path = "crates/enclaveapp-linux-tpm" }
 enclaveapp-test-support = { path = "crates/enclaveapp-test-support" }
 enclaveapp-app-storage = { path = "crates/enclaveapp-app-storage" }
+enclaveapp-app-adapter = { path = "crates/enclaveapp-app-adapter" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -61,6 +63,9 @@ tss-esapi = "7"
 # System
 libc = "0.2"
 fs2 = "0.4"
+fs4 = "0.9"
+tempfile = "3"
+shlex = "1"
 
 # Keyring
 keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"] }
