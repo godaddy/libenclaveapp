@@ -1,0 +1,16 @@
+[package]
+name = "enclaveapp-build-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Shared build.rs helpers for enclave apps (Windows resource compilation)"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winresource = "0.1"

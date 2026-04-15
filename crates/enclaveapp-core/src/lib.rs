@@ -7,9 +7,11 @@
 //! Windows TPM 2.0, and WSL bridge implementations.
 
 pub mod config;
+pub mod config_block;
 pub mod error;
 pub mod metadata;
 pub mod platform;
+pub mod quoting;
 pub mod traits;
 pub mod types;
 

@@ -12,6 +12,7 @@ members = [
     "crates/enclaveapp-app-adapter",
     "crates/enclaveapp-cache",
     "crates/enclaveapp-tpm-bridge",
+    "crates/enclaveapp-build-support",
 ]
 resolver = "2"
 
@@ -36,6 +37,7 @@ enclaveapp-app-storage = { path = "crates/enclaveapp-app-storage" }
 enclaveapp-app-adapter = { path = "crates/enclaveapp-app-adapter" }
 enclaveapp-cache = { path = "crates/enclaveapp-cache" }
 enclaveapp-tpm-bridge = { path = "crates/enclaveapp-tpm-bridge" }
+enclaveapp-build-support = { path = "crates/enclaveapp-build-support" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -76,6 +78,9 @@ keyring = { version = "3", features = ["sync-secret-service", "apple-native", "w
 
 # Testing
 rand = "0.9"
+
+# Build support
+winresource = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
