@@ -3,10 +3,23 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Classification of how an enclave app delivers secrets to the target application.
+///
+/// The adapter selects the least-secret-exposing integration automatically:
+/// `HelperTool` > `EnvInterpolation` > `TempMaterializedConfig`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntegrationType {
+    /// Type 1: The target app calls back to get credentials on demand.
+    /// Secrets never leave the enclave app's process boundary.
+    /// Examples: SSH agent protocol, AWS `credential_process`, git credential helpers.
     HelperTool,
+    /// Type 2: Config file with `${ENV_VAR}` placeholders + secret env vars via `execve()`.
+    /// Secrets exist briefly as environment variables but never touch disk.
+    /// Examples: npm `.npmrc` with `${NPM_TOKEN}` interpolation.
     EnvInterpolation,
+    /// Type 3: Secrets written to a temp file (0o600 permissions), path passed via flag/env var.
+    /// Least secure — secrets briefly exist on disk. File deleted after process exits.
+    /// Used when the target app has no plugin or env var interpolation support.
     TempMaterializedConfig,
 }
 

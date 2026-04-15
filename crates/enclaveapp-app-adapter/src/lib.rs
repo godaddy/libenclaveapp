@@ -1,3 +1,27 @@
+//! Generic secret delivery substrate for enclave applications.
+//!
+//! This crate provides the infrastructure for building "enclave apps" — thin
+//! wrappers that deliver hardware-backed secrets to target applications.
+//!
+//! # Integration Types
+//!
+//! Every enclave app uses one of three integration strategies, classified by
+//! how secrets are delivered to the target application:
+//!
+//! - [`IntegrationType::HelperTool`] — Target app calls back for credentials on demand
+//! - [`IntegrationType::EnvInterpolation`] — Config with `${ENV_VAR}` placeholders + secret env vars
+//! - [`IntegrationType::TempMaterializedConfig`] — Secrets written to temp file, path passed as flag
+//!
+//! The adapter automatically selects the least-secret-exposing type.
+//!
+//! # Key Types
+//!
+//! - [`AppSpec`] — Declares an app's name, executable, supported integrations
+//! - [`BindingStore`] / [`SecretStore`] — Persistent credential management
+//! - [`resolve_program`] — Find executables with alias/wrapper resolution
+//! - [`prepare_best_app_launch`] — Select integration and prepare process launch
+//! - [`run`] — Execute the prepared launch
+
 pub mod app_spec;
 pub mod binding_store;
 pub mod error;

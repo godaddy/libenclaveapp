@@ -3,6 +3,12 @@
 use crate::error::{AdapterError, Result};
 use crate::types::IntegrationType;
 
+/// Select the least-secret-exposing integration type from the app's supported list.
+///
+/// Priority order (most secure first):
+/// 1. `HelperTool` — secrets never leave process
+/// 2. `EnvInterpolation` — secrets in env vars only
+/// 3. `TempMaterializedConfig` — secrets briefly on disk
 pub fn choose_integration(supported: &[IntegrationType]) -> Result<IntegrationType> {
     if supported.contains(&IntegrationType::HelperTool) {
         return Ok(IntegrationType::HelperTool);
