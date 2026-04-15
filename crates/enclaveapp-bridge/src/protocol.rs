@@ -394,4 +394,101 @@ mod tests {
         let data = resp.decode_result("test_op").unwrap();
         assert_eq!(data, b"hello");
     }
+
+    #[test]
+    fn bridge_response_require_ok_succeeds_on_ok() {
+        let resp = BridgeResponse::ok();
+        assert!(resp.require_ok("test").is_ok());
+    }
+
+    #[test]
+    fn bridge_response_require_ok_rejects_null() {
+        let resp = BridgeResponse {
+            result: None,
+            error: None,
+        };
+        let err = resp.require_ok("test").unwrap_err();
+        assert!(err.to_string().contains("missing result payload"));
+    }
+
+    #[test]
+    fn bridge_response_require_ok_rejects_error() {
+        let resp = BridgeResponse::error("fail");
+        let err = resp.require_ok("test").unwrap_err();
+        assert!(err.to_string().contains("fail"));
+    }
+
+    #[test]
+    fn bridge_response_decode_result_empty_string() {
+        let resp = BridgeResponse::ok();
+        let data = resp.decode_result("test").unwrap();
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn bridge_response_decode_result_rejects_invalid_base64() {
+        let resp = BridgeResponse::success("not-valid-base64!!!");
+        let err = resp.decode_result("test").unwrap_err();
+        assert!(err.to_string().contains("base64"));
+    }
+
+    #[test]
+    fn effective_access_policy_with_all_variants() {
+        // Explicit Any takes precedence
+        let params = BridgeParams::new(String::new(), AccessPolicy::Any, "a".into(), "k".into());
+        assert_eq!(params.effective_access_policy(), AccessPolicy::Any);
+
+        // Explicit PasswordOnly takes precedence
+        let params = BridgeParams::new(
+            String::new(),
+            AccessPolicy::PasswordOnly,
+            "a".into(),
+            "k".into(),
+        );
+        assert_eq!(params.effective_access_policy(), AccessPolicy::PasswordOnly);
+
+        // None with no biometric
+        let params = BridgeParams::new(String::new(), AccessPolicy::None, "a".into(), "k".into());
+        assert_eq!(params.effective_access_policy(), AccessPolicy::None);
+    }
+
+    #[test]
+    fn bridge_params_new_biometric_only_for_biometric_only_policy() {
+        let p1 = BridgeParams::new(
+            String::new(),
+            AccessPolicy::BiometricOnly,
+            "a".into(),
+            "k".into(),
+        );
+        let j1 = serde_json::to_string(&p1).unwrap();
+        assert!(j1.contains("\"biometric\":true"));
+
+        let p2 = BridgeParams::new(String::new(), AccessPolicy::Any, "a".into(), "k".into());
+        let j2 = serde_json::to_string(&p2).unwrap();
+        assert!(j2.contains("\"biometric\":false"));
+
+        let p3 = BridgeParams::new(String::new(), AccessPolicy::None, "a".into(), "k".into());
+        let j3 = serde_json::to_string(&p3).unwrap();
+        assert!(j3.contains("\"biometric\":false"));
+    }
+
+    #[test]
+    fn bridge_params_roundtrip_preserves_all_fields() {
+        let original = BridgeParams::new(
+            "dGVzdA==".into(),
+            AccessPolicy::BiometricOnly,
+            "my-app".into(),
+            "my-key".into(),
+        );
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: BridgeParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.data, "dGVzdA==");
+        assert_eq!(parsed.access_policy, AccessPolicy::BiometricOnly);
+        assert_eq!(
+            parsed.effective_access_policy(),
+            AccessPolicy::BiometricOnly
+        );
+        assert_eq!(parsed.app_name, "my-app");
+        assert_eq!(parsed.key_label, "my-key");
+    }
 }

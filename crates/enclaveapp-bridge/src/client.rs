@@ -413,6 +413,188 @@ printf '{"result":null,"error":null}\n'
 
     #[cfg(unix)]
     #[test]
+    fn bridge_rejects_oversized_response() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "oversized.sh",
+            "#!/bin/sh\nread req\npython3 -c \"print('{\\\"result\\\":\\\"' + 'A' * 70000 + '\\\",\\\"error\\\":null}')\"\n",
+        );
+        let request = BridgeRequest {
+            method: "init".to_string(),
+            params: BridgeParams::new(
+                String::new(),
+                AccessPolicy::None,
+                "test".into(),
+                "key".into(),
+            ),
+        };
+        let err = call_bridge(&script, &request).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("byte limit") || msg.contains("bridge response"),
+            "expected size limit error, got: {msg}"
+        );
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_decrypt_initializes_before_decrypting() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "decrypt.sh",
+            r#"#!/bin/sh
+read init_line
+case "$init_line" in
+  *'"method":"init"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected init"}\n'; exit 0 ;;
+esac
+read request_line
+case "$request_line" in
+  *'"method":"decrypt"'*) printf '{"result":"cGxhaW50ZXh0","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        let result =
+            bridge_decrypt(&script, "test-app", "key", b"ignored", AccessPolicy::None).unwrap();
+        assert_eq!(result, b"plaintext");
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_decrypt_rejects_missing_result_payload() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "decrypt-missing.sh",
+            r#"#!/bin/sh
+read init_line
+printf '{"result":"","error":null}\n'
+read request_line
+printf '{"result":null,"error":null}\n'
+"#,
+        );
+        let err =
+            bridge_decrypt(&script, "test-app", "key", b"ignored", AccessPolicy::None).unwrap_err();
+        assert!(err.to_string().contains("missing result payload"));
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_destroy_sends_delete_method_on_wire() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "wire-method.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"delete"'*) printf '{"result":"","error":null}\n' ;;
+  *'"method":"destroy"'*) printf '{"result":null,"error":"got destroy instead of delete"}\n' ;;
+  *) printf '{"result":null,"error":"unexpected method"}\n' ;;
+esac
+"#,
+        );
+        bridge_destroy(&script, "test-app", "key").unwrap();
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_delete_alias_works() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "delete-alias.sh",
+            r#"#!/bin/sh
+read req
+printf '{"result":"","error":null}\n'
+"#,
+        );
+        bridge_delete(&script, "test-app", "key").unwrap();
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_session_drop_kills_child() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script("drop-kill.sh", "#!/bin/sh\nwhile true; do sleep 1; done\n");
+        // Spawn a session, grab the child PID, then drop it
+        let child_pid: u32;
+        {
+            let session = BridgeSession::spawn(&script).unwrap();
+            child_pid = session.child.id();
+            // Session dropped here — Drop should kill + wait the child
+        }
+        // Give the OS a moment to reap
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Verify the process is gone using `kill -0 <pid>` (signal 0 checks existence)
+        let status = Command::new("kill")
+            .args(["-0", &child_pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        assert!(
+            status.is_err() || !status.unwrap().success(),
+            "bridge child (pid={child_pid}) should no longer exist after Drop"
+        );
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_init_sends_biometric_compat_field() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "biometric-compat.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"biometric":true'*'"access_policy":"biometric_only"'*) printf '{"result":"","error":null}\n' ;;
+  *'"access_policy":"biometric_only"'*'"biometric":true'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"missing biometric compat field"}\n' ;;
+esac
+"#,
+        );
+        bridge_init(&script, "test-app", "key", AccessPolicy::BiometricOnly).unwrap();
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_rejects_empty_response() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script("empty-response.sh", "#!/bin/sh\nread req\n");
+        let request = BridgeRequest {
+            method: "init".to_string(),
+            params: BridgeParams::new(String::new(), AccessPolicy::None, "t".into(), "k".into()),
+        };
+        let err = call_bridge(&script, &request).unwrap_err();
+        assert!(
+            err.to_string().contains("no response") || err.to_string().contains("bridge"),
+            "expected bridge error, got: {}",
+            err
+        );
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_rejects_invalid_json_response() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script("invalid-json.sh", "#!/bin/sh\nread req\necho 'not json'\n");
+        let request = BridgeRequest {
+            method: "init".to_string(),
+            params: BridgeParams::new(String::new(), AccessPolicy::None, "t".into(), "k".into()),
+        };
+        let err = call_bridge(&script, &request).unwrap_err();
+        assert!(err.to_string().contains("bridge response"));
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bridge_delete_reaps_child_after_error_response() {
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         let sentinel = std::env::temp_dir().join(format!(
