@@ -866,7 +866,7 @@ mod tests {
         // that we don't test here.
         #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
         {
-            let _ = config;
+            drop(config);
         }
 
         std::fs::remove_dir_all(&dir).unwrap();
