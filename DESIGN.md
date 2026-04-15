@@ -106,7 +106,27 @@ This keeps ciphertext portable across the derived applications that use encrypti
 | Linux | x86_64 (musl) | None | `enclaveapp-software` (software fallback) |
 | Linux | ARM64 (musl) | None | `enclaveapp-software` (software fallback) |
 
-All architectures support both signing and encryption. Linux without a TPM device falls back to `enclaveapp-software` (P-256 keys stored as files, optionally encrypted via system keyring on glibc).
+All architectures support both signing and encryption.
+
+### Security levels
+
+Not all backends provide the same level of key protection. The table below ranks them from strongest to weakest:
+
+| Level | Backend | Key extraction | User presence | Where keys live |
+|:-----:|---------|---------------|---------------|----------------|
+| **1** | macOS Secure Enclave (signed/entitled app) | Impossible — keys are generated inside and never leave the SE hardware. Even root cannot extract them. | Touch ID / biometric enforced by hardware. | Secure Enclave coprocessor. App must be code-signed and have the `com.apple.developer.secure-enclave` entitlement. |
+| **2** | Windows TPM 2.0 | Impossible — keys are TPM-bound and non-exportable. | Windows Hello (biometric/PIN) enforced via CNG `NCRYPT_UI_POLICY`. | TPM 2.0 chip. Available to any process that can open the CNG provider. |
+| **3** | Linux TPM 2.0 | Impossible — keys are TPM-bound via `tss-esapi`. | Not enforced (no standard Linux biometric API). | TPM 2.0 device (`/dev/tpmrm0`). Requires `tss2` libraries (glibc only). |
+| **4** | macOS CryptoKit (unsigned app) | Difficult — keys are created via CryptoKit P256 and the `dataRepresentation` is stored on disk, AES-256-GCM wrapped with a Keychain-stored key. Not hardware-bound but encrypted at rest. | Not hardware-enforced (Keychain access control only). | Encrypted `.handle` file on disk + Keychain wrapping key. This is the fallback when the app is not code-signed or lacks SE entitlements (e.g., local development builds). |
+| **5** | Software fallback (Linux/musl) | Possible — P-256 private keys stored as files on disk. On glibc, optionally encrypted via the system keyring (D-Bus Secret Service). On musl, stored as plaintext files with 0o600 permissions. | Not enforced. | `~/.config/{app}/keys/` directory. |
+
+**macOS signed vs. unsigned:** On macOS, the `enclaveapp-apple` backend has two paths:
+
+- **Signed/entitled (Level 1):** The app is code-signed with a Developer ID certificate and has the Secure Enclave entitlement. Keys are created inside the SE hardware via `SecureEnclave.P256.Signing.PrivateKey` / `SecureEnclave.P256.KeyAgreement.PrivateKey`. The key material physically cannot be extracted — only the SE can perform operations with it. This is the production path for distributed binaries.
+
+- **Unsigned/development (Level 4):** The app is not code-signed or lacks entitlements (typical during local development with `cargo build`). Keys are created via regular `CryptoKit.P256` (not SE-bound). The private key's `dataRepresentation` is encrypted with AES-256-GCM using a wrapping key stored in the macOS Keychain, then written to disk as a `.handle` file. This provides encryption at rest but the keys are not hardware-bound — an attacker with disk access and Keychain access could extract them. The app auto-detects which path to use at runtime based on SE availability.
+
+**Linux glibc vs. musl:** The glibc builds can access the system keyring (D-Bus Secret Service / GNOME Keyring / KWallet) to encrypt private key files at rest, similar to the macOS unsigned path. Musl builds (Alpine, static binaries) have no keyring and store keys as plaintext files protected only by filesystem permissions (0o600). Both can optionally use TPM 2.0 when available (glibc only, via `tss-esapi`).
 
 ### Windows shell environments
 
