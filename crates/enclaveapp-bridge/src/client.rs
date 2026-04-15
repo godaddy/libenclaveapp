@@ -267,13 +267,19 @@ pub fn bridge_delete(bridge_path: &Path, app_name: &str, key_label: &str) -> Res
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(unix)]
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     static SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    #[cfg(unix)]
     static SCRIPT_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[cfg(unix)]
