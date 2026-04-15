@@ -11,6 +11,8 @@ pub enum ConfigOverride {
 pub struct AppSpec {
     pub display_name: String,
     pub executable_name: String,
+    /// Which integration types this application supports, in order of preference.
+    /// The adapter will select the first type that matches an available payload.
     pub supported_integrations: Vec<IntegrationType>,
     pub config_override: ConfigOverride,
 }

@@ -106,9 +106,9 @@ For `sshenc`, WSL signing is handled by the ssh agent bridge path rather than th
 
 ## Consumer mapping
 
-| Consumer | Integration style |
-|---|---|
-| `sshenc` | `enclaveapp-app-storage` signing bootstrap plus SSH-specific metadata and agent logic |
-| `awsenc` | `enclaveapp-app-storage` encryption storage |
-| `sso-jwt` | `enclaveapp-app-storage` encryption storage |
-| `npmenc` | encrypted secret storage built on the same shared key-management stack |
+| Consumer | Integration style | Integration Type |
+|---|---|---|
+| `sshenc` | `enclaveapp-app-storage` signing bootstrap plus SSH-specific metadata and agent logic | Type 1 (HelperTool) — SSH agent |
+| `awsenc` | `enclaveapp-app-storage` encryption storage | Type 1 (HelperTool) — credential_process |
+| `sso-jwt` | `enclaveapp-app-storage` encryption storage | Credential source for Type 1/2 apps |
+| `npmenc` | encrypted secret storage built on the same shared key-management stack | Type 2 (EnvInterpolation) — .npmrc env vars |

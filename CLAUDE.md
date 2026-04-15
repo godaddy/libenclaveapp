@@ -46,6 +46,10 @@ Rust workspace under `crates/`:
 - **enclaveapp-bridge** — JSON-RPC over stdin/stdout TPM bridge. Client side (WSL discovers and calls Windows bridge binary) and protocol types. Server implementation lives in consuming apps.
 - **enclaveapp-software** — Software-only P-256 backend for Linux (feature `signing` and `encryption`). Uses `p256` crate for real ECDSA/ECDH crypto and `aes-gcm` for symmetric encryption. Private keys stored as files on disk (not hardware-backed). Same ECIES wire format as hardware backends.
 - **enclaveapp-app-storage** — High-level shared application storage. Automatic platform detection, key initialization, policy mismatch handling, and encrypt/decrypt/sign wrapping. Used by all three consuming apps (awsenc, sso-jwt, sshenc) to eliminate duplicated secure storage code. Includes `MockEncryptionStorage` behind the `mock` feature.
+- **enclaveapp-app-adapter** — Generic secret delivery substrate. BindingStore/SecretStore for credential management, AppSpec with 3 integration types, program resolver, process launcher, config block injection, temp config lifecycle. Used by npmenc; available for adoption by other apps.
+- **enclaveapp-tpm-bridge** — Shared JSON-RPC TPM bridge server. Parameterized by app_name/key_label.
+- **enclaveapp-cache** — Shared binary cache format with configurable magic bytes and length-prefixed blobs.
+- **enclaveapp-build-support** — Shared build.rs helper for Windows PE resource compilation.
 - **enclaveapp-test-support** — `MockKeyBackend` implementing all three traits with deterministic in-memory operations. XOR-based mock crypto for testing control flow without hardware.
 
 ### Key Patterns
@@ -57,6 +61,31 @@ Rust workspace under `crates/`:
 - Key metadata stored as JSON `.meta` files. Public keys cached as `.pub` files. macOS signing keys also have `.handle` files (CryptoKit dataRepresentation).
 - All file writes are atomic (write to `.tmp`, rename into place) with directory locking via `flock`.
 - Apps pass their `app_name` (e.g., "sshenc", "awsenc") which determines the keys directory path and CNG key name prefix.
+
+## Application Integration Types
+
+The `enclaveapp-app-adapter` crate defines three integration types that classify how an enclave app delivers secrets to the target application:
+
+### Type 1: HelperTool
+The target application has native support for auth plugins, credential helpers, or agents. Secrets never leave the enclave app's process boundary — they are returned on demand via a protocol (SSH agent, `credential_process`, etc.).
+
+- **sshenc** — SSH agent protocol; keys used in-process for signing
+- **gitenc** — git signing via SSH agent, `credential.helper`
+- **awsenc** — `credential_process` directive in `~/.aws/config`
+
+### Type 2: EnvInterpolation
+The target application reads a config file that supports environment variable interpolation (`${ENV_VAR}`). The enclave app writes a config with placeholders and invokes the target with secret env vars set via `execve()` (not shell expansion).
+
+- **npmenc/npxenc** — `.npmrc` supports `${NPM_TOKEN}` interpolation
+
+### Type 3: TempMaterializedConfig
+The target application can only read a static config file with no env var support. The enclave app writes secrets to a temp file with restricted permissions (0o600), invokes the target with `--config /tmp/xxx/app.conf`, and deletes the file after exit.
+
+- Used for applications with no plugin or env var support in their config format
+
+The adapter selects the least-secret-exposing integration automatically: HelperTool > EnvInterpolation > TempMaterializedConfig.
+
+**sso-jwt** is a utility that can serve as a credential source for Type 1 or Type 2 apps (it provides JWTs that other tools consume).
 
 ## Platform
 
