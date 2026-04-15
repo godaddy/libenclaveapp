@@ -257,7 +257,12 @@ impl AppEncryptionStorage {
                     return Ok(());
                 }
             } else {
-                // Metadata missing but key exists — use as-is.
+                // Metadata missing but key exists — use as-is. The key was likely
+                // created before metadata tracking was introduced.
+                warn!(
+                    "key exists but metadata missing (label={}); using key with unknown policy",
+                    config.key_label
+                );
                 return Ok(());
             }
         }

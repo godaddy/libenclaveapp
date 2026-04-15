@@ -25,12 +25,45 @@ pub struct BridgeParams {
     /// Access policy to enforce on key use.
     #[serde(default)]
     pub access_policy: AccessPolicy,
+    /// Legacy field kept for backward compatibility with older bridge servers.
+    /// When deserializing, `access_policy` takes precedence over this field.
+    #[serde(default)]
+    biometric: bool,
     /// Application name (determines TPM key name).
     #[serde(default)]
     pub app_name: String,
     /// Key label within the application namespace.
     #[serde(default)]
     pub key_label: String,
+}
+
+impl BridgeParams {
+    /// Resolve the effective access policy considering both new and legacy fields.
+    pub fn effective_access_policy(&self) -> AccessPolicy {
+        if self.access_policy != AccessPolicy::None {
+            self.access_policy
+        } else if self.biometric {
+            AccessPolicy::BiometricOnly
+        } else {
+            AccessPolicy::None
+        }
+    }
+
+    /// Create params with backward-compatible biometric field set automatically.
+    pub fn new(
+        data: String,
+        access_policy: AccessPolicy,
+        app_name: String,
+        key_label: String,
+    ) -> Self {
+        Self {
+            data,
+            access_policy,
+            biometric: access_policy == AccessPolicy::BiometricOnly,
+            app_name,
+            key_label,
+        }
+    }
 }
 
 /// Bridge response from Windows server to WSL client.
@@ -66,6 +99,33 @@ impl BridgeResponse {
             error: None,
         }
     }
+
+    /// Require that the response contains a success result payload.
+    pub fn require_result(&self, operation: &str) -> enclaveapp_core::Result<&str> {
+        if let Some(error) = &self.error {
+            return Err(enclaveapp_core::Error::KeyOperation {
+                operation: operation.into(),
+                detail: error.clone(),
+            });
+        }
+        self.result
+            .as_deref()
+            .ok_or_else(|| enclaveapp_core::Error::KeyOperation {
+                operation: operation.into(),
+                detail: "bridge response missing result payload".into(),
+            })
+    }
+
+    /// Require an acknowledged success response.
+    pub fn require_ok(&self, operation: &str) -> enclaveapp_core::Result<()> {
+        let _unused = self.require_result(operation)?;
+        Ok(())
+    }
+
+    /// Decode a base64-encoded success payload.
+    pub fn decode_result(&self, operation: &str) -> enclaveapp_core::Result<Vec<u8>> {
+        decode_data(self.require_result(operation)?)
+    }
 }
 
 /// Encode binary data as base64 for the bridge protocol.
@@ -89,18 +149,19 @@ mod tests {
     fn bridge_request_serde_roundtrip() {
         let request = BridgeRequest {
             method: "encrypt".to_string(),
-            params: BridgeParams {
-                data: "aGVsbG8=".to_string(),
-                access_policy: AccessPolicy::BiometricOnly,
-                app_name: "test-app".to_string(),
-                key_label: "cache-key".to_string(),
-            },
+            params: BridgeParams::new(
+                "aGVsbG8=".to_string(),
+                AccessPolicy::BiometricOnly,
+                "test-app".to_string(),
+                "cache-key".to_string(),
+            ),
         };
         let json = serde_json::to_string(&request).unwrap();
         let parsed: BridgeRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.method, "encrypt");
         assert_eq!(parsed.params.data, "aGVsbG8=");
         assert_eq!(parsed.params.access_policy, AccessPolicy::BiometricOnly);
+        assert!(parsed.params.biometric); // backward compat field
         assert_eq!(parsed.params.app_name, "test-app");
         assert_eq!(parsed.params.key_label, "cache-key");
     }
@@ -112,6 +173,7 @@ mod tests {
         assert_eq!(parsed.method, "init");
         assert_eq!(parsed.params.data, "");
         assert_eq!(parsed.params.access_policy, AccessPolicy::None);
+        assert!(!parsed.params.biometric);
         assert_eq!(parsed.params.app_name, "");
         assert_eq!(parsed.params.key_label, "");
     }
@@ -178,15 +240,15 @@ mod tests {
 
     #[test]
     fn bridge_request_all_methods() {
-        for method in &["init", "encrypt", "decrypt", "destroy"] {
+        for method in &["init", "encrypt", "decrypt", "destroy", "delete"] {
             let request = BridgeRequest {
                 method: (*method).to_string(),
-                params: BridgeParams {
-                    data: String::new(),
-                    access_policy: AccessPolicy::None,
-                    app_name: "test".to_string(),
-                    key_label: "default".to_string(),
-                },
+                params: BridgeParams::new(
+                    String::new(),
+                    AccessPolicy::None,
+                    "test".to_string(),
+                    "default".to_string(),
+                ),
             };
             let json = serde_json::to_string(&request).unwrap();
             let parsed: BridgeRequest = serde_json::from_str(&json).unwrap();
@@ -254,6 +316,7 @@ mod tests {
         let params: BridgeParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.data, "");
         assert_eq!(params.access_policy, AccessPolicy::None);
+        assert!(!params.biometric);
         assert_eq!(params.app_name, "");
         assert_eq!(params.key_label, "");
     }
@@ -263,5 +326,72 @@ mod tests {
         // On macOS there's no /mnt/c/ and no bridge binary
         let result = crate::find_bridge("sshenc");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn bridge_params_legacy_biometric_true_maps_to_biometric_only() {
+        let json = r#"{"data":"","biometric":true,"app_name":"test","key_label":"k"}"#;
+        let params: BridgeParams = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            params.effective_access_policy(),
+            AccessPolicy::BiometricOnly
+        );
+    }
+
+    #[test]
+    fn bridge_params_access_policy_takes_precedence_over_biometric() {
+        // When access_policy is explicitly set to a non-None value, it wins.
+        let json = r#"{"access_policy":"any","biometric":true,"app_name":"t","key_label":"k"}"#;
+        let params: BridgeParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.effective_access_policy(), AccessPolicy::Any);
+    }
+
+    #[test]
+    fn bridge_params_legacy_biometric_true_with_none_policy() {
+        // When access_policy is the default None but biometric is true,
+        // biometric should still win.
+        let json = r#"{"access_policy":"none","biometric":true,"app_name":"t","key_label":"k"}"#;
+        let params: BridgeParams = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            params.effective_access_policy(),
+            AccessPolicy::BiometricOnly
+        );
+    }
+
+    #[test]
+    fn bridge_params_new_sets_biometric_compat() {
+        let params = BridgeParams::new(
+            String::new(),
+            AccessPolicy::BiometricOnly,
+            "app".into(),
+            "key".into(),
+        );
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(json.contains("\"biometric\":true"));
+        assert!(json.contains("\"access_policy\":\"biometric_only\""));
+    }
+
+    #[test]
+    fn bridge_response_require_result_rejects_null() {
+        let resp = BridgeResponse {
+            result: None,
+            error: None,
+        };
+        let err = resp.require_result("test_op").unwrap_err();
+        assert!(err.to_string().contains("missing result payload"));
+    }
+
+    #[test]
+    fn bridge_response_require_result_rejects_error() {
+        let resp = BridgeResponse::error("boom");
+        let err = resp.require_result("test_op").unwrap_err();
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn bridge_response_decode_result_works() {
+        let resp = BridgeResponse::success("aGVsbG8=");
+        let data = resp.decode_result("test_op").unwrap();
+        assert_eq!(data, b"hello");
     }
 }
