@@ -350,11 +350,13 @@ fn is_executable_candidate(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+    #[cfg(unix)]
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -382,6 +384,7 @@ mod tests {
         assert_eq!(resolved.strategy, ResolutionStrategy::ExplicitPath);
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_non_path_command_v_output() {
         let error = resolve_via_command_v(

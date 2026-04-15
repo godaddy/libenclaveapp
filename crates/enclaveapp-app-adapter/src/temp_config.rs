@@ -1,6 +1,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-use std::fs::{self, OpenOptions};
+#[cfg(any(unix, test))]
+use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

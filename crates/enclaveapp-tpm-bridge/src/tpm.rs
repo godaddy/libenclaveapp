@@ -63,6 +63,14 @@ mod platform {
         key_label: String,
     }
 
+    impl std::fmt::Debug for TpmStorage {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TpmStorage")
+                .field("key_label", &self.key_label)
+                .finish_non_exhaustive()
+        }
+    }
+
     impl TpmStorage {
         pub fn new(
             app_name: &str,

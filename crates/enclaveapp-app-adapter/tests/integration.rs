@@ -1,4 +1,5 @@
 #![allow(clippy::panic, clippy::unwrap_used)]
+#![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::fs;
