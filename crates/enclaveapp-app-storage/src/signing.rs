@@ -34,7 +34,7 @@ enum SigningInner {
     LinuxTpm(enclaveapp_linux_tpm::LinuxTpmSigner),
 
     #[cfg(target_os = "linux")]
-    Software(enclaveapp_software::SoftwareSigner),
+    Software(enclaveapp_keyring::SoftwareSigner),
 }
 
 impl std::fmt::Debug for AppSigningBackend {
@@ -133,17 +133,17 @@ impl AppSigningBackend {
             });
         }
 
-        if !enclaveapp_software::has_keyring_feature() {
+        if !enclaveapp_keyring::has_keyring_feature() {
             return Err(crate::error::StorageError::NotAvailable);
         }
 
-        let signer = enclaveapp_software::SoftwareSigner::with_keys_dir(&config.app_name, keys_dir);
+        let signer = enclaveapp_keyring::SoftwareSigner::with_keys_dir(&config.app_name, keys_dir);
         debug!(
             "Linux software signing backend ready with keyring (app={})",
             config.app_name
         );
         Ok(Self {
-            kind: BackendKind::Software,
+            kind: BackendKind::Keyring,
             inner: SigningInner::Software(signer),
         })
     }

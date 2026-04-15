@@ -323,8 +323,8 @@ dependencies = [
  "enclaveapp-apple",
  "enclaveapp-bridge",
  "enclaveapp-core",
+ "enclaveapp-keyring",
  "enclaveapp-linux-tpm",
- "enclaveapp-software",
  "enclaveapp-test-support",
  "enclaveapp-windows",
  "enclaveapp-wsl",
@@ -381,6 +381,22 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "enclaveapp-keyring"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "dirs",
+ "elliptic-curve",
+ "enclaveapp-core",
+ "keyring",
+ "p256",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

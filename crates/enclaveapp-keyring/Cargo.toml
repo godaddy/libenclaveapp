@@ -1,0 +1,31 @@
+[package]
+name = "enclaveapp-keyring"
+description = "Keyring-backed P-256 key backend for libenclaveapp (Linux with system keyring)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["keyring-storage"]
+signing = []
+encryption = []
+keyring-storage = ["keyring"]
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+p256 = { workspace = true }
+aes-gcm = { workspace = true }
+elliptic-curve = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# keyring requires glibc (needs libdbus for D-Bus Secret Service).
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+keyring = { workspace = true, optional = true }
