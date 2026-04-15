@@ -65,3 +65,7 @@ Rust workspace under `crates/`:
 - Linux: Software-only P-256 keys via `p256`/`aes-gcm` crates (no hardware security)
 - WSL: Bridge from Linux to Windows TPM via JSON-RPC subprocess
 - All crates compile (as stubs) on all platforms for cross-compilation support
+
+## Commits
+
+Do not add Co-Authored-By lines for Claude Code in commit messages.
