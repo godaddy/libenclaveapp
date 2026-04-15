@@ -141,7 +141,7 @@ All architectures support both signing and encryption.
 **Minimum OS requirements and hardware security guarantees:**
 
 - **macOS:** Apple Silicon required (Secure Enclave always present). Intel Macs and macOS VMs without SE passthrough are not supported.
-- **Windows:** Windows 11 required. Windows 11 mandates TPM 2.0, so hardware-backed keys are guaranteed on every supported installation. Windows 10 (EOL October 2025) is not supported — it does not require TPM 2.0.
+- **Windows:** TPM 2.0 required (Windows 10 or Windows 11). TPM 1.2 is not supported — it lacks ECDSA P-256 and ECDH support (only RSA and SHA-1). The CNG Microsoft Platform Crypto Provider targets TPM 2.0 exclusively. Windows 11 guarantees TPM 2.0 is present; Windows 10 machines must have TPM 2.0 hardware.
 - **Linux:** TPM 2.0 used when available (glibc only, via `tss-esapi`). Falls back to software keys when no TPM is present. No minimum OS version — TPM availability depends on hardware and kernel configuration.
 
 ### Security levels
