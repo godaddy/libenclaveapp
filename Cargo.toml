@@ -6,7 +6,7 @@ members = [
     "crates/enclaveapp-linux-tpm",
     "crates/enclaveapp-wsl",
     "crates/enclaveapp-bridge",
-    "crates/enclaveapp-software",
+    "crates/enclaveapp-test-software",
     "crates/enclaveapp-keyring",
     "crates/enclaveapp-test-support",
     "crates/enclaveapp-app-storage",
@@ -31,7 +31,7 @@ enclaveapp-apple = { path = "crates/enclaveapp-apple" }
 enclaveapp-windows = { path = "crates/enclaveapp-windows" }
 enclaveapp-wsl = { path = "crates/enclaveapp-wsl" }
 enclaveapp-bridge = { path = "crates/enclaveapp-bridge" }
-enclaveapp-software = { path = "crates/enclaveapp-software" }
+enclaveapp-test-software = { path = "crates/enclaveapp-test-software" }
 enclaveapp-keyring = { path = "crates/enclaveapp-keyring" }
 enclaveapp-linux-tpm = { path = "crates/enclaveapp-linux-tpm" }
 enclaveapp-test-support = { path = "crates/enclaveapp-test-support" }

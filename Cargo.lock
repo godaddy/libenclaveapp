@@ -416,14 +416,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclaveapp-software"
+name = "enclaveapp-test-software"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "dirs",
  "elliptic-curve",
  "enclaveapp-core",
- "keyring",
  "p256",
  "rand",
  "serde",

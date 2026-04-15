@@ -35,16 +35,6 @@ impl SoftwareEncryptor {
             config: SoftwareConfig::with_keys_dir(app_name, keys_dir),
         }
     }
-
-    /// Disable keyring-based key encryption (for testing or environments
-    /// without a keyring daemon).
-    ///
-    /// When the `keyring-storage` feature is not enabled this is a no-op
-    /// because keyring support is already absent.
-    pub fn without_keyring(mut self) -> Self {
-        self.config.use_keyring = false;
-        self
-    }
 }
 
 impl EnclaveKeyManager for SoftwareEncryptor {
@@ -229,7 +219,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("roundtrip", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -245,7 +235,7 @@ mod tests {
     #[test]
     fn encrypt_produces_different_output_each_time() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("nonce-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -270,7 +260,7 @@ mod tests {
     #[test]
     fn decrypt_fails_with_wrong_key() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("key-a", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -290,7 +280,7 @@ mod tests {
     #[test]
     fn decrypt_fails_with_truncated_ciphertext() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("trunc-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -307,7 +297,7 @@ mod tests {
     #[test]
     fn decrypt_fails_with_wrong_version_byte() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("ver-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -327,7 +317,7 @@ mod tests {
     #[test]
     fn empty_plaintext_roundtrip() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("empty-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -342,7 +332,7 @@ mod tests {
     #[test]
     fn large_plaintext_roundtrip() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("large-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -358,7 +348,7 @@ mod tests {
     #[test]
     fn generate_rejects_signing_key_type() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         let err = enc
             .generate("sign-key", KeyType::Signing, AccessPolicy::None)
@@ -374,7 +364,7 @@ mod tests {
     #[test]
     fn ciphertext_has_correct_format() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("fmt-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -394,7 +384,7 @@ mod tests {
     #[test]
     fn is_available_returns_true() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
         assert!(enc.is_available());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -402,7 +392,7 @@ mod tests {
     #[test]
     fn encrypt_fails_for_nonexistent_key() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         let err = enc.encrypt("ghost", b"data").unwrap_err();
         match err {
@@ -416,7 +406,7 @@ mod tests {
     #[test]
     fn decrypt_fails_for_nonexistent_key() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         // Craft a minimal valid-looking ciphertext
         let fake_ct = vec![0x01; MIN_CIPHERTEXT_LEN + 10];
@@ -434,7 +424,7 @@ mod tests {
     #[test]
     fn decrypt_fails_with_corrupted_ciphertext() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("corrupt-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -456,7 +446,7 @@ mod tests {
     #[test]
     fn generate_returns_valid_65_byte_pubkey() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         let pub_bytes = enc
             .generate("gen-pubkey", KeyType::Encryption, AccessPolicy::None)
@@ -474,7 +464,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip_various_sizes() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("sizes-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -492,7 +482,7 @@ mod tests {
     #[test]
     fn ciphertext_format_detailed_structure() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("struct-test", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -536,7 +526,7 @@ mod tests {
     #[test]
     fn ciphertext_is_different_each_time_due_to_random_nonce_and_ephemeral_key() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("nonce-diff", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -564,7 +554,7 @@ mod tests {
     #[test]
     fn decrypt_corrupted_nonce_returns_error() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("nonce-corrupt", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -585,7 +575,7 @@ mod tests {
     #[test]
     fn decrypt_corrupted_ephemeral_key_returns_error() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("eph-corrupt", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -607,7 +597,7 @@ mod tests {
     #[test]
     fn generate_with_invalid_label_returns_error() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         // Empty label
         let err = enc
@@ -633,7 +623,7 @@ mod tests {
     #[test]
     fn public_key_matches_generated() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         let generated = enc
             .generate("pk-match", KeyType::Encryption, AccessPolicy::None)
@@ -647,7 +637,7 @@ mod tests {
     #[test]
     fn list_keys_after_generate_includes_label() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("listed-enc-key", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -661,7 +651,7 @@ mod tests {
     #[test]
     fn delete_key_then_encrypt_returns_key_not_found() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("del-enc", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -679,7 +669,7 @@ mod tests {
     #[test]
     fn software_encryptor_rejects_invalid_labels_across_operations() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         let err = enc.public_key("../escape").unwrap_err();
         assert!(matches!(err, Error::InvalidLabel { .. }));
@@ -699,7 +689,7 @@ mod tests {
     #[test]
     fn one_byte_plaintext_roundtrip() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("one-byte", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
@@ -715,7 +705,7 @@ mod tests {
     #[test]
     fn decrypt_exactly_min_ciphertext_len_with_bad_data() {
         let dir = test_dir();
-        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone()).without_keyring();
+        let enc = SoftwareEncryptor::with_keys_dir("test", dir.clone());
 
         enc.generate("min-len", KeyType::Encryption, AccessPolicy::None)
             .unwrap();
