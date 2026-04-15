@@ -269,7 +269,7 @@ pub fn generate_and_save_key(...) -> Result<Vec<u8>> {
 - Manual test: rebuild binary at same path, verify one "Always Allow" prompt (ad-hoc signed)
 - Manual test: rebuild binary signed with trusted identity, verify NO prompt
 - Manual test: different binary at different path, verify prompt blocks access
-- Existing tests must continue to pass (software backend, Windows stubs, etc.)
+- Existing tests must continue to pass (test-software backend, Windows stubs, etc.)
 
 ## What NOT to do
 

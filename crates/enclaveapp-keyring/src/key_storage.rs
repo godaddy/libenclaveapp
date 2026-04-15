@@ -39,12 +39,17 @@ const KEK_SIZE: usize = 32;
 /// Minimum encrypted key file size: version(1) + nonce(12) + encrypted_key(32) + tag(16).
 const MIN_ENCRYPTED_FILE_SIZE: usize = 1 + GCM_NONCE_SIZE + RAW_KEY_SIZE + GCM_TAG_SIZE;
 
-#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
-static UNENCRYPTED_WARNING: std::sync::Once = std::sync::Once::new();
-
-/// Software keys are always available.
+/// Software keys are always available (but may lack keyring encryption).
 pub fn is_available() -> bool {
     true
+}
+
+/// Check whether the keyring-storage feature is compiled in.
+///
+/// When this returns false, keys will be stored as plaintext files.
+/// Callers that require at-rest encryption should refuse to proceed.
+pub fn has_keyring_feature() -> bool {
+    cfg!(feature = "keyring-storage")
 }
 
 /// Configuration for the software backend.
@@ -102,7 +107,12 @@ fn keyring_available(app_name: &str) -> bool {
 }
 
 /// Save the private key bytes to a `.key` file, encrypting with a keyring-stored
-/// KEK when possible. Falls back to unencrypted storage with a stderr warning.
+/// KEK when `use_keyring` is true. When `use_keyring` is false (testing only),
+/// falls back to unencrypted file storage.
+///
+/// Production callers should always set `use_keyring: true` and the app-storage
+/// layer enforces this by checking `has_keyring_feature()` before accepting the
+/// software backend.
 fn save_private_key(
     config: &SoftwareConfig,
     key_path: &std::path::Path,
@@ -116,11 +126,16 @@ fn save_private_key(
 
     #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
     if config.use_keyring {
-        warn_unencrypted();
+        return Err(Error::KeyOperation {
+            operation: "save_private_key".into(),
+            detail: "system keyring is not available; refusing to store key as plaintext".into(),
+        });
     }
 
+    // Unencrypted fallback — only reachable when use_keyring is false (tests)
+    // or when keyring-storage feature is not compiled in.
     #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
-    let _ = (config, label); // suppress unused warnings when keyring-storage is disabled
+    let _ = (config, label);
 
     metadata::atomic_write(key_path, secret_bytes)?;
     metadata::restrict_file_permissions(key_path)?;
@@ -274,17 +289,6 @@ fn delete_keyring_entry(app_name: &str, label: &str) {
     if let Ok(entry) = keyring::Entry::new(app_name, label) {
         drop(entry.delete_credential());
     }
-}
-
-/// Print a one-time warning that keys are stored unencrypted.
-#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
-#[allow(clippy::print_stderr)]
-fn warn_unencrypted() {
-    UNENCRYPTED_WARNING.call_once(|| {
-        eprintln!(
-            "warning: system keyring unavailable; private keys will be stored unencrypted on disk"
-        );
-    });
 }
 
 /// Generate a new P-256 secret key, save it and its public key to disk.
@@ -862,7 +866,7 @@ mod tests {
         // that we don't test here.
         #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
         {
-            let _ = config;
+            drop(config);
         }
 
         std::fs::remove_dir_all(&dir).unwrap();

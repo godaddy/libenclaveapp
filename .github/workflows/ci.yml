@@ -18,13 +18,13 @@ jobs:
         include:
           - name: macOS
             os: macos-latest
-            features: "--features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-software/signing,enclaveapp-software/encryption"
+            features: "--features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption,enclaveapp-test-software/signing,enclaveapp-test-software/encryption"
           - name: Windows
             os: windows-latest
-            features: "--features enclaveapp-windows/signing,enclaveapp-windows/encryption,enclaveapp-software/signing,enclaveapp-software/encryption"
+            features: "--features enclaveapp-windows/signing,enclaveapp-windows/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption,enclaveapp-test-software/signing,enclaveapp-test-software/encryption"
           - name: Linux
             os: ubuntu-latest
-            features: "--features enclaveapp-linux-tpm/signing,enclaveapp-linux-tpm/encryption,enclaveapp-software/signing,enclaveapp-software/encryption"
+            features: "--features enclaveapp-linux-tpm/signing,enclaveapp-linux-tpm/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption,enclaveapp-test-software/signing,enclaveapp-test-software/encryption"
     steps:
       - uses: actions/checkout@v5
 

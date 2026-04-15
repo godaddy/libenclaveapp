@@ -323,8 +323,8 @@ dependencies = [
  "enclaveapp-apple",
  "enclaveapp-bridge",
  "enclaveapp-core",
+ "enclaveapp-keyring",
  "enclaveapp-linux-tpm",
- "enclaveapp-software",
  "enclaveapp-test-support",
  "enclaveapp-windows",
  "enclaveapp-wsl",
@@ -384,6 +384,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-keyring"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "dirs",
+ "elliptic-curve",
+ "enclaveapp-core",
+ "keyring",
+ "p256",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "enclaveapp-linux-tpm"
 version = "0.1.0"
 dependencies = [
@@ -400,14 +416,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclaveapp-software"
+name = "enclaveapp-test-software"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "dirs",
  "elliptic-curve",
  "enclaveapp-core",
- "keyring",
  "p256",
  "rand",
  "serde",

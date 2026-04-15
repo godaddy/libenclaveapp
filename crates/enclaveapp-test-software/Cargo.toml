@@ -1,0 +1,27 @@
+[package]
+name = "enclaveapp-test-software"
+description = "Software-only P-256 key backend for testing (NOT for production use)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+signing = []
+encryption = []
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+p256 = { workspace = true }
+aes-gcm = { workspace = true }
+elliptic-curve = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

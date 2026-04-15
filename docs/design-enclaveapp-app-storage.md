@@ -55,7 +55,7 @@ The crate chooses the best available backend for the current environment:
 | Windows | TPM 2.0 |
 | WSL | Windows host bridge |
 | Linux with TPM | TPM 2.0 |
-| Linux without TPM | software fallback |
+| Linux without TPM | keyring |
 
 For WSL, discovery is layered:
 

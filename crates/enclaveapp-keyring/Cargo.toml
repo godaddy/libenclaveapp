@@ -1,6 +1,6 @@
 [package]
-name = "enclaveapp-software"
-description = "Software-only key backend for libenclaveapp (Linux fallback)"
+name = "enclaveapp-keyring"
+description = "Keyring-backed P-256 key backend for libenclaveapp (Linux with system keyring)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["keyring-storage"]
 signing = []
 encryption = []
 keyring-storage = ["keyring"]
@@ -26,7 +26,6 @@ rand = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# keyring is only useful on Linux with glibc (needs libdbus).
-# On musl/Alpine, it won't link. The keyring-storage feature gates the code.
+# keyring requires glibc (needs libdbus for D-Bus Secret Service).
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 keyring = { workspace = true, optional = true }

@@ -8,7 +8,7 @@ libenclaveapp as a shared library for hardware-backed key management.
 | Asset | Description | Sensitivity |
 |---|---|---|
 | Hardware-bound private key | P-256 key in Secure Enclave or TPM | Critical -- non-exportable, device-bound |
-| Software backend private key | P-256 key stored as encrypted file on disk | High -- file-based, no hardware isolation |
+| Keyring backend private key | P-256 key encrypted via system keyring | High -- keyring-based, no hardware isolation |
 | Public key | SEC1-encoded P-256 public key | Low -- intended to be shared |
 | Key metadata | Label, type, access policy, timestamps | Low -- no secrets |
 | ECIES ciphertext | Encrypted data produced by `EnclaveEncryptor` | Medium -- useless without the private key |
@@ -27,7 +27,7 @@ libenclaveapp as a shared library for hardware-backed key management.
 |                                     |                             |
 |                       +-------------+-------------+               |
 |                       | apple / windows / linux   |               |
-|                       | tpm / software backends   |               |
+|                       | tpm / keyring backends    |               |
 |                       +-------------+-------------+               |
 |                                     |                             |
 |                           +---------+---------+                   |
@@ -40,7 +40,7 @@ libenclaveapp as a shared library for hardware-backed key management.
 **Trust boundaries:**
 1. Between the Rust process and the hardware security module.
 2. Between the application and libenclaveapp's API (trait contracts).
-3. Between the software backend and the filesystem.
+3. Between the keyring backend and the filesystem/keyring.
 4. Between WSL and the Windows host (TPM bridge).
 
 ## Threats and Mitigations
@@ -57,20 +57,20 @@ Provider` keys cannot be exported via any software API.
 **Residual risk:** Physical attacks on the hardware security module. This
 is out of scope -- we rely on Apple's and Microsoft's hardware guarantees.
 
-### T2: Key material extraction (software backend)
+### T2: Key material extraction (keyring backend)
 
-**Threat:** An attacker reads the software backend's key file from disk.
+**Threat:** An attacker extracts the keyring backend's private key.
 
 **Mitigation:**
+- Private keys are encrypted via the system keyring (D-Bus Secret Service).
 - Key files are stored with 0600 permissions (owner-only).
-- The software backend is documented as providing no hardware isolation.
-- Applications print a one-time warning when using the software backend.
+- The keyring backend is documented as providing no hardware isolation.
 
-**Residual risk:** Any process running as the same user can read the key
-file. Root can read any file. The software backend is intended for
-environments where no hardware security module is available (CI, containers,
-Linux without TPM). It provides defense-in-depth against casual disk
-access but not against a compromised user session.
+**Residual risk:** Any process running as the same user can access the
+keyring and decrypt the key file. Root can bypass all protections. The
+keyring backend is intended for Linux environments where no TPM is
+available. It provides defense-in-depth via keyring encryption but not
+against a compromised user session.
 
 ### T3: ECIES ciphertext tampering
 
@@ -106,7 +106,7 @@ analysis, or electromagnetic emanation from the hardware security module.
 
 **Mitigation:** This is delegated to the hardware vendor. Apple's Secure
 Enclave and TPM 2.0 implementations include side-channel protections.
-The software backend uses the `p256` crate which provides constant-time
+The keyring backend uses the `p256` crate which provides constant-time
 scalar operations.
 
 **Residual risk:** Side-channel resistance depends on the hardware and
@@ -156,17 +156,16 @@ userspace) have vulnerabilities.
 libenclaveapp's control. Keeping the OS and TPM firmware up to date is
 the user's responsibility.
 
-## Software Backend Limitations
+## Keyring Backend Limitations
 
-The software backend (`enclaveapp-software`) exists for environments without
-hardware security modules. Its security properties are strictly weaker:
+The keyring backend (`enclaveapp-keyring`) exists for Linux environments
+without a TPM. Its security properties are strictly weaker than hardware backends:
 
-- Private keys are stored on the filesystem (encrypted with a
-  machine-specific key where possible, but ultimately software-only).
-- Any process with file access can extract the key.
+- Private keys are encrypted via the system keyring (D-Bus Secret Service).
+- Any process running as the same user can access the keyring and decrypt the key.
 - No physical-presence enforcement is possible.
-- Suitable for CI, containers, and development environments where hardware
-  is unavailable. Not recommended for production credential storage.
+- The keyring must be available; if it is not, the backend errors rather
+  than falling back to plaintext storage.
 
 ## Out of Scope
 

@@ -44,7 +44,7 @@ enum StorageInner {
     LinuxTpm(enclaveapp_linux_tpm::LinuxTpmEncryptor),
 
     #[cfg(target_os = "linux")]
-    Software(enclaveapp_software::SoftwareEncryptor),
+    Software(enclaveapp_keyring::SoftwareEncryptor),
 
     #[cfg(target_os = "linux")]
     WslBridge { bridge_path: std::path::PathBuf },
@@ -177,6 +177,10 @@ impl AppEncryptionStorage {
             });
         }
 
+        if !enclaveapp_keyring::has_keyring_feature() {
+            return Err(StorageError::NotAvailable);
+        }
+
         if config.access_policy != AccessPolicy::None {
             #[allow(clippy::print_stderr)]
             {
@@ -187,16 +191,19 @@ impl AppEncryptionStorage {
             }
         }
 
-        let encryptor = enclaveapp_software::SoftwareEncryptor::with_keys_dir(
+        let encryptor = enclaveapp_keyring::SoftwareEncryptor::with_keys_dir(
             &config.app_name,
             keys_dir.clone(),
         );
         Self::ensure_key(&encryptor, config, &keys_dir, AccessPolicy::None)?;
 
-        debug!("Linux software encryption ready (app={})", config.app_name);
+        debug!(
+            "Linux software encryption ready with keyring (app={})",
+            config.app_name
+        );
 
         Ok(Self {
-            kind: BackendKind::Software,
+            kind: BackendKind::Keyring,
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
             access_policy: config.access_policy,
@@ -399,7 +406,7 @@ impl EncryptionStorage for AppEncryptionStorage {
             BackendKind::SecureEnclave => "Secure Enclave",
             BackendKind::Tpm => "TPM 2.0",
             BackendKind::TpmBridge => "TPM 2.0 (WSL Bridge)",
-            BackendKind::Software => "Linux (software)",
+            BackendKind::Keyring => "Linux (keyring)",
         }
     }
 

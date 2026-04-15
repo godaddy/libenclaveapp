@@ -15,8 +15,8 @@ pub enum BackendKind {
     Tpm,
     /// WSL bridge to Windows TPM.
     TpmBridge,
-    /// Software-only P-256 keys (Linux fallback).
-    Software,
+    /// Keyring-backed P-256 keys (Linux without TPM).
+    Keyring,
 }
 
 impl std::fmt::Display for BackendKind {
@@ -25,7 +25,7 @@ impl std::fmt::Display for BackendKind {
             BackendKind::SecureEnclave => write!(f, "Secure Enclave"),
             BackendKind::Tpm => write!(f, "TPM 2.0"),
             BackendKind::TpmBridge => write!(f, "TPM 2.0 (WSL Bridge)"),
-            BackendKind::Software => write!(f, "Software"),
+            BackendKind::Keyring => write!(f, "Keyring"),
         }
     }
 }
@@ -77,7 +77,7 @@ mod tests {
         assert_eq!(BackendKind::SecureEnclave.to_string(), "Secure Enclave");
         assert_eq!(BackendKind::Tpm.to_string(), "TPM 2.0");
         assert_eq!(BackendKind::TpmBridge.to_string(), "TPM 2.0 (WSL Bridge)");
-        assert_eq!(BackendKind::Software.to_string(), "Software");
+        assert_eq!(BackendKind::Keyring.to_string(), "Keyring");
     }
 
     #[test]

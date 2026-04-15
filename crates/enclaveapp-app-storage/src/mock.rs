@@ -96,7 +96,7 @@ impl EncryptionStorage for MockEncryptionStorage {
     }
 
     fn backend_kind(&self) -> BackendKind {
-        BackendKind::Software
+        BackendKind::Keyring
     }
 }
 
@@ -181,7 +181,7 @@ mod tests {
         let storage = MockEncryptionStorage::new();
         assert!(storage.is_available());
         assert_eq!(storage.backend_name(), "Mock (AES-GCM)");
-        assert_eq!(storage.backend_kind(), BackendKind::Software);
+        assert_eq!(storage.backend_kind(), BackendKind::Keyring);
         assert!(storage.destroy().is_ok());
     }
 

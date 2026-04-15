@@ -34,7 +34,7 @@ enum SigningInner {
     LinuxTpm(enclaveapp_linux_tpm::LinuxTpmSigner),
 
     #[cfg(target_os = "linux")]
-    Software(enclaveapp_software::SoftwareSigner),
+    Software(enclaveapp_keyring::SoftwareSigner),
 }
 
 impl std::fmt::Debug for AppSigningBackend {
@@ -81,10 +81,13 @@ impl AppSigningBackend {
         let signer =
             enclaveapp_apple::SecureEnclaveSigner::with_keys_dir(&config.app_name, keys_dir);
 
+        if !signer.is_available() {
+            return Err(crate::error::StorageError::NotAvailable);
+        }
+
         debug!(
-            "Secure Enclave signing backend initialized (app={}, available={})",
+            "Secure Enclave signing backend ready (app={})",
             config.app_name,
-            signer.is_available()
         );
         Ok(Self {
             kind: BackendKind::SecureEnclave,
@@ -100,11 +103,11 @@ impl AppSigningBackend {
             .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
         let signer = enclaveapp_windows::TpmSigner::with_keys_dir(&config.app_name, keys_dir);
 
-        debug!(
-            "TPM signing backend initialized (app={}, available={})",
-            config.app_name,
-            signer.is_available()
-        );
+        if !signer.is_available() {
+            return Err(crate::error::StorageError::NotAvailable);
+        }
+
+        debug!("TPM signing backend ready (app={})", config.app_name,);
         Ok(Self {
             kind: BackendKind::Tpm,
             inner: SigningInner::Tpm(signer),
@@ -130,13 +133,17 @@ impl AppSigningBackend {
             });
         }
 
-        let signer = enclaveapp_software::SoftwareSigner::with_keys_dir(&config.app_name, keys_dir);
+        if !enclaveapp_keyring::has_keyring_feature() {
+            return Err(crate::error::StorageError::NotAvailable);
+        }
+
+        let signer = enclaveapp_keyring::SoftwareSigner::with_keys_dir(&config.app_name, keys_dir);
         debug!(
-            "Linux software signing backend ready (app={})",
+            "Linux software signing backend ready with keyring (app={})",
             config.app_name
         );
         Ok(Self {
-            kind: BackendKind::Software,
+            kind: BackendKind::Keyring,
             inner: SigningInner::Software(signer),
         })
     }
