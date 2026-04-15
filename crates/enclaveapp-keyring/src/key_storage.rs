@@ -39,9 +39,6 @@ const KEK_SIZE: usize = 32;
 /// Minimum encrypted key file size: version(1) + nonce(12) + encrypted_key(32) + tag(16).
 const MIN_ENCRYPTED_FILE_SIZE: usize = 1 + GCM_NONCE_SIZE + RAW_KEY_SIZE + GCM_TAG_SIZE;
 
-#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
-static UNENCRYPTED_WARNING: std::sync::Once = std::sync::Once::new();
-
 /// Software keys are always available (but may lack keyring encryption).
 pub fn is_available() -> bool {
     true
@@ -292,17 +289,6 @@ fn delete_keyring_entry(app_name: &str, label: &str) {
     if let Ok(entry) = keyring::Entry::new(app_name, label) {
         drop(entry.delete_credential());
     }
-}
-
-/// Print a one-time warning that keys are stored unencrypted.
-#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
-#[allow(clippy::print_stderr)]
-fn warn_unencrypted() {
-    UNENCRYPTED_WARNING.call_once(|| {
-        eprintln!(
-            "warning: system keyring unavailable; private keys will be stored unencrypted on disk"
-        );
-    });
 }
 
 /// Generate a new P-256 secret key, save it and its public key to disk.
