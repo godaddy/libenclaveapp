@@ -302,6 +302,7 @@ dependencies = [
  "enclaveapp-core",
  "enclaveapp-linux-tpm",
  "enclaveapp-software",
+ "enclaveapp-test-support",
  "enclaveapp-windows",
  "enclaveapp-wsl",
  "rand",

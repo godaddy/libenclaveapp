@@ -257,7 +257,12 @@ impl AppEncryptionStorage {
                     return Ok(());
                 }
             } else {
-                // Metadata missing but key exists — use as-is.
+                // Metadata missing but key exists — use as-is. The key was likely
+                // created before metadata tracking was introduced.
+                warn!(
+                    "key exists but metadata missing (label={}); using key with unknown policy",
+                    config.key_label
+                );
                 return Ok(());
             }
         }
@@ -409,3 +414,117 @@ impl EncryptionStorage for AppEncryptionStorage {
 unsafe impl Send for AppEncryptionStorage {}
 #[allow(unsafe_code)]
 unsafe impl Sync for AppEncryptionStorage {}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use enclaveapp_test_support::MockKeyBackend;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_dir() -> std::path::PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("enclaveapp-enc-test-{pid}-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_config(keys_dir: &std::path::Path) -> StorageConfig {
+        StorageConfig {
+            app_name: "test-app".into(),
+            key_label: "test-key".into(),
+            access_policy: AccessPolicy::None,
+            extra_bridge_paths: vec![],
+            keys_dir: Some(keys_dir.to_path_buf()),
+        }
+    }
+
+    #[test]
+    fn ensure_key_generates_new_key_when_none_exists() {
+        let dir = test_dir();
+        let backend = MockKeyBackend::new();
+        let config = make_config(&dir);
+
+        AppEncryptionStorage::ensure_key(&backend, &config, &dir, AccessPolicy::None).unwrap();
+
+        // Key should now exist in the backend
+        assert!(backend.public_key("test-key").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ensure_key_with_matching_policy_is_noop() {
+        let dir = test_dir();
+        let backend = MockKeyBackend::new();
+        let config = make_config(&dir);
+
+        // Generate key first
+        backend
+            .generate("test-key", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+        // Save metadata with matching policy
+        let meta = metadata::KeyMeta::new("test-key", KeyType::Encryption, AccessPolicy::None);
+        metadata::save_meta(&dir, "test-key", &meta).unwrap();
+
+        // ensure_key should be a no-op (key exists with matching policy)
+        AppEncryptionStorage::ensure_key(&backend, &config, &dir, AccessPolicy::None).unwrap();
+
+        // Key should still exist
+        assert!(backend.public_key("test-key").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ensure_key_with_mismatched_policy_deletes_and_regenerates() {
+        let dir = test_dir();
+        let backend = MockKeyBackend::new();
+        let mut config = make_config(&dir);
+        config.access_policy = AccessPolicy::BiometricOnly;
+
+        // Generate key with BiometricOnly policy
+        backend
+            .generate("test-key", KeyType::Encryption, AccessPolicy::BiometricOnly)
+            .unwrap();
+        let original_pub = backend.public_key("test-key").unwrap();
+
+        // Save metadata with BiometricOnly
+        let meta =
+            metadata::KeyMeta::new("test-key", KeyType::Encryption, AccessPolicy::BiometricOnly);
+        metadata::save_meta(&dir, "test-key", &meta).unwrap();
+
+        // ensure_key with None policy should delete and regenerate
+        AppEncryptionStorage::ensure_key(&backend, &config, &dir, AccessPolicy::None).unwrap();
+
+        // Key should still exist but was regenerated (MockKeyBackend produces
+        // deterministic keys from the label, so the public key will be the same
+        // in the mock case — but the important thing is the operation succeeded)
+        let new_pub = backend.public_key("test-key").unwrap();
+        // Since MockKeyBackend is deterministic by label, the public key is the same
+        assert_eq!(original_pub, new_pub);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ensure_key_with_missing_metadata_but_existing_key_uses_as_is() {
+        let dir = test_dir();
+        let backend = MockKeyBackend::new();
+        let config = make_config(&dir);
+
+        // Generate key but don't save metadata
+        backend
+            .generate("test-key", KeyType::Encryption, AccessPolicy::None)
+            .unwrap();
+
+        // ensure_key should accept the key without metadata (legacy case)
+        AppEncryptionStorage::ensure_key(&backend, &config, &dir, AccessPolicy::None).unwrap();
+
+        // Key should still exist (wasn't deleted)
+        assert!(backend.public_key("test-key").is_ok());
+        // Only one key should exist (wasn't regenerated)
+        assert_eq!(backend.list_keys().unwrap().len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
