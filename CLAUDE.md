@@ -64,28 +64,17 @@ Rust workspace under `crates/`:
 
 ## Application Integration Types
 
-The `enclaveapp-app-adapter` crate defines three integration types that classify how an enclave app delivers secrets to the target application:
+Every enclave app is classified by how it delivers secrets to the target application. See [DESIGN.md — Application integration types](DESIGN.md#application-integration-types) for full definitions.
 
-### Type 1: HelperTool
-The target application has native support for auth plugins, credential helpers, or agents. Secrets never leave the enclave app's process boundary — they are returned on demand via a protocol (SSH agent, `credential_process`, etc.).
+| Type | Name | Secret exposure | Example apps |
+|------|------|----------------|-------------|
+| **Type 1** | HelperTool | Secrets never leave process | sshenc (SSH agent), awsenc (`credential_process`) |
+| **Type 2** | EnvInterpolation | Secrets in env vars via `execve()` | npmenc (`.npmrc` `${NPM_TOKEN}`) |
+| **Type 3** | TempMaterializedConfig | Secrets briefly on disk (0o600) | Apps with no plugin or env var support |
 
-- **sshenc** — SSH agent protocol; keys used in-process for signing
-- **gitenc** — git signing via SSH agent, `credential.helper`
-- **awsenc** — `credential_process` directive in `~/.aws/config`
+The adapter selects the least-secret-exposing integration automatically: Type 1 > Type 2 > Type 3.
 
-### Type 2: EnvInterpolation
-The target application reads a config file that supports environment variable interpolation (`${ENV_VAR}`). The enclave app writes a config with placeholders and invokes the target with secret env vars set via `execve()` (not shell expansion).
-
-- **npmenc/npxenc** — `.npmrc` supports `${NPM_TOKEN}` interpolation
-
-### Type 3: TempMaterializedConfig
-The target application can only read a static config file with no env var support. The enclave app writes secrets to a temp file with restricted permissions (0o600), invokes the target with `--config /tmp/xxx/app.conf`, and deletes the file after exit.
-
-- Used for applications with no plugin or env var support in their config format
-
-The adapter selects the least-secret-exposing integration automatically: HelperTool > EnvInterpolation > TempMaterializedConfig.
-
-**sso-jwt** is a utility that can serve as a credential source for Type 1 or Type 2 apps (it provides JWTs that other tools consume).
+**sso-jwt** is a credential source that serves Type 1 or Type 2 apps.
 
 ## Platform
 

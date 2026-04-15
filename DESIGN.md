@@ -104,11 +104,29 @@ This keeps ciphertext portable across the derived applications that use encrypti
 
 For `sshenc`, WSL signing is handled by the ssh agent bridge path rather than the JSON-RPC encryption bridge.
 
-## Consumer mapping
+## Application integration types
 
-| Consumer | Integration style | Integration Type |
+Every enclave app is classified by how it delivers secrets to the target application. The `enclaveapp-app-adapter` crate defines three integration types, listed from most secure to least secure:
+
+### Type 1: HelperTool
+
+The target application has native support for auth plugins, credential helpers, or agents. Secrets never leave the enclave app's process boundary — they are returned on demand via a protocol (SSH agent, `credential_process`, etc.). This is the most secure integration because secrets are never written to disk or exposed in environment variables.
+
+### Type 2: EnvInterpolation
+
+The target application reads a config file that supports environment variable interpolation (`${ENV_VAR}`). The enclave app writes a config with placeholders and invokes the target with secret env vars set via `execve()`. Secrets exist briefly as environment variables but never touch disk in plaintext. The `execve()` boundary is critical — the env vars must not be set in a shell where they would be visible in shell history or to child processes beyond the target.
+
+### Type 3: TempMaterializedConfig
+
+The target application can only read a static config file with no env var support. The enclave app writes secrets to a temp file with restricted permissions (0o600 on Unix), invokes the target with a config path override (e.g. `--config /tmp/xxx/app.conf`), and deletes the file after the process exits. This is the least secure integration because secrets briefly exist on disk, but the restricted permissions and automatic cleanup mitigate the risk.
+
+The adapter selects the least-secret-exposing integration automatically: Type 1 > Type 2 > Type 3.
+
+### Consumer mapping
+
+| Consumer | Integration Type | Mechanism |
 |---|---|---|
-| `sshenc` | `enclaveapp-app-storage` signing bootstrap plus SSH-specific metadata and agent logic | Type 1 (HelperTool) — SSH agent |
-| `awsenc` | `enclaveapp-app-storage` encryption storage | Type 1 (HelperTool) — credential_process |
-| `sso-jwt` | `enclaveapp-app-storage` encryption storage | Credential source for Type 1/2 apps |
-| `npmenc` | encrypted secret storage built on the same shared key-management stack | Type 2 (EnvInterpolation) — .npmrc env vars |
+| `sshenc` | Type 1 (HelperTool) | SSH agent protocol; keys used in-process for signing |
+| `awsenc` | Type 1 (HelperTool) | `credential_process` directive in `~/.aws/config` |
+| `sso-jwt` | Credential source | Provides JWTs for Type 1 or Type 2 apps to consume |
+| `npmenc` | Type 2 (EnvInterpolation) | `.npmrc` with `${NPM_TOKEN}` placeholders |
