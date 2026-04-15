@@ -8,7 +8,7 @@ Provide a shared Rust substrate for hardware-backed key management so derived ap
 - Secure Enclave / TPM bootstrap
 - key lifecycle and metadata storage
 - WSL bridge discovery
-- software fallback behavior
+- keyring fallback behavior
 
 The current workspace supports four active consumers:
 
@@ -29,7 +29,8 @@ libenclaveapp/
     enclaveapp-apple/         macOS Secure Enclave backend
     enclaveapp-windows/       Windows TPM backend
     enclaveapp-linux-tpm/     Linux TPM backend
-    enclaveapp-software/      Software fallback backend
+    enclaveapp-keyring/       Keyring-backed backend (Linux production)
+    enclaveapp-test-software/ Test-only plaintext backend
     enclaveapp-wsl/           WSL detection and shell/profile helpers
     enclaveapp-bridge/        JSON-RPC bridge protocol + WSL client
     enclaveapp-test-support/  Mock backend for tests
@@ -64,7 +65,8 @@ It also centralizes WSL bridge lookup, access-policy handling, and app-specific 
 - `enclaveapp-apple`: Secure Enclave via CryptoKit Swift bridge
 - `enclaveapp-windows`: TPM 2.0 via CNG
 - `enclaveapp-linux-tpm`: TPM 2.0 via `tss-esapi`
-- `enclaveapp-software`: software fallback for unsupported or non-hardware environments
+- `enclaveapp-keyring`: keyring-backed backend for Linux without TPM (keys encrypted via system keyring)
+- `enclaveapp-test-software`: test-only plaintext backend (not for production)
 
 ### WSL support
 
@@ -133,8 +135,8 @@ This format is consistent across all backends — a ciphertext produced by the S
 | Windows | ARM64 (aarch64) | TPM 2.0 | `enclaveapp-windows` via CNG (NCrypt/BCrypt) |
 | Linux | x86_64 (glibc) | TPM 2.0 | `enclaveapp-linux-tpm` via `tss-esapi` |
 | Linux | ARM64 (glibc) | TPM 2.0 | `enclaveapp-linux-tpm` via `tss-esapi` |
-| Linux | x86_64 (musl) | None | `enclaveapp-software` (software fallback) |
-| Linux | ARM64 (musl) | None | `enclaveapp-software` (software fallback) |
+| Linux | x86_64 (glibc, no TPM) | System keyring | `enclaveapp-keyring` via D-Bus Secret Service |
+| Linux | ARM64 (glibc, no TPM) | System keyring | `enclaveapp-keyring` via D-Bus Secret Service |
 
 All architectures support both signing and encryption.
 

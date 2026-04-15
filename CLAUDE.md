@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`libenclaveapp` is a shared Rust library for hardware-backed key management across macOS (Secure Enclave via CryptoKit), Windows (TPM 2.0 via CNG), and Linux (software fallback). It provides signing (ECDSA P-256) and encryption (ECIES via ECDH P-256 + AES-GCM) behind feature flags, plus WSL integration and a TPM bridge for WSL→Windows communication.
+`libenclaveapp` is a shared Rust library for hardware-backed key management across macOS (Secure Enclave via CryptoKit), Windows (TPM 2.0 via CNG), and Linux (keyring or TPM 2.0). It provides signing (ECDSA P-256) and encryption (ECIES via ECDH P-256 + AES-GCM) behind feature flags, plus WSL integration and a TPM bridge for WSL→Windows communication.
 
 Three applications consume this library:
 - **sshenc** — SSH key management (signing)
@@ -17,19 +17,19 @@ Rust workspace. Requires Rust 1.75+. macOS builds need Xcode (for swiftc).
 
 ```bash
 # Build with all features (macOS)
-cargo build --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-software/signing,enclaveapp-software/encryption
+cargo build --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption
 
 # Build with all features (Windows)
-cargo build --workspace --features enclaveapp-windows/signing,enclaveapp-windows/encryption,enclaveapp-software/signing,enclaveapp-software/encryption
+cargo build --workspace --features enclaveapp-windows/signing,enclaveapp-windows/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption
 
 # Build with all features (Linux)
-cargo build --workspace --features enclaveapp-software/signing,enclaveapp-software/encryption
+cargo build --workspace --features enclaveapp-keyring/signing,enclaveapp-keyring/encryption
 
 # Test everything
-cargo test --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-software/signing,enclaveapp-software/encryption
+cargo test --workspace --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption
 
 # Lint
-cargo clippy --workspace --all-targets --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-software/signing,enclaveapp-software/encryption -- -D warnings
+cargo clippy --workspace --all-targets --features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption -- -D warnings
 
 # Format
 cargo fmt --all -- --check
@@ -44,7 +44,8 @@ Rust workspace under `crates/`:
 - **enclaveapp-windows** — Windows TPM 2.0 via CNG NCrypt/BCrypt. ECDSA signing (feature `signing`) and ECIES encryption (feature `encryption`). Shared provider/key/export modules. P1363↔DER conversion in cross-platform `convert` module.
 - **enclaveapp-wsl** — WSL detection (`is_wsl`, `detect_distros`), managed shell config block injection/removal for `.bashrc`/`.zshrc`, syntax validation. Parameterized by app name.
 - **enclaveapp-bridge** — JSON-RPC over stdin/stdout TPM bridge. Client side (WSL discovers and calls Windows bridge binary) and protocol types. Server implementation lives in consuming apps.
-- **enclaveapp-software** — Software-only P-256 backend for Linux (feature `signing` and `encryption`). Uses `p256` crate for real ECDSA/ECDH crypto and `aes-gcm` for symmetric encryption. Private keys stored as files on disk (not hardware-backed). Same ECIES wire format as hardware backends.
+- **enclaveapp-keyring** — Keyring-backed P-256 backend for Linux. Private keys encrypted via system keyring (D-Bus Secret Service). Requires glibc.
+- **enclaveapp-test-software** — Test-only plaintext P-256 backend. NOT for production.
 - **enclaveapp-app-storage** — High-level shared application storage. Automatic platform detection, key initialization, policy mismatch handling, and encrypt/decrypt/sign wrapping. Used by all three consuming apps (awsenc, sso-jwt, sshenc) to eliminate duplicated secure storage code. Includes `MockEncryptionStorage` behind the `mock` feature.
 - **enclaveapp-app-adapter** — Generic secret delivery substrate. BindingStore/SecretStore for credential management, AppSpec with 3 integration types, program resolver, process launcher, config block injection, temp config lifecycle. Used by npmenc; available for adoption by other apps.
 - **enclaveapp-tpm-bridge** — Shared JSON-RPC TPM bridge server. Parameterized by app_name/key_label.
@@ -85,8 +86,8 @@ See [DESIGN.md — Platform support](DESIGN.md#platform-support) for the full ma
 **Hardware security backends:**
 - macOS: Secure Enclave via CryptoKit (Swift bridge compiled by build.rs)
 - Windows: TPM 2.0 via CNG (NCrypt/BCrypt APIs via `windows` crate)
-- Linux (glibc): TPM 2.0 via `tss-esapi`, with software fallback
-- Linux (musl): Software-only P-256 keys (no TPM)
+- Linux (glibc): TPM 2.0 via `tss-esapi`, with keyring-encrypted fallback
+- Linux (musl): Not supported (no keyring or TPM)
 
 **Windows shell environments:** PowerShell, Command Prompt, Git Bash (native Windows binary), WSL2 Ubuntu/Debian (Linux binary with JSON-RPC bridge to Windows TPM).
 

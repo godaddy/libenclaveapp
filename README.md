@@ -60,33 +60,56 @@ P-256 is **not post-quantum secure**, but the data protected by enclave apps (ca
 | [enclaveapp-apple](crates/enclaveapp-apple/) | macOS Secure Enclave backend via CryptoKit Swift bridge |
 | [enclaveapp-windows](crates/enclaveapp-windows/) | Windows TPM 2.0 backend via CNG (NCrypt/BCrypt) |
 | [enclaveapp-linux-tpm](crates/enclaveapp-linux-tpm/) | Linux TPM 2.0 backend via `tss-esapi` |
-| [enclaveapp-software](crates/enclaveapp-software/) | Software-only P-256 fallback for environments without hardware security |
-| [enclaveapp-wsl](crates/enclaveapp-wsl/) | WSL detection, distro config, managed shell block injection |
-| [enclaveapp-bridge](crates/enclaveapp-bridge/) | JSON-RPC bridge protocol and WSL client for Windows TPM access |
-| [enclaveapp-tpm-bridge](crates/enclaveapp-tpm-bridge/) | Shared JSON-RPC TPM bridge server (parameterized by app) |
-| [enclaveapp-cache](crates/enclaveapp-cache/) | Shared binary cache format with configurable magic bytes |
-| [enclaveapp-build-support](crates/enclaveapp-build-support/) | Shared build.rs helper for Windows PE resource compilation |
-| [enclaveapp-test-support](crates/enclaveapp-test-support/) | Mock backends for testing without hardware |
+| [enclaveapp-keyring](crates/enclaveapp-keyring/) | keyring-backed backend for Linux (keys encrypted via system keyring) |
+| [enclaveapp-test-software](crates/enclaveapp-test-software/) | test-only plaintext backend (not for production) |
+| [enclaveapp-wsl](crates/enclaveapp-wsl/) | WSL detection, distro config, shell-init helpers |
+| [enclaveapp-bridge](crates/enclaveapp-bridge/) | JSON-RPC bridge protocol and WSL client |
+| [enclaveapp-test-support](crates/enclaveapp-test-support/) | mock backends for tests |
+
+## Feature flags
+
+Platform crates expose `signing` and `encryption` features. Applications enable only what they need.
+
+```toml
+# signing consumer
+enclaveapp-apple = { version = "0.1", features = ["signing"] }
+
+# encryption consumer
+enclaveapp-apple = { version = "0.1", features = ["encryption"] }
+```
+
+`enclaveapp-app-storage` sits above those platform crates and is the preferred integration layer for application code.
 
 ## Architecture
 
 ```
-consuming app (sshenc, awsenc, sso-jwt, npmenc)
-  |
-  +-- enclaveapp-app-adapter        secret delivery substrate
-  |     bindings, secrets, resolver, launcher, temp config
-  |
-  +-- enclaveapp-app-storage        platform-detected encrypt/sign
-  |     |
-  |     +-- enclaveapp-apple        macOS Secure Enclave
-  |     +-- enclaveapp-windows      Windows TPM 2.0
-  |     +-- enclaveapp-linux-tpm    Linux TPM 2.0
-  |     +-- enclaveapp-software     software fallback
-  |     +-- enclaveapp-bridge       WSL -> Windows TPM bridge client
-  |
-  +-- enclaveapp-tpm-bridge         shared bridge server binary
-  +-- enclaveapp-cache              shared binary cache format
-  +-- enclaveapp-core               traits, types, metadata, utilities
+                  +------------------------+
+                  | enclaveapp-core        |
+                  | traits, types, metadata|
+                  +-----------+------------+
+                              |
+                  +-----------v------------+
+                  | enclaveapp-app-storage |
+                  | app bootstrap layer    |
+                  +-----+-------+-----+----+
+                        |       |     |
+        +---------------+       |     +------------------+
+        |                       |                        |
++-------v--------+   +----------v---------+   +----------v---------+
+| enclaveapp-    |   | enclaveapp-        |   | enclaveapp-        |
+| apple          |   | windows            |   | linux-tpm          |
+| Secure Enclave |   | Windows TPM        |   | Linux TPM          |
++----------------+   +----------+---------+   +----------+---------+
+                                |                       |
+                     +----------v---------+   +---------v---------+
+                     | enclaveapp-bridge  |   | enclaveapp-       |
+                     | WSL JSON-RPC client|   | keyring           |
+                     +----------+---------+   | keyring backend   |
+                                |             +-------------------+
+                     +----------v---------+
+                     | enclaveapp-wsl     |
+                     | WSL install/shell  |
+                     +--------------------+
 ```
 
 ## Building
@@ -102,22 +125,13 @@ cargo fmt --all -- --check
 
 ## Feature flags
 
-Platform crates expose `signing` and `encryption` features. Applications enable only what they need:
-
-```toml
-# SSH signing app
-enclaveapp-apple = { features = ["signing"] }
-
-# Credential caching app
-enclaveapp-apple = { features = ["encryption"] }
-```
-
-`enclaveapp-app-storage` handles platform selection automatically and is the preferred integration point.
-
-## Documentation
-
-- [DESIGN.md](DESIGN.md) — Architecture, security levels, platform details, cryptographic primitives, integration type taxonomy
-- [docs/design-app-adapter-promotion.md](docs/design-app-adapter-promotion.md) — Design for the adapter promotion and deduplication effort
+| Platform | Hardware | Signing | Encryption | Notes |
+|---|---|---|---|---|
+| macOS | Secure Enclave | Yes | Yes | CryptoKit via Swift bridge |
+| Windows | TPM 2.0 | Yes | Yes | CNG NCrypt/BCrypt |
+| Linux | TPM 2.0 | Yes | Yes | `tss-esapi` |
+| Linux (no TPM) | Keyring | Yes | Yes | keys encrypted via system keyring (D-Bus Secret Service) |
+| WSL | Windows TPM via bridge | App-dependent | Yes | encryption uses JSON-RPC bridge; ssh signing uses the sshenc agent bridge |
 
 ## License
 
