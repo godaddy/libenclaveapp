@@ -78,11 +78,19 @@ The adapter selects the least-secret-exposing integration automatically: Type 1 
 
 ## Platform
 
+See [DESIGN.md — Platform support](DESIGN.md#platform-support) for the full matrix.
+
+**Target architectures:** macOS Apple Silicon, Windows x64, Windows ARM64, Linux x64, Linux ARM64.
+
+**Hardware security backends:**
 - macOS: Secure Enclave via CryptoKit (Swift bridge compiled by build.rs)
 - Windows: TPM 2.0 via CNG (NCrypt/BCrypt APIs via `windows` crate)
-- Linux: Software-only P-256 keys via `p256`/`aes-gcm` crates (no hardware security)
-- WSL: Bridge from Linux to Windows TPM via JSON-RPC subprocess
-- All crates compile (as stubs) on all platforms for cross-compilation support
+- Linux (glibc): TPM 2.0 via `tss-esapi`, with software fallback
+- Linux (musl): Software-only P-256 keys (no TPM)
+
+**Windows shell environments:** PowerShell, Command Prompt, Git Bash (native Windows binary), WSL2 Ubuntu/Debian (Linux binary with JSON-RPC bridge to Windows TPM).
+
+All crates compile (as stubs) on all platforms for cross-compilation support.
 
 ## Commits
 

@@ -94,15 +94,37 @@ This keeps ciphertext portable across the derived applications that use encrypti
 
 ## Platform support
 
-| Platform | Signing | Encryption | Notes |
-|---|---|---|---|
-| macOS | Yes | Yes | Secure Enclave |
-| Windows | Yes | Yes | TPM 2.0 / CNG |
-| Linux with TPM | Yes | Yes | TPM 2.0 / `tss-esapi` |
-| Linux without TPM | Yes | Yes | software fallback |
-| WSL | consumer-specific | Yes | Windows host bridge for encryption workloads |
+### Target architectures
 
-For `sshenc`, WSL signing is handled by the ssh agent bridge path rather than the JSON-RPC encryption bridge.
+| OS | Architecture | Hardware security | Backend |
+|---|---|---|---|
+| macOS | Apple Silicon (aarch64) | Secure Enclave | `enclaveapp-apple` via CryptoKit Swift bridge |
+| Windows | x86_64 | TPM 2.0 | `enclaveapp-windows` via CNG (NCrypt/BCrypt) |
+| Windows | ARM64 (aarch64) | TPM 2.0 | `enclaveapp-windows` via CNG (NCrypt/BCrypt) |
+| Linux | x86_64 (glibc) | TPM 2.0 | `enclaveapp-linux-tpm` via `tss-esapi` |
+| Linux | ARM64 (glibc) | TPM 2.0 | `enclaveapp-linux-tpm` via `tss-esapi` |
+| Linux | x86_64 (musl) | None | `enclaveapp-software` (software fallback) |
+| Linux | ARM64 (musl) | None | `enclaveapp-software` (software fallback) |
+
+All architectures support both signing and encryption. Linux without a TPM device falls back to `enclaveapp-software` (P-256 keys stored as files, optionally encrypted via system keyring on glibc).
+
+### Windows shell environments
+
+On Windows, enclave apps operate across multiple shell environments. Each has distinct behavior for path resolution, environment variable handling, and config file locations:
+
+| Environment | Shell | Path style | Config location | Notes |
+|---|---|---|---|---|
+| PowerShell | `pwsh.exe` / `powershell.exe` | `C:\Users\...` | `%LOCALAPPDATA%` | Native Windows; full TPM access |
+| Command Prompt | `cmd.exe` | `C:\Users\...` | `%LOCALAPPDATA%` | Native Windows; full TPM access |
+| Git Bash (MSYS2) | `bash.exe` (MinGW) | `/c/Users/...` | `$APPDATA` or `$HOME` | Runs native Windows binaries; TPM available |
+| WSL2 (Ubuntu) | `bash` (Linux) | `/home/user/...` | `~/.config/` | Linux binary; TPM via JSON-RPC bridge to Windows host |
+| WSL2 (Debian) | `bash` (Linux) | `/home/user/...` | `~/.config/` | Linux binary; TPM via JSON-RPC bridge to Windows host |
+
+**WSL architecture:** WSL2 distros run a real Linux kernel and use native Linux binaries. To access the Windows host's TPM, enclave apps use the JSON-RPC bridge (`enclaveapp-bridge`): the Linux client spawns the Windows bridge binary (located under `/mnt/c/`) via interop and communicates over stdin/stdout. The bridge server (`enclaveapp-tpm-bridge`) runs natively on the Windows host and performs TPM operations.
+
+**Git Bash:** Unlike WSL, Git Bash runs native Windows executables. The Windows binary works directly with the TPM — no bridge is needed. However, path handling requires care: Git Bash presents Windows paths in Unix-style (`/c/Users/...`), and SSH config requires forward slashes even on Windows.
+
+For `sshenc`, WSL signing is handled by the SSH agent bridge path (named pipe relay via `npiperelay`) rather than the JSON-RPC encryption bridge.
 
 ## Application integration types
 
