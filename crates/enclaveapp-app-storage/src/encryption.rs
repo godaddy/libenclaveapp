@@ -177,6 +177,10 @@ impl AppEncryptionStorage {
             });
         }
 
+        if !enclaveapp_software::has_keyring_feature() {
+            return Err(StorageError::NotAvailable);
+        }
+
         if config.access_policy != AccessPolicy::None {
             #[allow(clippy::print_stderr)]
             {
@@ -193,7 +197,10 @@ impl AppEncryptionStorage {
         );
         Self::ensure_key(&encryptor, config, &keys_dir, AccessPolicy::None)?;
 
-        debug!("Linux software encryption ready (app={})", config.app_name);
+        debug!(
+            "Linux software encryption ready with keyring (app={})",
+            config.app_name
+        );
 
         Ok(Self {
             kind: BackendKind::Software,

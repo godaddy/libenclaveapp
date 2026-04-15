@@ -133,9 +133,13 @@ impl AppSigningBackend {
             });
         }
 
+        if !enclaveapp_software::has_keyring_feature() {
+            return Err(crate::error::StorageError::NotAvailable);
+        }
+
         let signer = enclaveapp_software::SoftwareSigner::with_keys_dir(&config.app_name, keys_dir);
         debug!(
-            "Linux software signing backend ready (app={})",
+            "Linux software signing backend ready with keyring (app={})",
             config.app_name
         );
         Ok(Self {
