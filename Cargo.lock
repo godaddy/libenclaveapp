@@ -417,6 +417,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-tpm-bridge"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "enclaveapp-bridge",
+ "enclaveapp-core",
+ "enclaveapp-windows",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "enclaveapp-windows"
 version = "0.1.0"
 dependencies = [

@@ -351,11 +351,13 @@ fn is_executable_candidate(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::env;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
     #[test]
     fn resolves_explicit_path() {
         let dir = TempDir::new().expect("temp dir");
@@ -445,6 +447,7 @@ mod tests {
         assert!(parsed.fixed_args.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolves_alias_chain_via_fake_shell() {
         let dir = TempDir::new().expect("temp dir");
@@ -499,6 +502,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn auto_resolution_prefers_command_v_over_path_lookup() {
         let dir = TempDir::new().expect("temp dir");
@@ -561,6 +565,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_lookup_ignores_non_executable_files() {
         let dir = TempDir::new().expect("temp dir");
