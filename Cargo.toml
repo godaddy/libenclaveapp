@@ -10,6 +10,8 @@ members = [
     "crates/enclaveapp-test-support",
     "crates/enclaveapp-app-storage",
     "crates/enclaveapp-app-adapter",
+    "crates/enclaveapp-cache",
+    "crates/enclaveapp-tpm-bridge",
 ]
 resolver = "2"
 
@@ -32,6 +34,8 @@ enclaveapp-linux-tpm = { path = "crates/enclaveapp-linux-tpm" }
 enclaveapp-test-support = { path = "crates/enclaveapp-test-support" }
 enclaveapp-app-storage = { path = "crates/enclaveapp-app-storage" }
 enclaveapp-app-adapter = { path = "crates/enclaveapp-app-adapter" }
+enclaveapp-cache = { path = "crates/enclaveapp-cache" }
+enclaveapp-tpm-bridge = { path = "crates/enclaveapp-tpm-bridge" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

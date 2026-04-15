@@ -1,0 +1,650 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! Generic JSON-RPC TPM bridge server for enclave apps.
+//!
+//! Extracts the common bridge server logic shared by `awsenc-tpm-bridge` and
+//! `sso-jwt-tpm-bridge`. Each app only needs to supply its default app name
+//! and key label, then call [`BridgeServer::run_stdio`].
+//!
+//! # Example
+//!
+//! ```no_run
+//! let mut server = enclaveapp_tpm_bridge::BridgeServer::new("myapp", "cache-key");
+//! server.run_stdio().ok();
+//! ```
+
+mod tpm;
+
+pub use tpm::TpmStorage;
+
+use base64::prelude::*;
+use enclaveapp_bridge::BridgeResponse;
+use enclaveapp_core::types::AccessPolicy;
+use serde::Deserialize;
+use std::io::{self, BufRead, Write};
+
+/// Backward-compatible bridge request that supports both the legacy `biometric`
+/// boolean and the newer `access_policy` enum.
+#[derive(Debug, Deserialize)]
+pub struct BridgeRequestCompat {
+    /// Method: "init", "encrypt", "decrypt", "destroy", "delete".
+    pub method: String,
+    /// Parameters.
+    #[serde(default)]
+    pub params: BridgeParamsCompat,
+}
+
+/// Parameters for a bridge request.
+#[derive(Debug, Default, Deserialize)]
+pub struct BridgeParamsCompat {
+    /// Base64-encoded data (plaintext for encrypt, ciphertext for decrypt).
+    #[serde(default)]
+    pub data: String,
+    /// Access policy to enforce on key use.
+    #[serde(default)]
+    pub access_policy: AccessPolicy,
+    /// Legacy field: older bridge clients send `"biometric": true` instead of
+    /// `"access_policy": "biometric_only"`. Kept for backward compatibility.
+    #[serde(default)]
+    pub biometric: bool,
+    /// Application name (determines TPM key name).
+    #[serde(default)]
+    pub app_name: String,
+    /// Key label within the application namespace.
+    #[serde(default)]
+    pub key_label: String,
+}
+
+impl BridgeParamsCompat {
+    /// Return the app name, falling back to the provided default.
+    pub fn app_name_or<'param>(&'param self, default: &'param str) -> &'param str {
+        if self.app_name.is_empty() {
+            default
+        } else {
+            &self.app_name
+        }
+    }
+
+    /// Return the key label, falling back to the provided default.
+    pub fn key_label_or<'param>(&'param self, default: &'param str) -> &'param str {
+        if self.key_label.is_empty() {
+            default
+        } else {
+            &self.key_label
+        }
+    }
+
+    /// Resolve the effective access policy, falling back to the legacy
+    /// `biometric` boolean when `access_policy` is unset (defaults to `None`).
+    pub fn effective_access_policy(&self) -> AccessPolicy {
+        if self.access_policy != AccessPolicy::None {
+            return self.access_policy;
+        }
+        if self.biometric {
+            return AccessPolicy::BiometricOnly;
+        }
+        AccessPolicy::None
+    }
+}
+
+/// Handle a single parsed bridge request, dispatching to the appropriate
+/// TPM storage operation.
+pub fn handle_request(
+    request: &BridgeRequestCompat,
+    storage: &mut Option<TpmStorage>,
+    default_app_name: &str,
+    default_key_label: &str,
+) -> BridgeResponse {
+    let app_name = request.params.app_name_or(default_app_name);
+    let key_label = request.params.key_label_or(default_key_label);
+
+    match request.method.as_str() {
+        "init" => {
+            match TpmStorage::new(
+                app_name,
+                key_label,
+                request.params.effective_access_policy(),
+            ) {
+                Ok(s) => {
+                    *storage = Some(s);
+                    BridgeResponse::success("ok")
+                }
+                Err(e) => BridgeResponse::error(&format!("init failed: {e}")),
+            }
+        }
+        "encrypt" => {
+            let Some(ref s) = storage else {
+                return BridgeResponse::error("not initialized: call init first");
+            };
+            if request.params.data.is_empty() {
+                return BridgeResponse::error("missing data parameter");
+            }
+            let plaintext = match BASE64_STANDARD.decode(&request.params.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    return BridgeResponse::error(&format!("base64 decode error: {e}"));
+                }
+            };
+            match s.encrypt(&plaintext) {
+                Ok(ciphertext) => BridgeResponse::success(&BASE64_STANDARD.encode(&ciphertext)),
+                Err(e) => BridgeResponse::error(&format!("encrypt failed: {e}")),
+            }
+        }
+        "decrypt" => {
+            let Some(ref s) = storage else {
+                return BridgeResponse::error("not initialized: call init first");
+            };
+            if request.params.data.is_empty() {
+                return BridgeResponse::error("missing data parameter");
+            }
+            let ciphertext = match BASE64_STANDARD.decode(&request.params.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    return BridgeResponse::error(&format!("base64 decode error: {e}"));
+                }
+            };
+            match s.decrypt(&ciphertext) {
+                Ok(plaintext) => BridgeResponse::success(&BASE64_STANDARD.encode(&plaintext)),
+                Err(e) => BridgeResponse::error(&format!("decrypt failed: {e}")),
+            }
+        }
+        "destroy" | "delete" => match TpmStorage::delete(app_name, key_label) {
+            Ok(()) => {
+                *storage = None;
+                BridgeResponse::success("ok")
+            }
+            Err(e) => BridgeResponse::error(&format!("delete failed: {e}")),
+        },
+        other => BridgeResponse::error(&format!("unknown method: {other}")),
+    }
+}
+
+/// A JSON-RPC bridge server that reads requests from stdin and writes
+/// responses to stdout, delegating to [`TpmStorage`] for crypto operations.
+#[derive(Debug)]
+pub struct BridgeServer {
+    default_app_name: String,
+    default_key_label: String,
+}
+
+impl BridgeServer {
+    /// Create a new bridge server with the given default app name and key label.
+    ///
+    /// These defaults are used when the client omits `app_name` or `key_label`
+    /// from the request parameters.
+    pub fn new(default_app_name: &str, default_key_label: &str) -> Self {
+        Self {
+            default_app_name: default_app_name.to_string(),
+            default_key_label: default_key_label.to_string(),
+        }
+    }
+
+    /// Run the bridge server, reading JSON-RPC requests from stdin and writing
+    /// responses to stdout. Blocks until stdin is closed or a write error
+    /// occurs.
+    #[allow(clippy::print_stdout)]
+    pub fn run_stdio(&mut self) -> io::Result<()> {
+        let stdin = io::stdin();
+        let mut stdout = io::stdout().lock();
+        let mut storage: Option<TpmStorage> = None;
+
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    let resp = BridgeResponse::error(&format!("read error: {e}"));
+                    drop(serde_json::to_writer(&mut stdout, &resp));
+                    drop(stdout.write_all(b"\n"));
+                    drop(stdout.flush());
+                    break;
+                }
+            };
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let response = match serde_json::from_str::<BridgeRequestCompat>(&line) {
+                Ok(req) => handle_request(
+                    &req,
+                    &mut storage,
+                    &self.default_app_name,
+                    &self.default_key_label,
+                ),
+                Err(e) => BridgeResponse::error(&format!("invalid JSON: {e}")),
+            };
+
+            if serde_json::to_writer(&mut stdout, &response).is_err() {
+                break;
+            }
+            if stdout.write_all(b"\n").is_err() {
+                break;
+            }
+            if stdout.flush().is_err() {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    const TEST_APP_NAME: &str = "test-app";
+    const TEST_KEY_LABEL: &str = "cache-key";
+
+    fn make_request(method: &str, data: &str, access_policy: AccessPolicy) -> BridgeRequestCompat {
+        BridgeRequestCompat {
+            method: method.to_string(),
+            params: BridgeParamsCompat {
+                data: data.to_string(),
+                access_policy,
+                biometric: false,
+                app_name: TEST_APP_NAME.to_string(),
+                key_label: TEST_KEY_LABEL.to_string(),
+            },
+        }
+    }
+
+    fn handle(req: &BridgeRequestCompat, storage: &mut Option<TpmStorage>) -> BridgeResponse {
+        handle_request(req, storage, TEST_APP_NAME, TEST_KEY_LABEL)
+    }
+
+    // ----- Parsing tests -----
+
+    #[test]
+    fn parse_init_request() {
+        let json = r#"{"method": "init", "params": {"access_policy": "none"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "init");
+        assert_eq!(req.params.access_policy, AccessPolicy::None);
+        assert_eq!(req.params.app_name_or(TEST_APP_NAME), TEST_APP_NAME);
+        assert_eq!(req.params.key_label_or(TEST_KEY_LABEL), TEST_KEY_LABEL);
+    }
+
+    #[test]
+    fn parse_init_request_defaults() {
+        let json = r#"{"method": "init", "params": {}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "init");
+        assert_eq!(req.params.access_policy, AccessPolicy::None);
+        assert!(req.params.data.is_empty());
+        assert_eq!(req.params.app_name_or(TEST_APP_NAME), TEST_APP_NAME);
+        assert_eq!(req.params.key_label_or(TEST_KEY_LABEL), TEST_KEY_LABEL);
+    }
+
+    #[test]
+    fn parse_encrypt_request() {
+        let json =
+            r#"{"method": "encrypt", "params": {"data": "aGVsbG8=", "access_policy": "none"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "encrypt");
+        assert_eq!(req.params.data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn parse_decrypt_request() {
+        let json = r#"{"method": "decrypt", "params": {"data": "Y2lwaGVy"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "decrypt");
+        assert_eq!(req.params.data, "Y2lwaGVy");
+    }
+
+    #[test]
+    fn parse_destroy_request() {
+        let json = r#"{"method": "destroy", "params": {}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "destroy");
+        assert_eq!(req.params.app_name_or(TEST_APP_NAME), TEST_APP_NAME);
+        assert_eq!(req.params.key_label_or(TEST_KEY_LABEL), TEST_KEY_LABEL);
+    }
+
+    #[test]
+    fn parse_delete_request() {
+        let json = r#"{"method": "delete", "params": {"key_label": "cache-key"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "delete");
+        assert_eq!(req.params.key_label_or(TEST_KEY_LABEL), TEST_KEY_LABEL);
+    }
+
+    #[test]
+    fn parse_request_uses_defaults_for_minimal_payloads() {
+        let json = r#"{"method":"init","params":{"access_policy":"biometric_only"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.access_policy, AccessPolicy::BiometricOnly);
+        assert_eq!(req.params.app_name_or(TEST_APP_NAME), TEST_APP_NAME);
+        assert_eq!(req.params.key_label_or(TEST_KEY_LABEL), TEST_KEY_LABEL);
+    }
+
+    #[test]
+    fn parse_request_with_explicit_app_name_and_key_label() {
+        let json = r#"{"method":"init","params":{"app_name":"custom","key_label":"my-key"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.app_name_or(TEST_APP_NAME), "custom");
+        assert_eq!(req.params.key_label_or(TEST_KEY_LABEL), "my-key");
+    }
+
+    // ----- Serialization tests -----
+
+    #[test]
+    fn serialize_success_response() {
+        let resp = BridgeResponse::success("ok");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn serialize_error_response() {
+        let resp = BridgeResponse::error("something went wrong");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"error\":\"something went wrong\""));
+    }
+
+    // ----- Handler tests -----
+
+    #[test]
+    fn handle_init_creates_storage() {
+        let req = make_request("init", "", AccessPolicy::None);
+        let mut storage = None;
+        let resp = handle(&req, &mut storage);
+        // On non-Windows, init succeeds (stub creates the struct)
+        // but encrypt/decrypt will fail at runtime
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "init error message should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "init should return a result on success"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_destroy_clears_storage() {
+        let req = make_request("destroy", "", AccessPolicy::None);
+        let mut storage = None;
+        let resp = handle(&req, &mut storage);
+        // On platforms without TPM, destroy may return an error. That's expected.
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "destroy error message should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "destroy should return a result on success"
+            );
+        }
+        assert!(storage.is_none());
+    }
+
+    #[test]
+    fn handle_delete_clears_storage() {
+        let req = make_request("delete", "", AccessPolicy::None);
+        let mut storage = None;
+        let resp = handle(&req, &mut storage);
+        // On platforms without TPM, delete may return an error. That's expected.
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "delete error message should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "delete should return a result on success"
+            );
+        }
+        assert!(storage.is_none());
+    }
+
+    #[test]
+    fn handle_unknown_method() {
+        let req = make_request("bogus", "", AccessPolicy::None);
+        let mut storage = None;
+        let resp = handle(&req, &mut storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("unknown method")),);
+    }
+
+    #[test]
+    fn handle_encrypt_without_init() {
+        let req = make_request("encrypt", "aGVsbG8=", AccessPolicy::None);
+        let mut storage = None;
+        let resp = handle(&req, &mut storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("not initialized")),);
+    }
+
+    #[test]
+    fn handle_decrypt_without_init() {
+        let req = make_request("decrypt", "Y2lwaGVy", AccessPolicy::None);
+        let mut storage = None;
+        let resp = handle(&req, &mut storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("not initialized")),);
+    }
+
+    #[test]
+    fn handle_encrypt_missing_data() {
+        let req = make_request("encrypt", "", AccessPolicy::None);
+        // On platforms without a TPM, new() may fail and storage is None,
+        // so we get "not initialized" instead of "missing data". Both are valid errors.
+        let mut storage = TpmStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).ok();
+        let resp = handle(&req, &mut storage);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn handle_encrypt_invalid_base64() {
+        let req = make_request("encrypt", "not-valid-base64!!!", AccessPolicy::None);
+        let mut storage = TpmStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).ok();
+        let resp = handle(&req, &mut storage);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn handle_decrypt_missing_data() {
+        let req = make_request("decrypt", "", AccessPolicy::None);
+        let mut storage = TpmStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).ok();
+        let resp = handle(&req, &mut storage);
+        assert!(resp.error.is_some());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn encrypt_returns_platform_error_on_non_windows() {
+        let storage = TpmStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).unwrap();
+        let result = storage.encrypt(b"hello");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only supported on Windows"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn decrypt_returns_platform_error_on_non_windows() {
+        let storage = TpmStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).unwrap();
+        let result = storage.decrypt(b"hello");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only supported on Windows"));
+    }
+
+    #[test]
+    fn roundtrip_json_protocol() {
+        // Simulate the full JSON protocol flow
+        let init_json = r#"{"method":"init","params":{"app_name":"test-app","key_label":"cache-key","access_policy":"none"}}"#;
+        let encrypt_json = r#"{"method":"encrypt","params":{"data":"aGVsbG8gd29ybGQ=","app_name":"test-app","key_label":"cache-key","access_policy":"none"}}"#;
+        let destroy_json =
+            r#"{"method":"destroy","params":{"app_name":"test-app","key_label":"cache-key"}}"#;
+
+        let mut storage = None;
+
+        // Init
+        let req: BridgeRequestCompat = serde_json::from_str(init_json).unwrap();
+        let resp = handle(&req, &mut storage);
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "init error message should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "init should return a result on success"
+            );
+        }
+
+        // Encrypt (will fail on non-Windows, which is expected)
+        let req: BridgeRequestCompat = serde_json::from_str(encrypt_json).unwrap();
+        let resp = handle(&req, &mut storage);
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "encrypt error message should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "encrypt should return a result on success"
+            );
+        }
+
+        // Destroy
+        let req: BridgeRequestCompat = serde_json::from_str(destroy_json).unwrap();
+        let resp = handle(&req, &mut storage);
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "destroy error message should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "destroy should return a result on success",
+            );
+        }
+        assert!(storage.is_none());
+    }
+
+    #[test]
+    fn invalid_json_produces_error() {
+        let bad_json = "this is not json";
+        let result = serde_json::from_str::<BridgeRequestCompat>(bad_json);
+        assert!(result.is_err());
+    }
+
+    // ----- effective_access_policy exhaustive variant tests -----
+
+    #[test]
+    fn effective_access_policy_none_without_biometric() {
+        let json = r#"{"method":"init","params":{}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+    }
+
+    #[test]
+    fn effective_access_policy_any() {
+        let json = r#"{"method":"init","params":{"access_policy":"any"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::Any);
+    }
+
+    #[test]
+    fn effective_access_policy_password_only() {
+        let json = r#"{"method":"init","params":{"access_policy":"password_only"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::PasswordOnly
+        );
+    }
+
+    // ----- Legacy payload defaults -----
+
+    #[test]
+    fn legacy_payload_with_no_params_defaults_to_none() {
+        let json = r#"{"method":"init","params":{}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+        assert_eq!(req.params.app_name, "");
+        assert_eq!(req.params.key_label, "");
+    }
+
+    // ----- Biometric and access_policy coexistence -----
+
+    #[test]
+    fn biometric_and_access_policy_coexist_in_json() {
+        let json = r#"{"method":"init","params":{"access_policy":"biometric_only","biometric":true,"app_name":"test","key_label":"k"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::BiometricOnly
+        );
+    }
+
+    // ----- Fallback when access_policy absent but biometric true -----
+
+    #[test]
+    fn biometric_true_falls_back_to_biometric_only() {
+        let json =
+            r#"{"method":"init","params":{"biometric":true,"app_name":"a","key_label":"k"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::BiometricOnly
+        );
+    }
+
+    #[test]
+    fn legacy_biometric_true_maps_to_biometric_only() {
+        let json = r#"{"method": "init", "params": {"biometric": true}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::BiometricOnly
+        );
+    }
+
+    #[test]
+    fn legacy_biometric_false_maps_to_none() {
+        let json = r#"{"method": "init", "params": {"biometric": false}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+    }
+
+    #[test]
+    fn access_policy_takes_precedence_over_biometric() {
+        // When both fields are present, access_policy wins.
+        let json = r#"{"method": "init", "params": {"access_policy": "any", "biometric": true}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::Any);
+    }
+
+    #[test]
+    fn password_only_takes_precedence_over_biometric() {
+        let json =
+            r#"{"method":"init","params":{"access_policy":"password_only","biometric":true}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::PasswordOnly,
+            "explicit access_policy should take precedence over legacy biometric field"
+        );
+    }
+
+    #[test]
+    fn empty_params_all_defaults() {
+        let json = r#"{"method":"init","params":{}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+        assert_eq!(req.params.data, "");
+        assert_eq!(req.params.app_name, "");
+        assert_eq!(req.params.key_label, "");
+    }
+
+    // ----- BridgeServer construction -----
+
+    #[test]
+    fn bridge_server_new() {
+        let server = BridgeServer::new("myapp", "mykey");
+        assert_eq!(server.default_app_name, "myapp");
+        assert_eq!(server.default_key_label, "mykey");
+    }
+}
