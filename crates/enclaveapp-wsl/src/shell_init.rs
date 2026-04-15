@@ -414,7 +414,7 @@ mod tests {
                 "       Use: COMPANY_JWT=$(sso-jwt) your-command".to_string(),
                 "       Or:  sso-jwt exec -- your-command".to_string(),
             ],
-            include_powershell: false,
+            include_powershell: true,
             helper_function: None,
             command_wrapper: true,
         }
@@ -481,9 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn powershell_unsupported_for_ssojwt() {
+    fn powershell_supported_for_ssojwt() {
         let result = generate_shell_init("powershell", &ssojwt_config());
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert!(script.contains("$PROFILE"));
+        assert!(script.contains("sso-jwt shell-init powershell"));
     }
 
     #[test]
