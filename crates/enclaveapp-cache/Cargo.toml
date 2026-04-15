@@ -1,0 +1,17 @@
+[package]
+name = "enclaveapp-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Shared binary cache format for enclave apps"
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

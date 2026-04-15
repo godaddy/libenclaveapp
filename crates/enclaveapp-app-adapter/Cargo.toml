@@ -1,0 +1,22 @@
+[package]
+name = "enclaveapp-app-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Reusable wrapper substrate for adapting applications to secure secret delivery"
+
+[dependencies]
+base64 = { workspace = true }
+dirs = { workspace = true }
+enclaveapp-app-storage = { workspace = true }
+fs4 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+shlex = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
