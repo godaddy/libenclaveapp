@@ -82,15 +82,45 @@ All backends share the same policy vocabulary:
 
 Applications decide which policy to request. Platform backends map that policy to the best native behavior available.
 
-## ECIES format
+## Cryptographic primitives
 
-Encryption backends use the shared ciphertext format:
+### ECDSA P-256 (secp256r1 / prime256v1)
+
+All signing and encryption operations use **NIST P-256** (also known as secp256r1 or prime256v1). This is the sole elliptic curve supported across all backends.
+
+**Why P-256:** It is the only curve universally supported by all three hardware targets — Apple Secure Enclave, Windows TPM 2.0 (CNG), and Linux TPM 2.0 (`tss-esapi`). The Secure Enclave in particular only supports P-256 for key agreement and signing. This constraint drives the choice for the entire library.
+
+**Security strength:** P-256 provides approximately **128 bits of classical security**, comparable to AES-128. This exceeds current best-practice minimums (the NIST recommendation is 112 bits through 2030+). P-256 is widely deployed in TLS 1.3, SSH, code signing, and WebAuthn.
+
+**Post-quantum status:** P-256 is **not post-quantum secure**. A sufficiently capable quantum computer running Shor's algorithm could break ECDSA and ECDH on P-256 in polynomial time. However:
+
+- No such quantum computer exists today, and current estimates place cryptographically relevant quantum computers at least a decade away.
+- The data protected by enclave apps (cached credentials, session tokens, SSH signatures) is **short-lived** — typically minutes to hours. Even if a quantum computer were available, the secrets would have expired before they could be extracted.
+- When post-quantum algorithms are added to the hardware security modules (Apple has indicated post-quantum support in future SE revisions; TPM 2.0 has a PQC profile in draft), the library can adopt them. The version byte in the ECIES format and the trait-based architecture allow new algorithms without breaking existing caches.
+
+For the use cases served by enclave apps (credential caching, SSH signing, token management), P-256 provides strong security today with a clear migration path to post-quantum algorithms when hardware support materializes.
+
+### Signing: ECDSA with SHA-256
+
+- **Curve:** P-256
+- **Hash:** SHA-256
+- **Signature format:** DER-encoded ASN.1 (converted from P1363 on Windows CNG). The `enclaveapp-windows` crate includes a `convert` module for P1363 ↔ DER conversion.
+- **Use case:** SSH key signing (`sshenc`), git commit/tag signing (`gitenc`)
+
+### Encryption: ECIES (ECDH + AES-256-GCM)
+
+- **Key agreement:** ECDH P-256 with ephemeral sender key
+- **KDF:** X9.63 KDF with SHA-256 (derives 32-byte AES key from shared secret)
+- **Symmetric cipher:** AES-256-GCM (authenticated encryption)
+- **Use case:** Credential caching (`awsenc`), token caching (`sso-jwt`), secret storage (`npmenc`)
+
+**Ciphertext format:**
 
 ```
-[0x01 version] [65-byte ephemeral pubkey] [12-byte nonce] [ciphertext] [16-byte GCM tag]
+[0x01 version] [65-byte ephemeral pubkey (SEC1 uncompressed)] [12-byte nonce] [ciphertext] [16-byte GCM tag]
 ```
 
-This keeps ciphertext portable across the derived applications that use encryption storage.
+This format is consistent across all backends — a ciphertext produced by the Secure Enclave can be decrypted by the software backend and vice versa (given the same private key material). The version byte allows future format changes without breaking existing caches.
 
 ## Platform support
 
