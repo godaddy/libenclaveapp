@@ -242,7 +242,7 @@ impl EnclaveEncryptor for LinuxTpmEncryptor {
             })?;
 
         // Generate ephemeral key pair in software
-        let eph_secret = p256::SecretKey::random(&mut rand::thread_rng());
+        let eph_secret = p256::SecretKey::random(&mut elliptic_curve::rand_core::OsRng);
         let eph_pub = eph_secret.public_key();
         let eph_pub_bytes: Vec<u8> = eph_pub.to_encoded_point(false).as_bytes().to_vec();
 

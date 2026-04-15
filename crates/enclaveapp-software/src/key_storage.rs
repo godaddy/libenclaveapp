@@ -309,7 +309,7 @@ pub fn generate_and_save(
     }
 
     // Generate key
-    let secret_key = SecretKey::random(&mut rand::thread_rng());
+    let secret_key = SecretKey::random(&mut elliptic_curve::rand_core::OsRng);
     let public_key = secret_key.public_key();
 
     // SEC1 uncompressed public key (65 bytes: 0x04 || X || Y)
@@ -670,7 +670,7 @@ mod tests {
         metadata::ensure_dir(&dir).unwrap();
 
         // Generate a key and manually write it as a raw 32-byte file (old format)
-        let secret_key = SecretKey::random(&mut rand::thread_rng());
+        let secret_key = SecretKey::random(&mut elliptic_curve::rand_core::OsRng);
         let secret_bytes = secret_key.to_bytes();
         let key_path = dir.join("legacy.key");
         std::fs::write(&key_path, &*secret_bytes).unwrap();

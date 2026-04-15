@@ -66,7 +66,7 @@ fs2 = "0.4"
 keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"] }
 
 # Testing
-rand = "0.8"
+rand = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
