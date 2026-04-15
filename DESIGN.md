@@ -144,29 +144,34 @@ Not all backends provide the same level of key protection. The properties differ
 
 #### Signing key security
 
-Signing keys are long-lived identity keys. Their non-exportability is the core security property — if the private key cannot be extracted, it cannot be stolen or cloned.
+Signing keys are long-lived identity keys (e.g., SSH keys). The private key IS the hardware key — at Levels 1-3, the hardware security module performs the ECDSA signature operation directly. The private key material never exists in software, in memory, or on disk. This is the fundamental security property: the key cannot be stolen or cloned because it cannot be extracted.
 
-| Level | Backend | Private key exportable? | User presence for signing | Key storage |
-|:-----:|---------|:----------------------:|--------------------------|-------------|
-| **1** | macOS Secure Enclave (signed/entitled) | **No** — key generated inside SE hardware; private key physically cannot leave the chip. Even root cannot extract it. | Touch ID / biometric enforced by SE hardware per-operation. | Secure Enclave coprocessor. Requires code-signed app with `com.apple.developer.secure-enclave` entitlement. |
-| **2** | Windows TPM 2.0 | **No** — key created as non-exportable TPM object via CNG. Private key bound to the TPM. | Windows Hello (biometric/PIN) enforced via CNG `NCRYPT_UI_POLICY` per-operation. | TPM 2.0 chip. |
-| **3** | Linux TPM 2.0 | **No** — key created as TPM-resident via `tss-esapi`. | Not enforced (no standard Linux biometric API for TPM operations). | TPM 2.0 device (`/dev/tpmrm0`). Requires `tss2` libraries (glibc only). |
-| **4** | macOS CryptoKit (unsigned/dev) | **Yes (encrypted)** — private key `dataRepresentation` stored on disk, AES-256-GCM wrapped with a Keychain-stored wrapping key. Extractable if attacker has both disk access and Keychain access. | Not hardware-enforced (Keychain access control only). | Encrypted `.handle` file + macOS Keychain wrapping key. Fallback for unsigned/development builds. |
-| **5** | Software (Linux glibc) | **Yes (encrypted)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/{label}.key` encrypted via keyring. |
-| **6** | Software (Linux musl) | **Yes (plaintext)** — P-256 private key stored as a file with 0o600 permissions. No encryption at rest. | Not enforced. | `~/.config/{app}/keys/{label}.key` plaintext. |
+| Level | Backend | Who signs? | Private key exportable? | User presence | Key storage |
+|:-----:|---------|-----------|:----------------------:|---------------|-------------|
+| **1** | macOS Secure Enclave (signed/entitled) | **The SE hardware.** `sshenc` sends the data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` stored on disk is an opaque SE handle, not key material. | Touch ID / biometric enforced by SE hardware per-signature. | Secure Enclave coprocessor. Requires code-signed app with SE entitlement. |
+| **2** | Windows TPM 2.0 | **The TPM hardware.** CNG sends signing requests to the TPM via NCrypt. | **No** — key is a non-exportable TPM object. | Windows Hello (biometric/PIN) enforced per-signature via `NCRYPT_UI_POLICY`. | TPM 2.0 chip. |
+| **3** | Linux TPM 2.0 | **The TPM hardware.** Signing performed by the TPM via `tss-esapi`. | **No** — key is TPM-resident. | Not enforced (no standard Linux biometric API). | TPM 2.0 device (`/dev/tpmrm0`). glibc only. |
+| **4** | Software (Linux glibc) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
+| **5** | Software (Linux musl) | **Software.** Private key read from disk into memory. | **Yes (plaintext on disk)** — P-256 private key stored as a file with 0o600 permissions. | Not enforced. | `~/.config/{app}/keys/` plaintext. |
+
+**Note on macOS unsigned/development builds:** When the app is not code-signed (e.g., local `cargo build`), the Secure Enclave is not available. Signing falls through to the `enclaveapp-software` backend (Level 4 or 5), NOT to a non-SE CryptoKit key. There is no "CryptoKit unsigned signing" path — for signing, it's either the SE or software.
 
 #### Encryption key security
 
-Encryption keys protect cached secrets (AWS credentials, JWTs, npm tokens). These keys are typically shorter-lived and protect data that itself expires within minutes to hours. The key security matters, but the blast radius of key compromise is bounded by the expiration of the cached data.
+Encryption keys protect cached secrets (AWS credentials, JWTs, npm tokens). Like signing, at Levels 1-3 the hardware performs the ECDH key agreement internally — the private key never exists in software. The encrypted data can only be decrypted on the same device that created the key.
 
-| Level | Backend | Private key exportable? | User presence for decrypt | Cached data protection |
-|:-----:|---------|:----------------------:|--------------------------|----------------------|
-| **1** | macOS Secure Enclave (signed/entitled) | **No** — ECDH key agreement happens inside SE hardware. Decryption requires the SE to perform the key agreement step. | Touch ID / biometric can be required per-decrypt via access policy. | Ciphertext on disk can only be decrypted by the SE that created the key. Even with full disk access, cached credentials cannot be recovered without the SE. |
-| **2** | Windows TPM 2.0 | **No** — ECDH key agreement performed by TPM. | Windows Hello can be required per-decrypt. | Ciphertext only decryptable on the machine with the TPM that created the key. |
-| **3** | Linux TPM 2.0 | **No** — ECDH performed by TPM via `tss-esapi`. | Not enforced. | Same machine-binding as Windows TPM. |
-| **4** | macOS CryptoKit (unsigned/dev) | **Yes (encrypted)** — same as signing Level 4. | Not hardware-enforced. | Cached credentials are safe if the Keychain is protected, but a local attacker with Keychain access can decrypt them. |
-| **5** | Software (Linux glibc) | **Yes (encrypted)** — same as signing Level 5. | Not enforced. | Keyring-encrypted key protects cache at rest. |
-| **6** | Software (Linux musl) | **Yes (plaintext)** — same as signing Level 6. | Not enforced. | Cache protection relies entirely on filesystem permissions. |
+The blast radius of encryption key compromise is further bounded by the expiration of the cached data (typically minutes to hours).
+
+| Level | Backend | Who decrypts? | Private key exportable? | User presence | Cached data protection |
+|:-----:|---------|--------------|:----------------------:|---------------|----------------------|
+| **1** | macOS Secure Enclave (signed/entitled) | **The SE hardware.** ECDH key agreement happens inside the SE. The shared secret is derived internally; only the AES-GCM decryption of the ciphertext body happens in software. | **No** — impossible. | Touch ID / biometric can be required per-decrypt. | Ciphertext on disk can only be decrypted by the SE that created the key. Full disk access is insufficient without the SE. |
+| **2** | Windows TPM 2.0 | **The TPM hardware** performs ECDH. | **No** — TPM-bound. | Windows Hello can be required per-decrypt. | Only decryptable on the same machine's TPM. |
+| **3** | Linux TPM 2.0 | **The TPM hardware** via `tss-esapi`. | **No** — TPM-bound. | Not enforced. | Same machine-binding as Windows TPM. |
+| **4** | macOS CryptoKit (unsigned/dev) | **Software.** CryptoKit P-256 key (not SE-bound) performs ECDH. Private key's `dataRepresentation` stored on disk, AES-256-GCM wrapped with a Keychain-stored wrapping key. | **Yes (encrypted at rest)** — extractable if attacker has disk access + Keychain access. | Not hardware-enforced (Keychain ACL only). | Cache safe if Keychain is protected. Local attacker with Keychain access can decrypt. |
+| **5** | Software (Linux glibc) | **Software.** P-256 key decrypted from keyring. | **Yes (encrypted at rest)** — keyring-protected. | Not enforced. | Keyring-encrypted key protects cache at rest. |
+| **6** | Software (Linux musl) | **Software.** P-256 key read from disk. | **Yes (plaintext on disk)** — 0o600 permissions only. | Not enforced. | Cache protection relies entirely on filesystem permissions. |
+
+**Note on macOS unsigned/development encryption:** Unlike signing, the unsigned path for encryption DOES use CryptoKit P-256 (not SE-bound) with Keychain wrapping (Level 4). This is because the ECIES encryption scheme needs a persistent key agreement key, and CryptoKit provides one with reasonable protection via the Keychain. The signing path does not use this approach because SSH keys are long-lived identities where the "extractable" property is unacceptable even for development.
 
 #### macOS signed vs. unsigned
 
