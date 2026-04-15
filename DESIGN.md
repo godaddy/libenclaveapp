@@ -136,7 +136,13 @@ This format is consistent across all backends — a ciphertext produced by the S
 | Linux | x86_64 (musl) | None | `enclaveapp-software` (software fallback) |
 | Linux | ARM64 (musl) | None | `enclaveapp-software` (software fallback) |
 
-All architectures support both signing and encryption. Intel Macs (x86_64) and macOS VMs without Secure Enclave passthrough are **not supported** — Apple Silicon with a Secure Enclave is required for macOS.
+All architectures support both signing and encryption.
+
+**Minimum OS requirements and hardware security guarantees:**
+
+- **macOS:** Apple Silicon required (Secure Enclave always present). Intel Macs and macOS VMs without SE passthrough are not supported.
+- **Windows:** Windows 11 required. Windows 11 mandates TPM 2.0, so hardware-backed keys are guaranteed on every supported installation. Windows 10 (EOL October 2025) is not supported — it does not require TPM 2.0.
+- **Linux:** TPM 2.0 used when available (glibc only, via `tss-esapi`). Falls back to software keys when no TPM is present. No minimum OS version — TPM availability depends on hardware and kernel configuration.
 
 ### Security levels
 
