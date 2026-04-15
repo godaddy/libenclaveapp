@@ -29,14 +29,13 @@ The adapter selects the most secure integration automatically: Type 1 > Type 2 >
 
 ## Platform support
 
-| OS | Architecture | Hardware security | Signing key exportable? | Encryption key exportable? |
-|---|---|---|:---:|:---:|
-| macOS (signed app) | Apple Silicon | Secure Enclave | **No** | **No** |
-| macOS (unsigned/dev) | Apple Silicon | Keychain-wrapped | Yes (encrypted) | Yes (encrypted) |
-| Windows | x64, ARM64 | TPM 2.0 | **No** | **No** |
-| Linux (glibc) | x64, ARM64 | TPM 2.0 | **No** | **No** |
-| Linux (glibc, no TPM) | x64, ARM64 | Keyring-encrypted | Yes (encrypted) | Yes (encrypted) |
-| Linux (musl) | x64, ARM64 | None | Yes (plaintext) | Yes (plaintext) |
+| OS | Architecture | Hardware security | Private key exportable? | Notes |
+|---|---|---|:---:|---|
+| macOS | Apple Silicon | Secure Enclave | **No** | SE does all crypto; handle blob AES-256-GCM wrapped via Keychain. Works signed and unsigned. |
+| Windows | x64, ARM64 | TPM 2.0 | **No** | Windows Hello for user presence. |
+| Linux (glibc) | x64, ARM64 | TPM 2.0 | **No** | Requires `tss2` libraries. |
+| Linux (glibc, no TPM) | x64, ARM64 | Keyring-encrypted | Yes (encrypted) | P-256 key encrypted via system keyring. |
+| Linux (musl) | x64, ARM64 | None | Yes (plaintext) | P-256 key on disk, 0o600 permissions only. |
 
 On Windows, enclave apps work across **PowerShell**, **Command Prompt**, **Git Bash**, and **WSL2** (Ubuntu, Debian). WSL2 accesses the host TPM via a JSON-RPC bridge.
 

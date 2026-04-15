@@ -136,7 +136,7 @@ This format is consistent across all backends — a ciphertext produced by the S
 | Linux | x86_64 (musl) | None | `enclaveapp-software` (software fallback) |
 | Linux | ARM64 (musl) | None | `enclaveapp-software` (software fallback) |
 
-All architectures support both signing and encryption.
+All architectures support both signing and encryption. Intel Macs (x86_64) and macOS VMs without Secure Enclave passthrough are **not supported** — Apple Silicon with a Secure Enclave is required for macOS.
 
 ### Security levels
 
@@ -144,16 +144,15 @@ Not all backends provide the same level of key protection. The properties differ
 
 #### Signing key security
 
-Signing keys are long-lived identity keys (e.g., SSH keys). At Levels 1-3, the hardware security module **is** the signer — the HSM performs the ECDSA signature operation directly and the private key material never exists in software, in memory, or on disk. At Level 4, the signing key is a CryptoKit P-256 key whose private material is encrypted at rest. At Levels 5-6, the key is a software P-256 key on disk.
+Signing keys are long-lived identity keys (e.g., SSH keys). At Levels 1-3, the hardware security module **is** the signer — it performs the ECDSA signature operation directly and the private key material never exists in software, in memory, or on disk.
 
 | Level | Backend | Who signs? | Private key exportable? | User presence | Key storage |
 |:-----:|---------|-----------|:----------------------:|---------------|-------------|
-| **1** | macOS Secure Enclave (signed/entitled) | **The SE hardware.** `sshenc` sends data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` stored on disk is an opaque SE handle, not key material. | Touch ID / biometric enforced by SE hardware per-signature. | Secure Enclave coprocessor. Requires code-signed app with SE entitlement. |
+| **1** | macOS Secure Enclave | **The SE hardware.** `sshenc` sends data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. Works for both signed and unsigned binaries on Apple Silicon. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` on disk is an opaque SE handle (not key material), AES-256-GCM encrypted with a Keychain-stored wrapping key to prevent same-user handle theft. | Touch ID / biometric enforced by SE hardware per-signature (when access policy is set). | Secure Enclave coprocessor + AES-256-GCM wrapped handle on disk + Keychain wrapping key. |
 | **2** | Windows TPM 2.0 | **The TPM hardware.** CNG sends signing requests to the TPM via NCrypt. | **No** — key is a non-exportable TPM object. | Windows Hello (biometric/PIN) enforced per-signature via `NCRYPT_UI_POLICY`. | TPM 2.0 chip. |
 | **3** | Linux TPM 2.0 | **The TPM hardware.** Signing performed by the TPM via `tss-esapi`. | **No** — key is TPM-resident. | Not enforced (no standard Linux biometric API). | TPM 2.0 device (`/dev/tpmrm0`). glibc only. |
-| **4** | macOS CryptoKit (unsigned/dev) | **CryptoKit in software.** A regular CryptoKit P-256 key (not SE-bound) performs the ECDSA signature. The private key's `dataRepresentation` is stored on disk, encrypted with AES-256-GCM using a wrapping key stored in the macOS Keychain. | **Yes (encrypted at rest)** — extractable if attacker has both disk access and Keychain access. Not hardware-bound but encrypted at rest. | Not hardware-enforced (Keychain access control only). | Encrypted `.handle` file on disk + Keychain wrapping key. This is the fallback when the app is not code-signed or lacks SE entitlements (e.g., local development builds via `cargo build`). |
-| **5** | Software (Linux glibc) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing via the `p256` crate. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
-| **6** | Software (Linux musl) | **Software.** Private key read from disk into memory. | **Yes (plaintext on disk)** — P-256 private key stored as a file with 0o600 permissions. | Not enforced. | `~/.config/{app}/keys/` plaintext. |
+| **4** | Software (Linux glibc) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing via the `p256` crate. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
+| **5** | Software (Linux musl) | **Software.** Private key read from disk into memory. | **Yes (plaintext on disk)** — P-256 private key stored as a file with 0o600 permissions. | Not enforced. | `~/.config/{app}/keys/` plaintext. |
 
 #### Encryption key security
 
@@ -163,22 +162,25 @@ The blast radius of encryption key compromise is further bounded by the expirati
 
 | Level | Backend | Who decrypts? | Private key exportable? | User presence | Cached data protection |
 |:-----:|---------|--------------|:----------------------:|---------------|----------------------|
-| **1** | macOS Secure Enclave (signed/entitled) | **The SE hardware.** ECDH key agreement happens inside the SE. The shared secret is derived internally; only the AES-GCM decryption of the ciphertext body happens in software. | **No** — impossible. | Touch ID / biometric can be required per-decrypt. | Ciphertext on disk can only be decrypted by the SE that created the key. Full disk access is insufficient without the SE. |
+| **1** | macOS Secure Enclave | **The SE hardware.** ECDH key agreement happens inside the SE. The shared secret is derived internally; only the AES-GCM decryption of the ciphertext body happens in software. Handle blob AES-256-GCM encrypted via Keychain. | **No** — impossible. | Touch ID / biometric can be required per-decrypt. | Ciphertext on disk can only be decrypted by the SE that created the key. Full disk access is insufficient without the SE. |
 | **2** | Windows TPM 2.0 | **The TPM hardware** performs ECDH. | **No** — TPM-bound. | Windows Hello can be required per-decrypt. | Only decryptable on the same machine's TPM. |
 | **3** | Linux TPM 2.0 | **The TPM hardware** via `tss-esapi`. | **No** — TPM-bound. | Not enforced. | Same machine-binding as Windows TPM. |
-| **4** | macOS CryptoKit (unsigned/dev) | **CryptoKit in software.** CryptoKit P-256 key (not SE-bound) performs ECDH. Private key's `dataRepresentation` stored on disk, AES-256-GCM wrapped with a Keychain-stored wrapping key. | **Yes (encrypted at rest)** — extractable if attacker has disk access + Keychain access. | Not hardware-enforced (Keychain ACL only). | Cache safe if Keychain is protected. Local attacker with Keychain access can decrypt. |
-| **5** | Software (Linux glibc) | **Software.** P-256 key decrypted from keyring. | **Yes (encrypted at rest)** — keyring-protected. | Not enforced. | Keyring-encrypted key protects cache at rest. |
-| **6** | Software (Linux musl) | **Software.** P-256 key read from disk. | **Yes (plaintext on disk)** — 0o600 permissions only. | Not enforced. | Cache protection relies entirely on filesystem permissions. |
+| **4** | Software (Linux glibc) | **Software.** P-256 key decrypted from keyring. | **Yes (encrypted at rest)** — keyring-protected. | Not enforced. | Keyring-encrypted key protects cache at rest. |
+| **5** | Software (Linux musl) | **Software.** P-256 key read from disk. | **Yes (plaintext on disk)** — 0o600 permissions only. | Not enforced. | Cache protection relies entirely on filesystem permissions. |
 
-#### macOS signed vs. unsigned
+#### macOS: Secure Enclave access and key persistence
 
-All supported macOS hardware (Apple Silicon) has a Secure Enclave. The SE is always physically present. However, **CryptoKit requires the app to be code-signed with the Secure Enclave entitlement** to create SE-resident keys. An unsigned app cannot use the SE even though the hardware is there.
+All supported macOS hardware (Apple Silicon) has a Secure Enclave, and **CryptoKit's `SecureEnclave.P256` APIs work without code signing or entitlements**. Both signed and unsigned builds get full SE access — the SE creates the key and performs all signing/key agreement operations. The private key material never leaves the hardware.
 
-The `enclaveapp-apple` backend auto-detects at runtime whether it can access the SE:
+The `com.apple.developer.secure-enclave` entitlement is a **Security.framework** concept for Keychain-stored SE keys (`SecItemAdd` with `kSecAttrTokenIDSecureEnclave`). Since libenclaveapp uses CryptoKit's `dataRepresentation` for key persistence (not Security.framework), the entitlement is not required.
 
-- **Signed/entitled (Level 1):** The app is code-signed with a Developer ID certificate and has the `com.apple.developer.secure-enclave` entitlement. Keys are created inside SE hardware via `SecureEnclave.P256.Signing.PrivateKey` / `SecureEnclave.P256.KeyAgreement.PrivateKey`. The SE performs all signing and key agreement operations. The private key physically cannot be extracted. This is the production path for distributed binaries.
+**Handle protection for unsigned apps:** The SE's `dataRepresentation` is an opaque handle blob that allows the same device's SE to reconstruct the key reference. While the private key itself cannot be extracted from this blob, the blob is stored as a file on disk — and another process running as the same user could copy it and use it to request SE operations. To mitigate this same-user attack, we wrap the `dataRepresentation` with **AES-256-GCM** encryption before writing to disk. The AES wrapping key is stored in the **macOS Keychain**, which provides per-application access control.
 
-- **Unsigned/development (Level 4):** The app is not code-signed or lacks the SE entitlement (typical during local development with `cargo build`). CryptoKit's `SecureEnclave.isAvailable` returns false because the entitlement is missing, even though the SE hardware is present. Keys are created via regular `CryptoKit.P256` (not SE-bound). CryptoKit performs signing and key agreement operations in software. The private key's `dataRepresentation` is encrypted with AES-256-GCM using a wrapping key stored in the macOS Keychain, then written to disk as a `.handle` file. This provides encryption at rest but the keys are not hardware-bound.
+- **Signed app (code-signed with Developer ID):** The Keychain ACL is bound to the app's code signature. Other apps cannot access the wrapping key. Handle files are protected against same-user attacks.
+
+- **Unsigned app (e.g., Homebrew, `cargo build`):** The Keychain ACL is bound to the binary's hash. The user must authorize access on first use (password/biometric prompt) and click "Always Allow." **After a Homebrew update**, the binary hash changes, invalidating the Keychain ACL — the user must re-authorize. This is a UX trade-off, not a security degradation: the SE still performs all cryptographic operations, and the wrapping key prevents other processes from using the handle.
+
+In both cases, the SE performs all ECDSA signing and ECDH key agreement. The AES-256-GCM wrapping layer protects the persistence of the SE handle, not the cryptographic operations themselves.
 
 #### macOS signed vs. unsigned
 
