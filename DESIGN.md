@@ -260,9 +260,17 @@ The adapter selects the least-secret-exposing integration automatically: Type 1 
 
 ### Type 4: CredentialSource
 
-The enclave app does not wrap a target application. Instead, it **is** the credential source — it obtains, encrypts, and caches credentials that other enclave apps (Type 1, 2, or 3) consume. A Type 4 app provides secrets via a CLI command (`sso-jwt get`), a NAPI binding, or a local API, and other tools call it as a credential provider.
+The enclave app does not wrap a target application. Instead, it **is** the credential source — it obtains credentials from an external provider (OAuth, SAML, Vault, etc.), encrypts and caches them locally with hardware-backed storage, and hands them to any consumer that asks.
 
-This is the most composable integration: a single Type 4 app can serve multiple Type 1/2/3 apps. For example, `sso-jwt` obtains a JWT via the OAuth 2.0 Device Authorization Grant, caches it with hardware-backed encryption, and supplies it to `npmenc` (Type 2) as a token source or to a `credential_process` wrapper (Type 1) as a credential provider.
+Unlike Types 1-3, a Type 4 app provides **no guardrails on how the credential is used after delivery**. The consumer could be a Type 1/2/3 enclave app that delivers the credential securely, or it could be a shell script that exports it to an environment variable, or a user who pipes it to a file. The Type 4 app's responsibility ends at secure acquisition and caching — it cannot enforce how the credential is consumed.
+
+This makes Type 4 the most composable but least controlled integration. A single Type 4 app can serve many consumers:
+
+- **Best case:** A Type 1/2/3 enclave app consumes the credential with proper delivery guardrails (e.g., `npmenc` uses `sso-jwt` as a token source with env var interpolation)
+- **Adequate case:** A user runs `sso-jwt get | pbcopy` to get a credential for manual use
+- **Worst case:** A CI script stores the credential in a plaintext file — the Type 4 app cannot prevent this
+
+The security value of a Type 4 app is in the **acquisition and caching** layers: hardware-encrypted storage at rest, automatic expiration and refresh, risk-level-based lifecycle management, and biometric-gated access. What happens after `get` returns the credential is outside its control.
 
 ### Consumer mapping
 

@@ -22,16 +22,16 @@ A new enclave app needs only its domain-specific logic. Everything else is share
 
 ## Integration types
 
-Every enclave app falls into one of four categories. Types 1-3 classify how secrets are delivered to a target application; Type 4 is a credential source that other enclave apps consume. See [DESIGN.md](DESIGN.md#application-integration-types) for full definitions.
+Every enclave app falls into one of four categories. Types 1-3 provide **controlled delivery** with guardrails that prevent user mistakes. Type 4 is a **credential source** that securely acquires and caches credentials but cannot control what happens after delivery. See [DESIGN.md](DESIGN.md#application-integration-types) for full definitions.
 
-| Type | Strategy | How it works | Security | Example |
-|:----:|----------|-------------|----------|---------|
-| **1** | [HelperTool](DESIGN.md#type-1-helpertool) | Target app calls back for credentials on demand via a protocol (agent socket, `credential_process`) | Secrets never leave the enclave app's process | [sshenc](https://github.com/godaddy/sshenc) — SSH agent, [awsenc](https://github.com/godaddy/awsenc) — AWS CLI |
-| **2** | [EnvInterpolation](DESIGN.md#type-2-envinterpolation) | Config file with `${ENV_VAR}` placeholders; secrets injected as env vars via `execve()` | Secrets in memory only, never on disk | [npmenc](https://github.com/godaddy/npmenc) — npm/npx wrapper |
-| **3** | [TempMaterializedConfig](DESIGN.md#type-3-tempmaterializedconfig) | Secrets written to a temp file (0o600), path passed via `--config`, deleted after exit | Secrets briefly on disk with restricted permissions | Any app with no plugin or env var support |
-| **4** | [CredentialSource](DESIGN.md#type-4-credentialsource) | Obtains, encrypts, and caches credentials for other enclave apps to consume | Hardware-encrypted credential cache | [sso-jwt](https://github.com/godaddy/sso-jwt) — JWT provider for Type 1/2/3 apps |
+| Type | Strategy | How it works | Delivery guardrails | Example |
+|:----:|----------|-------------|:-------------------:|---------|
+| **1** | [HelperTool](DESIGN.md#type-1-helpertool) | Target app calls back for credentials on demand via a protocol | **Strongest** — secrets never leave the enclave app's process | [sshenc](https://github.com/godaddy/sshenc), [awsenc](https://github.com/godaddy/awsenc) |
+| **2** | [EnvInterpolation](DESIGN.md#type-2-envinterpolation) | Config with `${ENV_VAR}` placeholders; secrets injected via `execve()` | **Strong** — secrets in memory only, never on disk | [npmenc](https://github.com/godaddy/npmenc) |
+| **3** | [TempMaterializedConfig](DESIGN.md#type-3-tempmaterializedconfig) | Secrets written to temp file (0o600), deleted after exit | **Moderate** — secrets briefly on disk with restricted permissions | Any app with no plugin or env var support |
+| **4** | [CredentialSource](DESIGN.md#type-4-credentialsource) | Obtains and caches credentials; hands them to any consumer | **None** — consumer decides what to do with the secret | [sso-jwt](https://github.com/godaddy/sso-jwt) |
 
-For Types 1-3, the adapter automatically selects the most secure strategy available: Type 1 > Type 2 > Type 3. Type 4 apps compose with any of them.
+Types 1-3 wrap a target application and control the secret's entire lifecycle. The adapter selects the most secure: Type 1 > Type 2 > Type 3. Type 4 apps secure the **acquisition and storage** of credentials but cannot prevent consumers from exporting them to env vars, piping to files, or other uncontrolled use.
 
 ## Built with libenclaveapp
 

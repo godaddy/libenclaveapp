@@ -67,14 +67,14 @@ Rust workspace under `crates/`:
 
 Every enclave app is classified by how it delivers secrets to the target application. See [DESIGN.md — Application integration types](DESIGN.md#application-integration-types) for full definitions.
 
-| Type | Name | Secret exposure | Example apps |
-|------|------|----------------|-------------|
-| **Type 1** | HelperTool | Secrets never leave process | sshenc (SSH agent), awsenc (`credential_process`) |
-| **Type 2** | EnvInterpolation | Secrets in env vars via `execve()` | npmenc (`.npmrc` `${NPM_TOKEN}`) |
-| **Type 3** | TempMaterializedConfig | Secrets briefly on disk (0o600) | Apps with no plugin or env var support |
-| **Type 4** | CredentialSource | Hardware-encrypted credential cache | sso-jwt (JWT provider for Type 1/2/3 apps) |
+| Type | Name | Delivery guardrails | Example apps |
+|------|------|:------------------:|-------------|
+| **Type 1** | HelperTool | Strongest — secrets never leave process | sshenc (SSH agent), awsenc (`credential_process`) |
+| **Type 2** | EnvInterpolation | Strong — secrets in env vars via `execve()` | npmenc (`.npmrc` `${NPM_TOKEN}`) |
+| **Type 3** | TempMaterializedConfig | Moderate — secrets briefly on disk (0o600) | Apps with no plugin or env var support |
+| **Type 4** | CredentialSource | None — consumer controls what happens | sso-jwt (credential provider for any consumer) |
 
-Types 1-3 deliver secrets to a target app; the adapter selects the most secure: Type 1 > Type 2 > Type 3. Type 4 apps are credential sources that other enclave apps consume.
+Types 1-3 wrap a target app and control the secret's lifecycle; the adapter selects the most secure: Type 1 > Type 2 > Type 3. Type 4 apps secure credential acquisition and caching but hand the secret to consumers without controlling its subsequent use.
 
 ## Platform
 

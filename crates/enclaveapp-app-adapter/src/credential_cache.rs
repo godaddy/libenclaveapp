@@ -4,8 +4,15 @@
 //! Generic credential caching with lifecycle management for Type 4 (CredentialSource) apps.
 //!
 //! Provides the common infrastructure for any enclave app that obtains credentials
-//! from an external source, encrypts and caches them locally, and serves them to
-//! other enclave apps on demand.
+//! from an external source, encrypts and caches them locally, and hands them to
+//! any consumer that asks.
+//!
+//! **Security boundary:** A Type 4 app secures the *acquisition and storage* of
+//! credentials (hardware-encrypted cache, automatic expiration, risk-level-based
+//! lifecycle). It provides **no guardrails on delivery** — once a credential is
+//! handed out via `get`, the consumer can export it to an environment variable,
+//! pipe it to a file, or use it through a Type 1/2/3 enclave app. Types 1-3
+//! control the entire delivery lifecycle; Type 4 does not.
 //!
 //! # Lifecycle
 //!
