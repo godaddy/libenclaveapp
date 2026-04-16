@@ -1,115 +1,139 @@
 # libenclaveapp
 
-Shared Rust library for hardware-backed key management across macOS (Secure Enclave), Windows (TPM 2.0), Linux (TPM 2.0), and WSL. Provides signing (ECDSA P-256) and encryption (ECIES via ECDH P-256 + AES-256-GCM) with automatic platform detection.
+Build hardware-secured wrapper binaries for any application — from SSH agents to npm registries — with minimal code and maximum platform coverage.
 
-## What it does
+## The problem
 
-`libenclaveapp` is the foundation for building **enclave apps** — thin wrappers that deliver hardware-protected secrets to target applications. The library handles platform detection, key lifecycle, encrypted storage, and process launching so each app only needs its domain-specific logic.
+Every application that handles secrets — SSH keys, API tokens, cloud credentials, registry auth — stores them as plaintext files on disk. An attacker with user-level access can steal them silently.
 
-## Consuming applications
+Hardware security modules (Secure Enclave, TPM 2.0) can make private keys non-exportable and operations require biometric confirmation, but integrating with each platform's HSM APIs is hundreds of hours of platform-specific work that every tool would have to repeat independently.
 
-| Application | Type | What it does |
-|---|---|---|
-| [sshenc](https://github.com/godaddy/sshenc) | [Type 1 (HelperTool)](DESIGN.md#type-1-helpertool) | Hardware-backed SSH key management via agent protocol |
-| [awsenc](https://github.com/godaddy/awsenc) | [Type 1 (HelperTool)](DESIGN.md#type-1-helpertool) | Encrypted AWS credential caching via `credential_process` |
-| [sso-jwt](https://github.com/godaddy/sso-jwt) | Credential source | Encrypted JWT caching for Type 1/2 apps |
-| [npmenc](https://github.com/godaddy/npmenc) | [Type 2 (EnvInterpolation)](DESIGN.md#type-2-envinterpolation) | Secure npm token wrapper via `.npmrc` env var interpolation |
+## The solution
 
-## Application integration types
+`libenclaveapp` provides a shared Rust substrate that handles all the hard parts — platform detection, HSM integration, key lifecycle, encrypted storage, process launching, config file management — so you can build a thin wrapper binary (an **enclave app**) that secures any target application with hardware-backed keys.
 
-Every enclave app is classified by how it delivers secrets to the target application. See [DESIGN.md](DESIGN.md#application-integration-types) for full definitions.
+A new enclave app needs only its domain-specific logic. Everything else is shared:
 
-| Type | Name | How secrets are delivered | Security |
-|------|------|--------------------------|----------|
-| **Type 1** | [HelperTool](DESIGN.md#type-1-helpertool) | Target app calls back for credentials on demand (agent protocol, `credential_process`) | Secrets never leave the enclave app's process |
-| **Type 2** | [EnvInterpolation](DESIGN.md#type-2-envinterpolation) | Config file with `${ENV_VAR}` placeholders; secrets injected as env vars via `execve()` | Secrets in memory only, never on disk |
-| **Type 3** | [TempMaterializedConfig](DESIGN.md#type-3-tempmaterializedconfig) | Secrets written to temp file (0o600), path passed via `--config` flag, file deleted after exit | Secrets briefly on disk with restricted permissions |
+- **Automatic platform detection** — Secure Enclave on macOS, TPM 2.0 on Windows, TPM or keyring on Linux, WSL bridge for cross-OS access
+- **Three integration strategies** — choose the right one for your target app and the library handles the rest
+- **Cross-platform from day one** — one codebase targets macOS Apple Silicon, Windows x64/ARM64, Linux x64/ARM64, and 7+ shell environments
+- **Reusable CI/CD** — shared GitHub Actions workflows for building, testing, and releasing across all platforms
+- **Shared infrastructure** — config block injection, path quoting, binary cache formats, TPM bridge servers, program resolution, and more
 
-The adapter selects the most secure integration automatically: Type 1 > Type 2 > Type 3.
+## Integration types
 
-## Platform support
+Every enclave app falls into one of three categories based on how it delivers secrets to the target application. See [DESIGN.md](DESIGN.md#application-integration-types) for full definitions.
 
-| OS | Architecture | Hardware security | Private key exportable? | Notes |
+| Type | Strategy | How it works | Security | Example |
+|:----:|----------|-------------|----------|---------|
+| **1** | [HelperTool](DESIGN.md#type-1-helpertool) | Target app calls back for credentials on demand via a protocol (agent socket, `credential_process`) | Secrets never leave the enclave app's process | [sshenc](https://github.com/godaddy/sshenc) — SSH agent, [awsenc](https://github.com/godaddy/awsenc) — AWS CLI |
+| **2** | [EnvInterpolation](DESIGN.md#type-2-envinterpolation) | Config file with `${ENV_VAR}` placeholders; secrets injected as env vars via `execve()` | Secrets in memory only, never on disk | [npmenc](https://github.com/godaddy/npmenc) — npm/npx wrapper |
+| **3** | [TempMaterializedConfig](DESIGN.md#type-3-tempmaterializedconfig) | Secrets written to a temp file (0o600), path passed via `--config`, deleted after exit | Secrets briefly on disk with restricted permissions | Any app with no plugin or env var support |
+
+The adapter automatically selects the most secure strategy available: Type 1 > Type 2 > Type 3.
+
+## Built with libenclaveapp
+
+| Application | Type | What it does | Lines of app-specific code |
+|---|:---:|---|---|
+| [sshenc](https://github.com/godaddy/sshenc) | 1 | Hardware-backed SSH key management via agent protocol | ~3,000 |
+| [awsenc](https://github.com/godaddy/awsenc) | 1 | Encrypted AWS credential caching via `credential_process` | ~2,500 |
+| [sso-jwt](https://github.com/godaddy/sso-jwt) | — | Encrypted JWT caching (credential source for Type 1/2 apps) | ~2,000 |
+| [npmenc](https://github.com/godaddy/npmenc) | 2 | Secure npm/npx token wrapper via `.npmrc` env var interpolation | ~2,500 |
+
+Each app is a thin layer of domain logic on top of ~15,000 lines of shared infrastructure.
+
+## Platform and environment support
+
+### Hardware security
+
+| OS | Architecture | Hardware | Private key exportable? | Notes |
 |---|---|---|:---:|---|
-| macOS | Apple Silicon | Secure Enclave | **No** | SE does all crypto; handle blob AES-256-GCM wrapped via Keychain. Works signed and unsigned. |
-| Windows | x64, ARM64 | TPM 2.0 | **No** | Windows Hello for user presence. |
-| Linux (glibc) | x64, ARM64 | TPM 2.0 | **No** | Requires `tss2` libraries. |
-| Linux (glibc, no TPM) | x64, ARM64 | Keyring-encrypted | Yes (encrypted) | P-256 key encrypted via system keyring. |
-| Linux (musl) | x64, ARM64 | None | Yes (plaintext) | P-256 key on disk, 0o600 permissions only. |
+| macOS | Apple Silicon | Secure Enclave | **No** — SE does all crypto | Handle blob AES-256-GCM wrapped via Keychain. Works signed and unsigned. |
+| Windows | x64, ARM64 | TPM 2.0 | **No** — TPM-bound | Windows Hello for user presence. |
+| Linux (glibc) | x64, ARM64 | TPM 2.0 | **No** — TPM-bound | Requires `tss2` libraries. |
+| Linux (glibc, no TPM) | x64, ARM64 | System keyring | Encrypted at rest | P-256 key encrypted via D-Bus Secret Service. |
+| WSL2 (Ubuntu, Debian) | x64 | Windows host TPM | **No** — TPM-bound | JSON-RPC bridge to Windows host for encryption; agent bridge for SSH signing. |
 
-On Windows, enclave apps work across **PowerShell**, **Command Prompt**, **Git Bash**, and **WSL2** (Ubuntu, Debian). WSL2 accesses the host TPM via a JSON-RPC bridge.
+macOS requires Apple Silicon (Secure Enclave always present). Windows requires TPM 2.0 (guaranteed on Windows 11). Linux without TPM requires a system keyring (D-Bus Secret Service). See [DESIGN.md — Security levels](DESIGN.md#security-levels) for the full analysis.
 
-See [DESIGN.md — Platform support](DESIGN.md#platform-support) for the full platform matrix, [security levels](DESIGN.md#security-levels), and [Windows shell environment details](DESIGN.md#windows-shell-environments).
+### Signing and encryption capabilities
 
-## Cryptography
+| Platform | Signing | Encryption | Backend |
+|---|:---:|:---:|---|
+| macOS | Yes | Yes | CryptoKit via Swift bridge |
+| Windows | Yes | Yes | CNG NCrypt/BCrypt |
+| Linux (TPM) | Yes | Yes | `tss-esapi` |
+| Linux (keyring) | Yes | Yes | `p256`/`aes-gcm` + system keyring |
+| WSL | App-dependent | Yes | JSON-RPC bridge to Windows host |
 
-All backends use **ECDSA P-256** (secp256r1) — the only curve universally supported by the Secure Enclave, Windows TPM, and Linux TPM. This provides **128 bits of classical security**.
+### Shell environments
 
-- **Signing:** ECDSA with SHA-256 (DER-encoded)
-- **Encryption:** ECIES — ephemeral ECDH P-256 + X9.63 KDF + AES-256-GCM
+Enclave apps are native binaries tested across every major shell:
 
-P-256 is **not post-quantum secure**, but the data protected by enclave apps (cached credentials, session tokens) is short-lived (minutes to hours), bounding the practical risk. See [DESIGN.md — Cryptographic primitives](DESIGN.md#cryptographic-primitives) for the full analysis.
+| Shell | Binary invocation | Shell-init / completions | Env var passthrough (Type 2) |
+|-------|:-:|:-:|:-:|
+| bash (3.2 + 5.3) | pass | pass | pass |
+| zsh | pass | pass | pass |
+| fish | pass | pass | pass |
+| tcsh | pass | — | — |
+| dash (POSIX sh) | pass | — | pass |
+| nushell | pass | — | — |
+
+On Windows: **PowerShell**, **Command Prompt**, **Git Bash**, and **WSL2** (Ubuntu, Debian). See [DESIGN.md — Shell compatibility](DESIGN.md#shell-compatibility) and [Windows shell environments](DESIGN.md#windows-shell-environments).
+
+### Cryptography
+
+All backends use **ECDSA P-256** — the only curve supported by all three hardware targets (Secure Enclave, Windows TPM, Linux TPM). This provides **128 bits of classical security**. P-256 is not post-quantum secure, but the data protected by enclave apps is short-lived (minutes to hours). See [DESIGN.md — Cryptographic primitives](DESIGN.md#cryptographic-primitives).
 
 ## Workspace crates
 
-| Crate | Purpose |
+| Crate | What it provides |
 |---|---|
-| [enclaveapp-core](crates/enclaveapp-core/) | Traits, types, metadata, config block injection, path quoting, errors |
-| [enclaveapp-app-storage](crates/enclaveapp-app-storage/) | App-scoped encryption/signing with automatic platform detection |
-| [enclaveapp-app-adapter](crates/enclaveapp-app-adapter/) | Generic secret delivery: binding/secret stores, program resolver, process launcher, temp config |
-| [enclaveapp-apple](crates/enclaveapp-apple/) | macOS Secure Enclave backend via CryptoKit Swift bridge |
-| [enclaveapp-windows](crates/enclaveapp-windows/) | Windows TPM 2.0 backend via CNG (NCrypt/BCrypt) |
-| [enclaveapp-linux-tpm](crates/enclaveapp-linux-tpm/) | Linux TPM 2.0 backend via `tss-esapi` |
-| [enclaveapp-keyring](crates/enclaveapp-keyring/) | keyring-backed backend for Linux (keys encrypted via system keyring) |
-| [enclaveapp-test-software](crates/enclaveapp-test-software/) | test-only plaintext backend (not for production) |
-| [enclaveapp-wsl](crates/enclaveapp-wsl/) | WSL detection, distro config, shell-init helpers |
-| [enclaveapp-bridge](crates/enclaveapp-bridge/) | JSON-RPC bridge protocol and WSL client |
-| [enclaveapp-test-support](crates/enclaveapp-test-support/) | mock backends for tests |
+| [enclaveapp-core](crates/enclaveapp-core/) | Traits, types, metadata, config block injection, path quoting |
+| [enclaveapp-app-storage](crates/enclaveapp-app-storage/) | Automatic platform detection → encrypt/decrypt/sign |
+| [enclaveapp-app-adapter](crates/enclaveapp-app-adapter/) | Secret delivery substrate: binding/secret stores, program resolver, process launcher, temp config |
+| [enclaveapp-apple](crates/enclaveapp-apple/) | macOS Secure Enclave via CryptoKit Swift bridge |
+| [enclaveapp-windows](crates/enclaveapp-windows/) | Windows TPM 2.0 via CNG |
+| [enclaveapp-linux-tpm](crates/enclaveapp-linux-tpm/) | Linux TPM 2.0 via `tss-esapi` |
+| [enclaveapp-keyring](crates/enclaveapp-keyring/) | Linux keyring-encrypted P-256 keys |
+| [enclaveapp-wsl](crates/enclaveapp-wsl/) | WSL detection, distro config, managed shell blocks |
+| [enclaveapp-bridge](crates/enclaveapp-bridge/) | JSON-RPC bridge protocol + WSL client |
+| [enclaveapp-tpm-bridge](crates/enclaveapp-tpm-bridge/) | Shared TPM bridge server (parameterized per app) |
+| [enclaveapp-cache](crates/enclaveapp-cache/) | Shared binary cache format |
+| [enclaveapp-build-support](crates/enclaveapp-build-support/) | Shared build.rs for Windows PE resources |
 
 ## Feature flags
 
-Platform crates expose `signing` and `encryption` features. Applications enable only what they need.
+Platform crates expose `signing` and `encryption` features. Applications enable only what they need:
 
 ```toml
-# signing consumer
-enclaveapp-apple = { version = "0.1", features = ["signing"] }
+# SSH signing app
+enclaveapp-apple = { features = ["signing"] }
 
-# encryption consumer
-enclaveapp-apple = { version = "0.1", features = ["encryption"] }
+# Credential caching app
+enclaveapp-apple = { features = ["encryption"] }
 ```
 
-`enclaveapp-app-storage` sits above those platform crates and is the preferred integration layer for application code.
+`enclaveapp-app-storage` handles platform selection automatically and is the preferred integration point for application code.
 
 ## Architecture
 
 ```
-                  +------------------------+
-                  | enclaveapp-core        |
-                  | traits, types, metadata|
-                  +-----------+------------+
-                              |
-                  +-----------v------------+
-                  | enclaveapp-app-storage |
-                  | app bootstrap layer    |
-                  +-----+-------+-----+----+
-                        |       |     |
-        +---------------+       |     +------------------+
-        |                       |                        |
-+-------v--------+   +----------v---------+   +----------v---------+
-| enclaveapp-    |   | enclaveapp-        |   | enclaveapp-        |
-| apple          |   | windows            |   | linux-tpm          |
-| Secure Enclave |   | Windows TPM        |   | Linux TPM          |
-+----------------+   +----------+---------+   +----------+---------+
-                                |                       |
-                     +----------v---------+   +---------v---------+
-                     | enclaveapp-bridge  |   | enclaveapp-       |
-                     | WSL JSON-RPC client|   | keyring           |
-                     +----------+---------+   | keyring backend   |
-                                |             +-------------------+
-                     +----------v---------+
-                     | enclaveapp-wsl     |
-                     | WSL install/shell  |
-                     +--------------------+
+your enclave app (thin domain logic)
+  │
+  ├── enclaveapp-app-adapter       binding/secret stores, resolver, launcher
+  │
+  ├── enclaveapp-app-storage       platform-detected encrypt/decrypt/sign
+  │     ├── enclaveapp-apple       Secure Enclave (macOS)
+  │     ├── enclaveapp-windows     TPM 2.0 (Windows)
+  │     ├── enclaveapp-linux-tpm   TPM 2.0 (Linux)
+  │     ├── enclaveapp-keyring     keyring-encrypted keys (Linux fallback)
+  │     └── enclaveapp-bridge      WSL → Windows TPM bridge
+  │
+  ├── enclaveapp-tpm-bridge        shared bridge server binary
+  ├── enclaveapp-cache             shared binary cache format
+  └── enclaveapp-core              traits, types, metadata, utilities
 ```
 
 ## Building
@@ -123,15 +147,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## Feature flags
+## Documentation
 
-| Platform | Hardware | Signing | Encryption | Notes |
-|---|---|---|---|---|
-| macOS | Secure Enclave | Yes | Yes | CryptoKit via Swift bridge |
-| Windows | TPM 2.0 | Yes | Yes | CNG NCrypt/BCrypt |
-| Linux | TPM 2.0 | Yes | Yes | `tss-esapi` |
-| Linux (no TPM) | Keyring | Yes | Yes | keys encrypted via system keyring (D-Bus Secret Service) |
-| WSL | Windows TPM via bridge | App-dependent | Yes | encryption uses JSON-RPC bridge; ssh signing uses the sshenc agent bridge |
+- [DESIGN.md](DESIGN.md) — Architecture, security levels, platform details, cryptographic primitives, integration type taxonomy, shell compatibility
+- [docs/design-app-adapter-promotion.md](docs/design-app-adapter-promotion.md) — Adapter promotion and deduplication design
 
 ## License
 
