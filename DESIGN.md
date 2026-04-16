@@ -258,11 +258,17 @@ The target application can only read a static config file with no env var suppor
 
 The adapter selects the least-secret-exposing integration automatically: Type 1 > Type 2 > Type 3.
 
+### Type 4: CredentialSource
+
+The enclave app does not wrap a target application. Instead, it **is** the credential source — it obtains, encrypts, and caches credentials that other enclave apps (Type 1, 2, or 3) consume. A Type 4 app provides secrets via a CLI command (`sso-jwt get`), a NAPI binding, or a local API, and other tools call it as a credential provider.
+
+This is the most composable integration: a single Type 4 app can serve multiple Type 1/2/3 apps. For example, `sso-jwt` obtains a JWT via the OAuth 2.0 Device Authorization Grant, caches it with hardware-backed encryption, and supplies it to `npmenc` (Type 2) as a token source or to a `credential_process` wrapper (Type 1) as a credential provider.
+
 ### Consumer mapping
 
 | Consumer | Integration Type | Mechanism |
 |---|---|---|
 | `sshenc` | Type 1 (HelperTool) | SSH agent protocol; keys used in-process for signing |
 | `awsenc` | Type 1 (HelperTool) | `credential_process` directive in `~/.aws/config` |
-| `sso-jwt` | Credential source | Provides JWTs for Type 1 or Type 2 apps to consume |
 | `npmenc` | Type 2 (EnvInterpolation) | `.npmrc` with `${NPM_TOKEN}` placeholders |
+| `sso-jwt` | Type 4 (CredentialSource) | Obtains and caches JWTs; consumed by Type 1/2/3 apps as a token provider |

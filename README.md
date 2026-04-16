@@ -15,22 +15,23 @@ Hardware security modules (Secure Enclave, TPM 2.0) can make private keys non-ex
 A new enclave app needs only its domain-specific logic. Everything else is shared:
 
 - **Automatic platform detection** — Secure Enclave on macOS, TPM 2.0 on Windows, TPM or keyring on Linux, WSL bridge for cross-OS access
-- **Three integration strategies** — choose the right one for your target app and the library handles the rest
+- **Four integration strategies** — choose the right one for your target app and the library handles the rest
 - **Cross-platform from day one** — one codebase targets macOS Apple Silicon, Windows x64/ARM64, Linux x64/ARM64, and 7+ shell environments
 - **Reusable CI/CD** — shared GitHub Actions workflows for building, testing, and releasing across all platforms
 - **Shared infrastructure** — config block injection, path quoting, binary cache formats, TPM bridge servers, program resolution, and more
 
 ## Integration types
 
-Every enclave app falls into one of three categories based on how it delivers secrets to the target application. See [DESIGN.md](DESIGN.md#application-integration-types) for full definitions.
+Every enclave app falls into one of four categories. Types 1-3 classify how secrets are delivered to a target application; Type 4 is a credential source that other enclave apps consume. See [DESIGN.md](DESIGN.md#application-integration-types) for full definitions.
 
 | Type | Strategy | How it works | Security | Example |
 |:----:|----------|-------------|----------|---------|
 | **1** | [HelperTool](DESIGN.md#type-1-helpertool) | Target app calls back for credentials on demand via a protocol (agent socket, `credential_process`) | Secrets never leave the enclave app's process | [sshenc](https://github.com/godaddy/sshenc) — SSH agent, [awsenc](https://github.com/godaddy/awsenc) — AWS CLI |
 | **2** | [EnvInterpolation](DESIGN.md#type-2-envinterpolation) | Config file with `${ENV_VAR}` placeholders; secrets injected as env vars via `execve()` | Secrets in memory only, never on disk | [npmenc](https://github.com/godaddy/npmenc) — npm/npx wrapper |
 | **3** | [TempMaterializedConfig](DESIGN.md#type-3-tempmaterializedconfig) | Secrets written to a temp file (0o600), path passed via `--config`, deleted after exit | Secrets briefly on disk with restricted permissions | Any app with no plugin or env var support |
+| **4** | [CredentialSource](DESIGN.md#type-4-credentialsource) | Obtains, encrypts, and caches credentials for other enclave apps to consume | Hardware-encrypted credential cache | [sso-jwt](https://github.com/godaddy/sso-jwt) — JWT provider for Type 1/2/3 apps |
 
-The adapter automatically selects the most secure strategy available: Type 1 > Type 2 > Type 3.
+For Types 1-3, the adapter automatically selects the most secure strategy available: Type 1 > Type 2 > Type 3. Type 4 apps compose with any of them.
 
 ## Built with libenclaveapp
 
@@ -38,7 +39,7 @@ The adapter automatically selects the most secure strategy available: Type 1 > T
 |---|:---:|---|---|
 | [sshenc](https://github.com/godaddy/sshenc) | 1 | Hardware-backed SSH key management via agent protocol | ~3,000 |
 | [awsenc](https://github.com/godaddy/awsenc) | 1 | Encrypted AWS credential caching via `credential_process` | ~2,500 |
-| [sso-jwt](https://github.com/godaddy/sso-jwt) | — | Encrypted JWT caching (credential source for Type 1/2 apps) | ~2,000 |
+| [sso-jwt](https://github.com/godaddy/sso-jwt) | 4 | Encrypted JWT caching; credential source for other enclave apps | ~2,000 |
 | [npmenc](https://github.com/godaddy/npmenc) | 2 | Secure npm/npx token wrapper via `.npmrc` env var interpolation | ~2,500 |
 
 Each app is a thin layer of domain logic on top of ~15,000 lines of shared infrastructure.
