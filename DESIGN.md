@@ -254,7 +254,15 @@ The target application reads a config file that supports environment variable in
 
 ### Type 3: TempMaterializedConfig
 
-The target application can only read a static config file with no env var support. The enclave app writes secrets to a temp file with restricted permissions (0o600 on Unix), invokes the target with a config path override (e.g. `--config /tmp/xxx/app.conf`), and deletes the file after the process exits. This is the least secure integration because secrets briefly exist on disk, but the restricted permissions and automatic cleanup mitigate the risk.
+The target application can only read a static config file with no env var support. The enclave app writes secrets to a temp file with restricted permissions (0o600 on Unix), invokes the target with a config path override (e.g. `--config /tmp/xxx/app.conf`), and deletes the file after the process exits.
+
+Use `enclaveapp_app_adapter::create_platform_config()` to automatically select the best mechanism:
+
+- **Linux and WSL2**: Uses `memfd_create` to create an anonymous in-memory file with **no filesystem path at all**. The target app receives `/proc/self/fd/{N}` which looks like a regular file path. The secret never touches the filesystem, completely eliminating same-user temp file read attacks. The file is sealed (read-only) and cleaned up when the fd closes. WSL2 runs a real Linux kernel so `memfd_create` works natively.
+- **Windows (including Git Bash)**: Uses a temp file in a restricted temp directory with auto-cleanup on drop. The file is shredded (overwritten with zeros) before deletion.
+- **macOS**: Uses a temp file with 0o600 permissions and shred-on-drop.
+
+The platform-specific variants (`create_memfd_config` on Linux, `create_anonymous_config` on Windows) are also available directly for apps that need finer control.
 
 The adapter selects the least-secret-exposing integration automatically: Type 1 > Type 2 > Type 3.
 

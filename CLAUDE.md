@@ -63,6 +63,32 @@ Rust workspace under `crates/`:
 - All file writes are atomic (write to `.tmp`, rename into place) with directory locking via `flock`.
 - Apps pass their `app_name` (e.g., "sshenc", "awsenc") which determines the keys directory path and CNG key name prefix.
 
+### Process Hardening
+
+All enclave app binaries should call `enclaveapp_core::process::harden_process()` as the first line of `main()`. This disables core dumps to prevent secrets from appearing in crash dumps.
+
+For secret memory:
+- `enclaveapp_core::process::mlock_buffer()` locks memory pages to prevent paging to swap (the launcher does this automatically for env_overrides)
+- Credential strings should be zeroized after use via the `zeroize` crate
+
+### Type 3 Implementation Guide
+
+When building a Type 3 (TempMaterializedConfig) enclave app, use `enclaveapp_app_adapter::create_platform_config()` — it automatically selects the best mechanism:
+- **Linux and WSL2**: `memfd_create` — anonymous in-memory file, no filesystem path. Target app receives `/proc/self/fd/{N}`. Secrets never touch disk.
+- **Windows (including Git Bash)**: Temp file in restricted directory with auto-cleanup and shred-on-drop.
+- **macOS**: Temp file with 0o600 permissions and shred-on-drop.
+
+Platform-specific functions are also available directly: `create_memfd_config()` (Linux), `create_anonymous_config()` (Windows), `TempConfig::write()` (all platforms).
+
+### Type 4 Implementation Guide
+
+When building a Type 4 (CredentialSource) enclave app:
+- Use `enclaveapp_app_adapter::credential_cache` for lifecycle management (CredentialState, LifecyclePolicy)
+- Implement the `LifecyclePolicy` trait to define risk-level-based expiration tiers
+- Use `classify_credential()` to check cache state without decrypting (avoids unnecessary HSM operations)
+- Zeroize credential strings after printing or passing to child processes
+- Use `exec_with_credential_owned()` for the `exec` subcommand (auto-zeroizes)
+
 ## Application Integration Types
 
 Every enclave app is classified by how it delivers secrets to the target application. See [DESIGN.md — Application integration types](DESIGN.md#application-integration-types) for full definitions.
