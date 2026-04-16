@@ -5,14 +5,15 @@
 //!
 //! # Integration Types
 //!
-//! Every enclave app uses one of three integration strategies, classified by
-//! how secrets are delivered to the target application:
+//! Every enclave app uses one of four integration strategies:
 //!
-//! - [`IntegrationType::HelperTool`] — Target app calls back for credentials on demand
-//! - [`IntegrationType::EnvInterpolation`] — Config with `${ENV_VAR}` placeholders + secret env vars
-//! - [`IntegrationType::TempMaterializedConfig`] — Secrets written to temp file, path passed as flag
+//! - **Type 1** [`IntegrationType::HelperTool`] — Target app calls back for credentials on demand
+//! - **Type 2** [`IntegrationType::EnvInterpolation`] — Config with `${ENV_VAR}` placeholders + secret env vars
+//! - **Type 3** [`IntegrationType::TempMaterializedConfig`] — Secrets written to temp file, path passed as flag
+//! - **Type 4** (CredentialSource) — Obtains, caches, and serves credentials to other enclave apps
 //!
-//! The adapter automatically selects the least-secret-exposing type.
+//! For Types 1-3, the adapter automatically selects the least-secret-exposing type.
+//! Type 4 apps use the [`credential_cache`] module for lifecycle management.
 //!
 //! # Key Types
 //!
@@ -21,10 +22,13 @@
 //! - [`resolve_program`] — Find executables with alias/wrapper resolution
 //! - [`prepare_best_app_launch`] — Select integration and prepare process launch
 //! - [`run`] — Execute the prepared launch
+//! - [`credential_cache::LifecyclePolicy`] — Define credential expiration tiers for Type 4 apps
+//! - [`credential_cache::classify_credential`] — Determine credential state without decrypting
 
 pub mod app_spec;
 pub mod binding_store;
 pub mod common;
+pub mod credential_cache;
 pub mod error;
 pub mod execution_plan;
 pub mod launcher;

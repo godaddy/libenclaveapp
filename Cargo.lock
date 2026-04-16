@@ -313,6 +313,7 @@ dependencies = [
  "shlex",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
