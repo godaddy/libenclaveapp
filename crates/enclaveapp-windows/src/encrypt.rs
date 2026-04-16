@@ -371,21 +371,15 @@ unsafe fn ecies_decrypt(
 ) -> Result<Vec<u8>> {
     let eccpub_blob_type = to_wide("ECCPUBLICBLOB");
 
-    // Import ephemeral public key via the Microsoft Software Key Storage
-    // Provider. NCryptSecretAgreement needs NCrypt handles for both keys.
-    // The null/default provider doesn't support import — use MS_KEY_STORAGE_PROVIDER.
-    let sw_provider_name = to_wide("Microsoft Software Key Storage Provider");
-    let mut sw_provider = NCRYPT_PROV_HANDLE::default();
-    NCryptOpenStorageProvider(&mut sw_provider, PCWSTR(sw_provider_name.as_ptr()), 0).map_err(
-        |e| Error::DecryptFailed {
-            detail: format!("NCryptOpenStorageProvider(SW): {e}"),
-        },
-    )?;
+    // Import ephemeral public key via the Platform Crypto Provider — the
+    // same provider that holds the TPM private key. NCryptSecretAgreement
+    // requires both handles to come from the same provider.
+    let platform_prov = provider::open_provider()?;
 
     let eph_blob = sec1_to_eccpublic_blob(ephemeral_pub_sec1, BCRYPT_ECDH_PUBLIC_P256_MAGIC)?;
     let mut eph_key = NCRYPT_KEY_HANDLE::default();
     NCryptImportKey(
-        sw_provider,
+        platform_prov.as_prov(),
         NCRYPT_KEY_HANDLE::default(),
         PCWSTR(eccpub_blob_type.as_ptr()),
         None,
@@ -441,7 +435,7 @@ unsafe fn ecies_decrypt(
 
     drop(NCryptFreeObject(NCRYPT_HANDLE(secret.0)));
     drop(NCryptFreeObject(NCRYPT_HANDLE(eph_key.0)));
-    drop(NCryptFreeObject(NCRYPT_HANDLE(sw_provider.0)));
+    // platform_prov is freed by NcryptHandle Drop
 
     // AES-256-GCM decrypt.
     aes_gcm_decrypt(&derived_key, nonce, ct, tag)
@@ -762,5 +756,33 @@ mod tests {
             let _ = BCryptDestroyKey(key).ok();
             let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
         }
+    }
+
+    /// Full TPM-backed ECIES encrypt/decrypt roundtrip.
+    /// Skips if no TPM is available (CI without hardware).
+    #[test]
+    fn ecies_tpm_roundtrip() {
+        use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
+
+        let enc = TpmEncryptor::new("roundtrip-test");
+        if !enc.is_available() {
+            return;
+        }
+
+        let label = "rt-key";
+        let _ = enc.delete_key(label);
+
+        enc.generate(label, KeyType::Encryption, AccessPolicy::None)
+            .expect("generate");
+
+        let plaintext = b"ECIES roundtrip proof - encrypt then decrypt";
+        let ciphertext = enc.encrypt(label, plaintext).expect("encrypt");
+        assert!(ciphertext.len() > plaintext.len());
+        assert_eq!(ciphertext[0], ECIES_VERSION);
+
+        let recovered = enc.decrypt(label, &ciphertext).expect("decrypt");
+        assert_eq!(recovered, plaintext);
+
+        let _ = enc.delete_key(label);
     }
 }
