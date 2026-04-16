@@ -62,6 +62,12 @@ impl AppSigningBackend {
 
         #[cfg(target_os = "linux")]
         {
+            // On WSL, skip the libtss2 TPM probe — there's no local TPM.
+            // Go straight to the software keyring backend.
+            if enclaveapp_wsl::is_wsl() {
+                debug!("WSL detected, skipping local TPM probe for signing");
+                return Self::init_linux_software(&config);
+            }
             return Self::init_linux(&config);
         }
 
@@ -116,14 +122,13 @@ impl AppSigningBackend {
 
     #[cfg(target_os = "linux")]
     fn init_linux(config: &StorageConfig) -> Result<Self> {
-        let keys_dir = config
-            .keys_dir
-            .clone()
-            .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
-
         // Try hardware TPM first, fall back to software.
         #[cfg(target_env = "gnu")]
         if enclaveapp_linux_tpm::is_available() {
+            let keys_dir = config
+                .keys_dir
+                .clone()
+                .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
             let signer =
                 enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(&config.app_name, keys_dir);
             debug!("Linux TPM signing backend ready (app={})", config.app_name);
@@ -133,10 +138,19 @@ impl AppSigningBackend {
             });
         }
 
+        Self::init_linux_software(config)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn init_linux_software(config: &StorageConfig) -> Result<Self> {
         if !enclaveapp_keyring::has_keyring_feature() {
             return Err(crate::error::StorageError::NotAvailable);
         }
 
+        let keys_dir = config
+            .keys_dir
+            .clone()
+            .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
         let signer = enclaveapp_keyring::SoftwareSigner::with_keys_dir(&config.app_name, keys_dir);
         debug!(
             "Linux software signing backend ready with keyring (app={})",
