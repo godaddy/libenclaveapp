@@ -74,6 +74,31 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Patch version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Release version: $VERSION"
+          # Update workspace version in root Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          # Update all matching version entries in Cargo.lock
+          # Each workspace crate has a name + version block; update versions
+          # that match the old workspace version
+          OLD_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "$OLD_VERSION" != "$VERSION" ] && [ -f Cargo.lock ]; then
+            sed -i "/^name = \"${{ inputs.app_name }}/{n;s/^version = \"[^\"]*\"/version = \"$VERSION\"/}" Cargo.lock
+            # Also update sub-crates that share the workspace version
+            for toml in */Cargo.toml **/*/Cargo.toml; do
+              if grep -q 'version.workspace = true' "$toml" 2>/dev/null; then
+                crate_name=$(grep -m1 '^name = ' "$toml" | sed 's/name = "\(.*\)"/\1/')
+                if [ -n "$crate_name" ]; then
+                  sed -i "/^name = \"$crate_name\"/{n;s/^version = \"[^\"]*\"/version = \"$VERSION\"/}" Cargo.lock
+                fi
+              fi
+            done
+          fi
+          echo "Cargo.toml version: $(grep -m1 'version = ' Cargo.toml)"
+
       - name: Clone libenclaveapp
         shell: bash
         run: |
