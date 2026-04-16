@@ -132,8 +132,20 @@ fn save_private_key(
         });
     }
 
-    // Unencrypted fallback — only reachable when use_keyring is false (tests)
-    // or when keyring-storage feature is not compiled in.
+    // When keyring-storage isn't compiled (e.g. musl builds) but use_keyring
+    // is requested, refuse to store keys as plaintext.
+    #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
+    if config.use_keyring {
+        let _ = (key_path, secret_bytes, label);
+        return Err(Error::KeyOperation {
+            operation: "save_private_key".into(),
+            detail: "keyring-storage feature not available in this build; \
+                     refusing to store key as plaintext"
+                .into(),
+        });
+    }
+
+    // Unencrypted fallback — only reachable when use_keyring is false (tests).
     #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
     let _ = (config, label);
 

@@ -87,6 +87,7 @@ impl EncryptedFileSecretStore {
                 access_policy: AccessPolicy::None,
                 extra_bridge_paths: Vec::new(),
                 keys_dir: None,
+                force_keyring: false,
             })
             .map_err(|error| error.to_string())
         }) {
