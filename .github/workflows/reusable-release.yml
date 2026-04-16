@@ -25,6 +25,11 @@ on:
         required: false
         default: ''
         type: string
+      test_args:
+        description: 'Extra args appended after -- to cargo test (e.g., --test-threads=1)'
+        required: false
+        default: ''
+        type: string
       linux_deps:
         description: 'apt packages for Linux builds'
         required: false
@@ -144,7 +149,7 @@ jobs:
 
       - name: Test
         if: "!contains(matrix.target, 'aarch64-pc-windows') && !contains(matrix.target, 'musl')"
-        run: cargo test --workspace ${{ inputs.cargo_build_args }}
+        run: cargo test --workspace ${{ inputs.cargo_build_args }} ${{ inputs.test_args && format('-- {0}', inputs.test_args) || '' }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
