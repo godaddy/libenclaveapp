@@ -147,6 +147,19 @@ jobs:
           fi
           cargo build --workspace --release --target ${{ matrix.target }} ${{ inputs.cargo_build_args }} $exclude
 
+      - name: Start D-Bus and gnome-keyring (Linux)
+        if: runner.os == 'Linux' && !contains(matrix.target, 'musl')
+        run: |
+          if command -v gnome-keyring-daemon &>/dev/null; then
+            eval $(dbus-launch --sh-syntax)
+            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+            echo "test" | gnome-keyring-daemon --unlock --components=secrets 2>/dev/null || true
+          fi
+
+      - name: Canonicalize TMPDIR (macOS)
+        if: runner.os == 'macOS'
+        run: echo "TMPDIR=$(python3 -c 'import tempfile, os; print(os.path.realpath(tempfile.gettempdir()))')" >> "$GITHUB_ENV"
+
       - name: Test
         if: "!contains(matrix.target, 'aarch64-pc-windows') && !contains(matrix.target, 'musl')"
         run: cargo test --workspace ${{ inputs.cargo_build_args }} ${{ inputs.test_args && format('-- {0}', inputs.test_args) || '' }}
