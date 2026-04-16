@@ -837,23 +837,28 @@ esac
     #[test]
     fn bridge_list_keys_initializes_before_requesting() {
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        // Write response files to avoid shell quoting issues with embedded JSON.
+        let dir = std::env::temp_dir().join("bridge-list-keys-test");
+        fs::create_dir_all(&dir).unwrap();
+        let resp1 = dir.join("resp1.json");
+        let resp2 = dir.join("resp2.json");
+        fs::write(&resp1, "{\"result\":\"\",\"error\":null}\n").unwrap();
+        fs::write(
+            &resp2,
+            "{\"result\":\"[\\\"key1\\\",\\\"key2\\\"]\",\"error\":null}\n",
+        )
+        .unwrap();
         let script = temp_script(
             "list-keys.sh",
-            r#"#!/bin/sh
-read init_line
-case "$init_line" in
-  *'"method":"init_signing"'*) printf '{"result":"","error":null}\n' ;;
-  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
-esac
-read request_line
-case "$request_line" in
-  *'"method":"list_keys"'*) printf '{"result":"[\"key1\",\"key2\"]","error":null}\n' ;;
-  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
-esac
-"#,
+            &format!(
+                "#!/bin/sh\nread init_line\ncat {}\nread request_line\ncat {}\n",
+                resp1.display(),
+                resp2.display()
+            ),
         );
         let keys = bridge_list_keys(&script, "sshenc", "default", AccessPolicy::None).unwrap();
         assert_eq!(keys, vec!["key1".to_string(), "key2".to_string()]);
+        drop(fs::remove_dir_all(&dir));
         cleanup_script(&script);
     }
 

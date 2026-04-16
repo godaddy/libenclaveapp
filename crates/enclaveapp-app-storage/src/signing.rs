@@ -55,13 +55,13 @@ struct BridgeSignerWrapper {
 impl EnclaveKeyManager for BridgeSignerWrapper {
     fn generate(
         &self,
-        _label: &str,
+        label: &str,
         _key_type: enclaveapp_core::types::KeyType,
         _policy: enclaveapp_core::types::AccessPolicy,
     ) -> enclaveapp_core::Result<Vec<u8>> {
         // Key generation happens via init_signing on the bridge side.
         // Return the public key after init.
-        self.public_key(_label)
+        self.public_key(label)
     }
 
     fn public_key(&self, _label: &str) -> enclaveapp_core::Result<Vec<u8>> {
@@ -158,7 +158,7 @@ impl AppSigningBackend {
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = config;
-            Err(crate::error::StorageError::NotAvailable)
+            Err(StorageError::NotAvailable)
         }
     }
 
@@ -172,7 +172,7 @@ impl AppSigningBackend {
             enclaveapp_apple::SecureEnclaveSigner::with_keys_dir(&config.app_name, keys_dir);
 
         if !signer.is_available() {
-            return Err(crate::error::StorageError::NotAvailable);
+            return Err(StorageError::NotAvailable);
         }
 
         debug!(
@@ -194,7 +194,7 @@ impl AppSigningBackend {
         let signer = enclaveapp_windows::TpmSigner::with_keys_dir(&config.app_name, keys_dir);
 
         if !signer.is_available() {
-            return Err(crate::error::StorageError::NotAvailable);
+            return Err(StorageError::NotAvailable);
         }
 
         debug!("TPM signing backend ready (app={})", config.app_name,);
@@ -262,7 +262,7 @@ impl AppSigningBackend {
     #[cfg(target_os = "linux")]
     fn init_linux_keyring(config: &StorageConfig) -> Result<Self> {
         if !enclaveapp_keyring::has_keyring_feature() {
-            return Err(crate::error::StorageError::NotAvailable);
+            return Err(StorageError::NotAvailable);
         }
 
         let keys_dir = config

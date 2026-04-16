@@ -51,7 +51,7 @@ where
     Ok(())
 }
 
-#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn ensure_signing_key<S>(
     signer: &S,
     keys_dir: &Path,
