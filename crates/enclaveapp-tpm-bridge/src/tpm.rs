@@ -9,7 +9,7 @@
 //! On non-Windows platforms, all operations return an error at runtime.
 
 use enclaveapp_core::metadata;
-use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
+use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager, EnclaveSigner};
 use enclaveapp_core::types::{AccessPolicy, KeyType};
 use std::path::Path;
 
@@ -51,12 +51,39 @@ where
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn ensure_signing_key<S>(
+    signer: &S,
+    keys_dir: &Path,
+    key_label: &str,
+    policy: AccessPolicy,
+) -> Result<(), String>
+where
+    S: EnclaveSigner + EnclaveKeyManager,
+{
+    if signer.public_key(key_label).is_ok() {
+        match existing_policy(keys_dir, key_label) {
+            Some(existing) if existing != policy => {
+                signer
+                    .delete_key(key_label)
+                    .map_err(|e| format!("key deletion failed: {e}"))?;
+            }
+            _ => return Ok(()),
+        }
+    }
+
+    signer
+        .generate(key_label, KeyType::Signing, policy)
+        .map_err(|e| format!("key generation failed: {e}"))?;
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{ensure_key, metadata};
-    use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
+    use super::{ensure_key, ensure_signing_key, metadata};
+    use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager, EnclaveSigner};
     use enclaveapp_core::types::AccessPolicy;
-    use enclaveapp_windows::TpmEncryptor;
+    use enclaveapp_windows::{TpmEncryptor, TpmSigner};
 
     pub struct TpmStorage {
         encryptor: TpmEncryptor,
@@ -120,6 +147,73 @@ mod platform {
                 .map_err(|e| e.to_string())
         }
     }
+
+    pub struct TpmSigningStorage {
+        signer: TpmSigner,
+        key_label: String,
+    }
+
+    impl std::fmt::Debug for TpmSigningStorage {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TpmSigningStorage")
+                .field("key_label", &self.key_label)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl TpmSigningStorage {
+        pub fn new(
+            app_name: &str,
+            key_label: &str,
+            access_policy: AccessPolicy,
+        ) -> Result<Self, String> {
+            let signer = TpmSigner::new(app_name);
+
+            if !signer.is_available() {
+                return Err("TPM not available".to_string());
+            }
+
+            ensure_signing_key(
+                &signer,
+                &metadata::keys_dir(app_name),
+                key_label,
+                access_policy,
+            )?;
+
+            Ok(Self {
+                signer,
+                key_label: key_label.to_string(),
+            })
+        }
+
+        pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+            self.signer
+                .sign(&self.key_label, data)
+                .map_err(|e| e.to_string())
+        }
+
+        pub fn public_key(&self) -> Result<Vec<u8>, String> {
+            self.signer
+                .public_key(&self.key_label)
+                .map_err(|e| e.to_string())
+        }
+
+        pub fn list_keys(&self) -> Result<Vec<String>, String> {
+            self.signer.list_keys().map_err(|e| e.to_string())
+        }
+
+        pub fn delete(app_name: &str, key_label: &str) -> Result<(), String> {
+            let signer = TpmSigner::new(app_name);
+
+            if !signer.is_available() {
+                return Err("TPM not available".to_string());
+            }
+
+            signer
+                .delete_key(key_label)
+                .map_err(|e| format!("key delete failed: {e}"))
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -162,8 +256,51 @@ mod platform {
             Err("TPM bridge is only supported on Windows".to_string())
         }
     }
+
+    #[derive(Debug)]
+    pub struct TpmSigningStorage {
+        _app_name: String,
+        _key_label: String,
+        _access_policy: AccessPolicy,
+    }
+
+    impl TpmSigningStorage {
+        #[allow(clippy::unnecessary_wraps)]
+        pub fn new(
+            app_name: &str,
+            key_label: &str,
+            access_policy: AccessPolicy,
+        ) -> Result<Self, String> {
+            Ok(Self {
+                _app_name: app_name.to_string(),
+                _key_label: key_label.to_string(),
+                _access_policy: access_policy,
+            })
+        }
+
+        #[allow(clippy::unused_self)]
+        pub fn sign(&self, _data: &[u8]) -> Result<Vec<u8>, String> {
+            Err("TPM signing bridge is only supported on Windows".to_string())
+        }
+
+        #[allow(clippy::unused_self)]
+        pub fn public_key(&self) -> Result<Vec<u8>, String> {
+            Err("TPM signing bridge is only supported on Windows".to_string())
+        }
+
+        #[allow(clippy::unused_self)]
+        pub fn list_keys(&self) -> Result<Vec<String>, String> {
+            Err("TPM signing bridge is only supported on Windows".to_string())
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        pub fn delete(_app_name: &str, _key_label: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
 }
 
+pub use platform::TpmSigningStorage;
 pub use platform::TpmStorage;
 
 #[cfg(test)]
