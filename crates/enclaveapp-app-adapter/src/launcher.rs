@@ -1,10 +1,10 @@
+use crate::error::Result;
+use crate::types::ResolvedProgram;
 use std::collections::BTreeMap;
 use std::process::{Command, ExitStatus};
 
-use crate::error::Result;
-use crate::types::ResolvedProgram;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Request to launch a target process with environment overrides.
+#[derive(Debug, Clone)]
 pub struct LaunchRequest {
     pub program: ResolvedProgram,
     pub args: Vec<String>,
@@ -17,7 +17,12 @@ pub struct LaunchRequest {
 /// Secret env var values are locked in RAM (`mlock`) before spawn to prevent
 /// them from being paged to swap. After the child exits, the values are
 /// zeroized in-place and then unlocked.
-pub fn run(request: &mut LaunchRequest) -> Result<ExitStatus> {
+///
+/// Takes ownership of the `LaunchRequest` so that `env_overrides` values
+/// (which may contain secrets) can be overwritten with zeros after the
+/// child process exits. Callers that need the request afterwards should
+/// clone it before calling `run`.
+pub fn run(mut request: LaunchRequest) -> Result<ExitStatus> {
     // Lock secret env var values in RAM before spawn.
     for value in request.env_overrides.values() {
         enclaveapp_core::process::mlock_buffer(value.as_ptr(), value.len());

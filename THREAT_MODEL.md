@@ -198,7 +198,7 @@ The threats above (T1-T8) apply to the **storage layer** — how keys and encryp
 | Threat | Mitigation | Residual risk |
 |--------|-----------|---------------|
 | **D7: Temp file read by another process.** Another process reads the temp file while the target app is running. | 0o600 permissions (owner-only read). Temp directory created with 0o700 permissions. Unique random directory name via `tempfile` crate. | Root can read any file. A process running as the same user can read the file if it knows or guesses the path. The window of exposure is the target process's lifetime. |
-| **D8: Temp file not deleted after crash.** If the enclave app crashes or is killed (SIGKILL) before cleanup. | `TempConfig` uses `tempfile::TempDir` which is cleaned up by the OS on process exit for normal termination. `Drop` impl handles graceful shutdown. | SIGKILL prevents Drop from running. The temp file persists until the OS cleans `/tmp` (typically on reboot). The file has 0o600 permissions, limiting exposure. |
+| **D8: Temp file not deleted after crash.** If the enclave app crashes or is killed (SIGKILL) before cleanup. | `TempConfig` uses `tempfile::TempDir` which is cleaned up by the OS on process exit for normal termination. `Drop` impl shreds (overwrites with zeros) the file contents before deletion. | SIGKILL prevents Drop from running. The temp file persists until the OS cleans `/tmp` (typically on reboot). The file has 0o600 permissions, limiting exposure. |
 | **D9: Temp file on a shared/networked filesystem.** The temp directory is on NFS or a shared mount where permissions are not enforced. | Default temp directory is the OS-provided `$TMPDIR` which is typically local. | If the user overrides the temp directory to a network mount, permissions may not be enforced. This is a deployment configuration issue. |
 
 ### Type 4: CredentialSource
@@ -211,6 +211,18 @@ The threats above (T1-T8) apply to the **storage layer** — how keys and encryp
 | **D11: Credential interception during `get`.** The credential is returned on stdout and could be captured by a parent process or shell. | The credential is printed to stdout (not stderr), so it goes to the calling process's pipe, not the terminal. No intermediate files. | A debugger or compromised parent process can read the pipe. Shell command substitution (`$(sso-jwt get)`) holds the credential in shell memory briefly. |
 | **D12: Cache oracle.** An attacker who cannot decrypt the cache can observe cache file timestamps and sizes to infer usage patterns. | Cache headers are unencrypted (timestamps, risk level) by design — this enables state classification without decryption. The encrypted payload does not leak content. | An attacker with read access to the cache directory can determine when credentials were last obtained and their risk level. No credential content is exposed. |
 | **D13: Stale credential served from cache.** The cache serves an expired or revoked credential. | Lifecycle policy (Fresh/RefreshWindow/Grace/Expired) with configurable risk-level-based timeouts. Expired credentials trigger re-acquisition. | A revoked credential that hasn't expired by time will be served until the cache entry ages out. The credential provider (OAuth server, etc.) is responsible for revocation enforcement at the service level. |
+
+### Memory Zeroization
+
+**Security property:** Sensitive values (environment variable overrides, credential strings, temp file contents) are overwritten with zeros after use to reduce the window in which they are recoverable from process memory or disk.
+
+| Mitigation | Scope |
+|------------|-------|
+| `run()` takes ownership of `LaunchRequest` and zeroizes `env_overrides` values after the child process exits. | Types 1-3 |
+| `exec_with_credential_owned()` zeroizes the credential string after the child process exits. | Type 4 |
+| `TempConfig::drop()` shreds (overwrites with zeros and syncs) the temp file before `TempDir` removes it from disk. | Type 3 |
+
+**Residual risk:** The Rust allocator may leave copies of the original data in freed heap memory. The OS may page secret-containing memory to swap. Compiler optimizations could theoretically elide the zeroization, though the `zeroize` crate uses techniques to prevent this. These are standard limitations of userspace memory zeroization.
 
 ## Out of Scope
 
