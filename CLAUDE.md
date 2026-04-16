@@ -72,10 +72,9 @@ Every enclave app is classified by how it delivers secrets to the target applica
 | **Type 1** | HelperTool | Secrets never leave process | sshenc (SSH agent), awsenc (`credential_process`) |
 | **Type 2** | EnvInterpolation | Secrets in env vars via `execve()` | npmenc (`.npmrc` `${NPM_TOKEN}`) |
 | **Type 3** | TempMaterializedConfig | Secrets briefly on disk (0o600) | Apps with no plugin or env var support |
+| **Type 4** | CredentialSource | Hardware-encrypted credential cache | sso-jwt (JWT provider for Type 1/2/3 apps) |
 
-The adapter selects the least-secret-exposing integration automatically: Type 1 > Type 2 > Type 3.
-
-**sso-jwt** is a credential source that serves Type 1 or Type 2 apps.
+Types 1-3 deliver secrets to a target app; the adapter selects the most secure: Type 1 > Type 2 > Type 3. Type 4 apps are credential sources that other enclave apps consume.
 
 ## Platform
 
