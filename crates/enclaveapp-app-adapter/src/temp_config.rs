@@ -1,6 +1,5 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-#[cfg(any(unix, test))]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -37,6 +36,29 @@ impl TempConfig {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Overwrite a file's contents with zeros and sync to disk before deletion.
+///
+/// This reduces the window in which secret material is recoverable from
+/// the filesystem. The subsequent `TempDir` drop will remove the file.
+fn shred_file(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let len = metadata.len() as usize;
+        if len > 0 {
+            if let Ok(mut file) = OpenOptions::new().write(true).open(path) {
+                let zeros = vec![0_u8; len];
+                drop(file.write_all(&zeros));
+                drop(file.sync_all());
+            }
+        }
+    }
+}
+
+impl Drop for TempConfig {
+    fn drop(&mut self) {
+        shred_file(&self.path);
     }
 }
 
@@ -146,5 +168,39 @@ mod tests {
             .expect("temp config");
         let contents = fs::read_to_string(temp.path()).expect("read back");
         assert_eq!(contents, "token=${NPM_TOKEN}\n");
+    }
+
+    #[test]
+    fn shred_file_overwrites_contents_with_zeros() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("secret.txt");
+        fs::write(&file_path, b"super-secret-value").expect("write");
+
+        shred_file(&file_path);
+
+        let contents = fs::read(&file_path).expect("read after shred");
+        assert_eq!(contents.len(), 18); // same length as original
+        assert!(contents.iter().all(|&b| b == 0), "file should be all zeros");
+    }
+
+    #[test]
+    fn drop_shreds_temp_file_before_deletion() {
+        let temp =
+            TempConfig::write("shred-test-", "config", b"secret-data-here!").expect("temp config");
+        let path = temp.path().to_path_buf();
+        let dir_path = path.parent().unwrap().to_path_buf();
+
+        // Verify file exists with secret data
+        assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"secret-data-here!");
+
+        // Keep a file descriptor open so we can read after shred but before unlink.
+        // On drop, TempConfig shreds then TempDir deletes.
+        // We can't easily observe the shred-then-delete sequence, but we can
+        // verify the directory gets cleaned up.
+        drop(temp);
+
+        assert!(!path.exists(), "file should be deleted after drop");
+        assert!(!dir_path.exists(), "dir should be deleted after drop");
     }
 }

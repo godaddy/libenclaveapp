@@ -242,6 +242,21 @@ pub fn exec_with_credential(
     cmd.status()
 }
 
+/// Like [`exec_with_credential`], but takes ownership of the credential
+/// string and zeroizes it in memory after the child process exits.
+///
+/// Prefer this over `exec_with_credential` when the caller does not need
+/// the credential value after launching the command.
+pub fn exec_with_credential_owned(
+    env_var: &str,
+    mut credential: String,
+    command: &[String],
+) -> std::io::Result<std::process::ExitStatus> {
+    let status = exec_with_credential(env_var, &credential, command)?;
+    zeroize::Zeroize::zeroize(&mut credential);
+    Ok(status)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {

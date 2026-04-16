@@ -78,6 +78,9 @@ shlex = "1"
 # Keyring
 keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"] }
 
+# Security
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
 # Testing
 rand = "0.9"
 

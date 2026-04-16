@@ -21,6 +21,7 @@ shlex = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = "0.1"
+zeroize = { workspace = true }
 
 [lints]
 workspace = true
