@@ -220,6 +220,26 @@ On Windows, enclave apps operate across multiple shell environments. Each has di
 
 For `sshenc`, WSL signing is handled by the SSH agent bridge path (named pipe relay via `npiperelay`) rather than the JSON-RPC encryption bridge.
 
+### Shell compatibility
+
+Enclave apps are native binaries and work under any shell that can invoke executables. The following shells have been tested on macOS:
+
+| Shell | Version tested | Binary invocation | Shell-init / completions | Env var passthrough (Type 2) |
+|-------|---------------|:-----------------:|:------------------------:|:----------------------------:|
+| bash (macOS built-in) | 3.2.57 | pass | pass | pass |
+| bash (Homebrew) | 5.3.9 | pass | pass | pass |
+| zsh (macOS built-in) | 5.9 | pass | pass | pass |
+| fish (Homebrew) | 4.6.0 | pass | pass (completions) | pass |
+| tcsh (macOS built-in) | 6.21 | pass | — | — |
+| dash (Homebrew) | POSIX sh | pass | — | pass |
+| nushell (Homebrew) | 0.112.1 | pass | — | — |
+
+**Shell-init scripts** are provided for bash, zsh, and fish. Other shells can invoke the binaries directly.
+
+**Type 2 env var passthrough** (npmenc/npxenc) is verified to work under bash, zsh, fish, and dash. The `execve()` boundary ensures env vars are passed correctly regardless of shell.
+
+**Not tested:** macOS's built-in ksh (`/bin/ksh`) is broken on Apple Silicon — it segfaults on trivial commands like `echo hello` (exit code 139). This is a macOS system issue unrelated to enclave apps. ksh is excluded from the test matrix.
+
 ## Application integration types
 
 Every enclave app is classified by how it delivers secrets to the target application. The `enclaveapp-app-adapter` crate defines three integration types, listed from most secure to least secure:
