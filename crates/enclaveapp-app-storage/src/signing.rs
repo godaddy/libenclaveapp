@@ -62,11 +62,14 @@ impl AppSigningBackend {
 
         #[cfg(target_os = "linux")]
         {
+            if config.force_keyring {
+                debug!("--keyring flag: forcing software keyring backend for signing");
+                return Self::init_linux_keyring(&config);
+            }
             // On WSL, skip the libtss2 TPM probe — there's no local TPM.
-            // Go straight to the software keyring backend.
             if enclaveapp_wsl::is_wsl() {
                 debug!("WSL detected, skipping local TPM probe for signing");
-                return Self::init_linux_software(&config);
+                return Self::init_linux_keyring(&config);
             }
             return Self::init_linux(&config);
         }
@@ -138,11 +141,11 @@ impl AppSigningBackend {
             });
         }
 
-        Self::init_linux_software(config)
+        Self::init_linux_keyring(config)
     }
 
     #[cfg(target_os = "linux")]
-    fn init_linux_software(config: &StorageConfig) -> Result<Self> {
+    fn init_linux_keyring(config: &StorageConfig) -> Result<Self> {
         if !enclaveapp_keyring::has_keyring_feature() {
             return Err(crate::error::StorageError::NotAvailable);
         }
@@ -153,7 +156,7 @@ impl AppSigningBackend {
             .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
         let signer = enclaveapp_keyring::SoftwareSigner::with_keys_dir(&config.app_name, keys_dir);
         debug!(
-            "Linux software signing backend ready with keyring (app={})",
+            "Linux keyring signing backend ready (app={})",
             config.app_name
         );
         Ok(Self {

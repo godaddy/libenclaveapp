@@ -84,6 +84,10 @@ impl AppEncryptionStorage {
 
         #[cfg(target_os = "linux")]
         {
+            if config.force_keyring {
+                debug!("--keyring flag: forcing software keyring backend for encryption");
+                return Self::init_linux_keyring(&config);
+            }
             if enclaveapp_wsl::is_wsl() {
                 return Self::init_wsl(&config);
             }
@@ -158,10 +162,9 @@ impl AppEncryptionStorage {
 
     #[cfg(target_os = "linux")]
     fn init_linux(config: &StorageConfig) -> Result<Self> {
-        let keys_dir = Self::resolved_keys_dir(config);
-
         #[cfg(target_env = "gnu")]
         if enclaveapp_linux_tpm::is_available() {
+            let keys_dir = Self::resolved_keys_dir(config);
             let encryptor = enclaveapp_linux_tpm::LinuxTpmEncryptor::with_keys_dir(
                 &config.app_name,
                 keys_dir.clone(),
@@ -177,9 +180,16 @@ impl AppEncryptionStorage {
             });
         }
 
+        Self::init_linux_keyring(config)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn init_linux_keyring(config: &StorageConfig) -> Result<Self> {
         if !enclaveapp_keyring::has_keyring_feature() {
             return Err(StorageError::NotAvailable);
         }
+
+        let keys_dir = Self::resolved_keys_dir(config);
 
         if config.access_policy != AccessPolicy::None {
             #[allow(clippy::print_stderr)]
@@ -198,7 +208,7 @@ impl AppEncryptionStorage {
         Self::ensure_key(&encryptor, config, &keys_dir, AccessPolicy::None)?;
 
         debug!(
-            "Linux software encryption ready with keyring (app={})",
+            "Linux keyring encryption backend ready (app={})",
             config.app_name
         );
 
@@ -446,6 +456,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             extra_bridge_paths: vec![],
             keys_dir: Some(keys_dir.to_path_buf()),
+            force_keyring: false,
         }
     }
 

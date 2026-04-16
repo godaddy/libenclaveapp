@@ -20,6 +20,7 @@
 //!     access_policy: AccessPolicy::BiometricOnly,
 //!     extra_bridge_paths: vec![],
 //!     keys_dir: None,
+//!     force_keyring: false,
 //! })?;
 //!
 //! let ciphertext = storage.encrypt(b"secret")?;
@@ -37,6 +38,7 @@
 //!     access_policy: AccessPolicy::None,
 //!     extra_bridge_paths: vec![],
 //!     keys_dir: None,
+//!     force_keyring: false,
 //! })?;
 //!
 //! // Use the underlying signer/key_manager for operations.
@@ -80,6 +82,10 @@ pub struct StorageConfig {
     /// Override the keys directory (default: `~/.config/<app_name>/keys/`).
     /// sshenc uses `~/.sshenc/keys/` which differs from the standard layout.
     pub keys_dir: Option<std::path::PathBuf>,
+    /// Force the software keyring backend, bypassing WSL bridge detection and
+    /// libtss2 TPM probing. Linux only — ignored on macOS and Windows.
+    /// Useful for testing the keyring path from WSL environments.
+    pub force_keyring: bool,
 }
 
 /// Create encryption storage with automatic platform detection.
@@ -102,6 +108,7 @@ mod tests {
             access_policy: AccessPolicy::None,
             extra_bridge_paths: vec![],
             keys_dir: None,
+            force_keyring: false,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("test"));
@@ -116,6 +123,7 @@ mod tests {
             access_policy: AccessPolicy::BiometricOnly,
             extra_bridge_paths: vec!["/custom/path".into()],
             keys_dir: Some(std::path::PathBuf::from("/custom/keys")),
+            force_keyring: false,
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, "test");
