@@ -75,28 +75,41 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Patch version from tag
-        shell: bash
+        shell: python3 {0}
         run: |
-          # Cross-platform sed -i (macOS requires -i '', Linux requires -i)
-          sedi() { if [[ "$OSTYPE" == darwin* ]]; then sed -i '' "$@"; else sed -i "$@"; fi; }
+          import os, re, glob
 
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Release version: $VERSION"
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          print(f"Release version: {version}")
 
-          # Update workspace version in root Cargo.toml
-          sedi "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          # Patch workspace version in Cargo.toml
+          toml = open("Cargo.toml").read()
+          toml = re.sub(r'^version = ".*"', f'version = "{version}"', toml, count=1, flags=re.MULTILINE)
+          open("Cargo.toml", "w").write(toml)
 
-          # Update matching version entries in Cargo.lock
-          if [ -f Cargo.lock ]; then
-            sedi "/^name = \"${{ inputs.app_name }}/{n;s/^version = \"[^\"]*\"/version = \"$VERSION\"/}" Cargo.lock
-            for toml in */Cargo.toml **/*/Cargo.toml; do
-              if grep -q 'version.workspace = true' "$toml" 2>/dev/null; then
-                crate_name=$(grep -m1 '^name = ' "$toml" | sed 's/name = "\(.*\)"/\1/')
-                [ -n "$crate_name" ] && sedi "/^name = \"$crate_name\"/{n;s/^version = \"[^\"]*\"/version = \"$VERSION\"/}" Cargo.lock
-              fi
-            done
-          fi
-          echo "Cargo.toml version: $(grep -m1 'version = ' Cargo.toml)"
+          # Collect crate names that inherit the workspace version
+          crates = set()
+          for path in glob.glob("*/Cargo.toml") + glob.glob("**/*/Cargo.toml"):
+              content = open(path).read()
+              if "version.workspace = true" in content:
+                  m = re.search(r'^name = "([^"]+)"', content, re.MULTILINE)
+                  if m:
+                      crates.add(m.group(1))
+
+          # Patch Cargo.lock: for each crate, find its name line and update the next version line
+          if os.path.exists("Cargo.lock") and crates:
+              lines = open("Cargo.lock").readlines()
+              for i, line in enumerate(lines):
+                  for crate in crates:
+                      if line.strip() == f'name = "{crate}"' and i + 1 < len(lines):
+                          lines[i + 1] = re.sub(r'^version = ".*"', f'version = "{version}"', lines[i + 1])
+              open("Cargo.lock", "w").writelines(lines)
+
+          # Verify
+          for line in open("Cargo.toml"):
+              if line.startswith("version"):
+                  print(f"Cargo.toml: {line.strip()}")
+                  break
 
       - name: Clone libenclaveapp
         shell: bash
