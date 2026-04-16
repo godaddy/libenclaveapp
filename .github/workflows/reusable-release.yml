@@ -62,7 +62,7 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ${{ contains(matrix.target, 'windows') && 'windows-latest' || (contains(matrix.target, 'linux') && 'ubuntu-latest' || 'macos-latest') }}
+    runs-on: ${{ contains(matrix.target, 'windows') && 'windows-latest' || (contains(matrix.target, 'linux') && 'ubuntu-22.04' || 'macos-latest') }}
     strategy:
       matrix:
         target: ${{ fromJson(inputs.targets) }}
