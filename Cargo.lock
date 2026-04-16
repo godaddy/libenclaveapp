@@ -306,7 +306,9 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "enclaveapp-app-storage",
+ "enclaveapp-core",
  "fs4",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -382,6 +384,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
