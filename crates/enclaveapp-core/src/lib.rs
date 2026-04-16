@@ -11,6 +11,7 @@ pub mod config_block;
 pub mod error;
 pub mod metadata;
 pub mod platform;
+pub mod process;
 pub mod quoting;
 pub mod traits;
 pub mod types;

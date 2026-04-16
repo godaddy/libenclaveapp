@@ -2,6 +2,8 @@
 
 #[cfg(any(unix, test))]
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -62,6 +64,76 @@ fn set_file_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+/// Anonymous in-memory config file (Linux only).
+///
+/// Uses `memfd_create` to create a file that has no filesystem path.
+/// The target app receives `/proc/self/fd/{fd}` as the config path.
+/// This eliminates the same-user temp file read attack surface entirely.
+///
+/// The file descriptor is sealed to prevent modification after creation.
+/// When `MemfdConfig` is dropped the fd is closed and the memory is freed.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct MemfdConfig {
+    _file: File,
+    path: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl MemfdConfig {
+    /// Path to pass to the target process (e.g., `/proc/self/fd/5`).
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Create a temp config using an anonymous in-memory file (Linux only).
+///
+/// Uses `memfd_create` to create a file that has no filesystem path.
+/// The target app receives `/proc/self/fd/{fd}` as the config path.
+/// This eliminates the same-user temp file read attack surface entirely.
+///
+/// The fd is created **without** `MFD_CLOEXEC` so that it is inherited by
+/// child processes spawned via `Command::spawn`.
+#[cfg(target_os = "linux")]
+pub fn create_memfd_config(
+    prefix: &str,
+    filename: &str,
+    contents: &[u8],
+) -> std::io::Result<MemfdConfig> {
+    use std::ffi::CString;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let name = CString::new(format!("{prefix}-{filename}"))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    // No MFD_CLOEXEC: the fd must be inherited by the child process.
+    #[allow(unsafe_code)]
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // Safety: we just created this fd above and it is valid.
+    #[allow(unsafe_code)]
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    Write::write_all(&mut file, contents)?;
+
+    // Seal the file to prevent modification.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::fcntl(
+            fd,
+            libc::F_ADD_SEALS,
+            libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL,
+        );
+    }
+
+    let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+
+    Ok(MemfdConfig { _file: file, path })
 }
 
 #[cfg(test)]

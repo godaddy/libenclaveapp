@@ -18,3 +18,4 @@ dirs = { workspace = true }
 thiserror = { workspace = true }
 libc = { workspace = true }
 fs2 = { workspace = true }
+tracing = "0.1"

@@ -63,6 +63,8 @@ pub use secret_store::{
 };
 pub use state_lock::{with_state_lock, with_state_lock_read_only};
 pub use temp_config::TempConfig;
+#[cfg(target_os = "linux")]
+pub use temp_config::{create_memfd_config, MemfdConfig};
 pub use types::{BindingId, BindingRecord, IntegrationType, ResolutionStrategy, ResolvedProgram};
 
 #[cfg(test)]

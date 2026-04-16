@@ -12,7 +12,17 @@ pub struct LaunchRequest {
     pub env_removals: Vec<String>,
 }
 
-pub fn run(request: &LaunchRequest) -> Result<ExitStatus> {
+/// Execute a launch request, spawning the target process.
+///
+/// Secret env var values are locked in RAM (`mlock`) before spawn to prevent
+/// them from being paged to swap. After the child exits, the values are
+/// zeroized in-place and then unlocked.
+pub fn run(request: &mut LaunchRequest) -> Result<ExitStatus> {
+    // Lock secret env var values in RAM before spawn.
+    for value in request.env_overrides.values() {
+        enclaveapp_core::process::mlock_buffer(value.as_ptr(), value.len());
+    }
+
     let mut command = Command::new(&request.program.path);
     command.args(&request.program.fixed_args);
     command.args(&request.args);
@@ -25,5 +35,37 @@ pub fn run(request: &LaunchRequest) -> Result<ExitStatus> {
         command.env(key, value);
     }
 
-    Ok(command.status()?)
+    let status = command.status()?;
+
+    // Zeroize secret env var values, then unlock.
+    for value in request.env_overrides.values_mut() {
+        zeroize_str(value);
+        enclaveapp_core::process::munlock_buffer(value.as_ptr(), value.len());
+    }
+
+    Ok(status)
+}
+
+/// Overwrite the contents of a string with zeros without deallocating.
+fn zeroize_str(s: &mut str) {
+    // Safety: filling the existing UTF-8 bytes with 0 is valid UTF-8 (all NUL).
+    // We stay within the existing len — no UB.
+    #[allow(unsafe_code)]
+    unsafe {
+        let bytes = s.as_bytes_mut();
+        bytes.fill(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zeroize_str_clears_contents() {
+        let mut s = String::from("secret-value");
+        zeroize_str(&mut s);
+        assert!(s.bytes().all(|b| b == 0));
+        assert_eq!(s.len(), 12);
+    }
 }

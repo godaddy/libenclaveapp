@@ -47,7 +47,7 @@ fn helper_tool_launch_runs_without_temp_config() {
         supported_integrations: vec![IntegrationType::HelperTool],
         config_override: ConfigOverride::None,
     };
-    let prepared = prepare_best_app_launch(
+    let mut prepared = prepare_best_app_launch(
         &spec,
         resolved_program(&target),
         vec!["publish".to_string()],
@@ -65,7 +65,7 @@ fn helper_tool_launch_runs_without_temp_config() {
     .expect("prepare launch");
 
     assert!(prepared.temp_config_path.is_none());
-    let status = run(&prepared.launch).expect("run helper");
+    let status = run(&mut prepared.launch).expect("run helper");
     assert!(status.success());
 
     let captured = fs::read_to_string(&capture).expect("capture");
@@ -97,7 +97,7 @@ fn env_interpolation_launch_passes_placeholder_config_and_secret_env() {
             name: "APP_CONFIG".to_string(),
         },
     };
-    let prepared = prepare_best_app_launch(
+    let mut prepared = prepare_best_app_launch(
         &spec,
         resolved_program(&target),
         vec!["run".to_string()],
@@ -114,7 +114,7 @@ fn env_interpolation_launch_passes_placeholder_config_and_secret_env() {
     )
     .expect("prepare launch");
 
-    let status = run(&prepared.launch).expect("run env");
+    let status = run(&mut prepared.launch).expect("run env");
     assert!(status.success());
 
     let captured = fs::read_to_string(&capture).expect("capture");
@@ -146,7 +146,7 @@ fn temp_materialized_launch_passes_config_flag_and_materialized_secret() {
             flag: "--config".to_string(),
         },
     };
-    let prepared = prepare_best_app_launch(
+    let mut prepared = prepare_best_app_launch(
         &spec,
         resolved_program(&target),
         vec!["publish".to_string()],
@@ -160,7 +160,7 @@ fn temp_materialized_launch_passes_config_flag_and_materialized_secret() {
     )
     .expect("prepare launch");
 
-    let status = run(&prepared.launch).expect("run temp");
+    let status = run(&mut prepared.launch).expect("run temp");
     assert!(status.success());
 
     let captured = fs::read_to_string(&capture).expect("capture");
