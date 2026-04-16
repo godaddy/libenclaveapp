@@ -16,7 +16,7 @@
 
 mod tpm;
 
-pub use tpm::TpmStorage;
+pub use tpm::{TpmSigningStorage, TpmStorage};
 
 use base64::prelude::*;
 use enclaveapp_bridge::BridgeResponse;
@@ -93,6 +93,7 @@ impl BridgeParamsCompat {
 pub fn handle_request(
     request: &BridgeRequestCompat,
     storage: &mut Option<TpmStorage>,
+    signing_storage: &mut Option<TpmSigningStorage>,
     default_app_name: &str,
     default_key_label: &str,
 ) -> BridgeResponse {
@@ -156,6 +157,65 @@ pub fn handle_request(
             }
             Err(e) => BridgeResponse::error(&format!("delete failed: {e}")),
         },
+        "init_signing" => {
+            match TpmSigningStorage::new(
+                app_name,
+                key_label,
+                request.params.effective_access_policy(),
+            ) {
+                Ok(s) => {
+                    *signing_storage = Some(s);
+                    BridgeResponse::success("ok")
+                }
+                Err(e) => BridgeResponse::error(&format!("init_signing failed: {e}")),
+            }
+        }
+        "sign" => {
+            let Some(ref s) = signing_storage else {
+                return BridgeResponse::error("signing not initialized: call init_signing first");
+            };
+            if request.params.data.is_empty() {
+                return BridgeResponse::error("missing data parameter");
+            }
+            let data = match BASE64_STANDARD.decode(&request.params.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    return BridgeResponse::error(&format!("base64 decode error: {e}"));
+                }
+            };
+            match s.sign(&data) {
+                Ok(signature) => BridgeResponse::success(&BASE64_STANDARD.encode(&signature)),
+                Err(e) => BridgeResponse::error(&format!("sign failed: {e}")),
+            }
+        }
+        "public_key" => {
+            let Some(ref s) = signing_storage else {
+                return BridgeResponse::error("signing not initialized: call init_signing first");
+            };
+            match s.public_key() {
+                Ok(pubkey) => BridgeResponse::success(&BASE64_STANDARD.encode(&pubkey)),
+                Err(e) => BridgeResponse::error(&format!("public_key failed: {e}")),
+            }
+        }
+        "list_keys" => {
+            let Some(ref s) = signing_storage else {
+                return BridgeResponse::error("signing not initialized: call init_signing first");
+            };
+            match s.list_keys() {
+                Ok(keys) => {
+                    let json = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
+                    BridgeResponse::success(&json)
+                }
+                Err(e) => BridgeResponse::error(&format!("list_keys failed: {e}")),
+            }
+        }
+        "delete_signing" => match TpmSigningStorage::delete(app_name, key_label) {
+            Ok(()) => {
+                *signing_storage = None;
+                BridgeResponse::success("ok")
+            }
+            Err(e) => BridgeResponse::error(&format!("delete_signing failed: {e}")),
+        },
         other => BridgeResponse::error(&format!("unknown method: {other}")),
     }
 }
@@ -188,6 +248,7 @@ impl BridgeServer {
         let stdin = io::stdin();
         let mut stdout = io::stdout().lock();
         let mut storage: Option<TpmStorage> = None;
+        let mut signing_storage: Option<TpmSigningStorage> = None;
 
         for line in stdin.lock().lines() {
             let line = match line {
@@ -209,6 +270,7 @@ impl BridgeServer {
                 Ok(req) => handle_request(
                     &req,
                     &mut storage,
+                    &mut signing_storage,
                     &self.default_app_name,
                     &self.default_key_label,
                 ),
@@ -252,7 +314,28 @@ mod tests {
     }
 
     fn handle(req: &BridgeRequestCompat, storage: &mut Option<TpmStorage>) -> BridgeResponse {
-        handle_request(req, storage, TEST_APP_NAME, TEST_KEY_LABEL)
+        let mut signing_storage = None;
+        handle_request(
+            req,
+            storage,
+            &mut signing_storage,
+            TEST_APP_NAME,
+            TEST_KEY_LABEL,
+        )
+    }
+
+    fn handle_signing(
+        req: &BridgeRequestCompat,
+        signing_storage: &mut Option<TpmSigningStorage>,
+    ) -> BridgeResponse {
+        let mut storage = None;
+        handle_request(
+            req,
+            &mut storage,
+            signing_storage,
+            TEST_APP_NAME,
+            TEST_KEY_LABEL,
+        )
     }
 
     // ----- Parsing tests -----
@@ -484,10 +567,17 @@ mod tests {
             r#"{"method":"destroy","params":{"app_name":"test-app","key_label":"cache-key"}}"#;
 
         let mut storage = None;
+        let mut signing_storage = None;
 
         // Init
         let req: BridgeRequestCompat = serde_json::from_str(init_json).unwrap();
-        let resp = handle(&req, &mut storage);
+        let resp = handle_request(
+            &req,
+            &mut storage,
+            &mut signing_storage,
+            TEST_APP_NAME,
+            TEST_KEY_LABEL,
+        );
         if let Some(err) = &resp.error {
             assert!(!err.is_empty(), "init error message should not be empty");
         } else {
@@ -499,7 +589,13 @@ mod tests {
 
         // Encrypt (will fail on non-Windows, which is expected)
         let req: BridgeRequestCompat = serde_json::from_str(encrypt_json).unwrap();
-        let resp = handle(&req, &mut storage);
+        let resp = handle_request(
+            &req,
+            &mut storage,
+            &mut signing_storage,
+            TEST_APP_NAME,
+            TEST_KEY_LABEL,
+        );
         if let Some(err) = &resp.error {
             assert!(!err.is_empty(), "encrypt error message should not be empty");
         } else {
@@ -511,7 +607,13 @@ mod tests {
 
         // Destroy
         let req: BridgeRequestCompat = serde_json::from_str(destroy_json).unwrap();
-        let resp = handle(&req, &mut storage);
+        let resp = handle_request(
+            &req,
+            &mut storage,
+            &mut signing_storage,
+            TEST_APP_NAME,
+            TEST_KEY_LABEL,
+        );
         if let Some(err) = &resp.error {
             assert!(!err.is_empty(), "destroy error message should not be empty");
         } else {
@@ -637,6 +739,148 @@ mod tests {
         assert_eq!(req.params.data, "");
         assert_eq!(req.params.app_name, "");
         assert_eq!(req.params.key_label, "");
+    }
+
+    // ----- Signing handler tests -----
+
+    #[test]
+    fn handle_init_signing_creates_signing_storage() {
+        let req = make_request("init_signing", "", AccessPolicy::None);
+        let mut signing_storage = None;
+        let resp = handle_signing(&req, &mut signing_storage);
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "init_signing error should not be empty");
+        } else {
+            assert!(resp.result.is_some(), "init_signing should return a result");
+        }
+    }
+
+    #[test]
+    fn handle_sign_without_init_signing() {
+        let req = make_request("sign", "aGVsbG8=", AccessPolicy::None);
+        let mut signing_storage = None;
+        let resp = handle_signing(&req, &mut signing_storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("signing not initialized")),);
+    }
+
+    #[test]
+    fn handle_public_key_without_init_signing() {
+        let req = make_request("public_key", "", AccessPolicy::None);
+        let mut signing_storage = None;
+        let resp = handle_signing(&req, &mut signing_storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("signing not initialized")),);
+    }
+
+    #[test]
+    fn handle_list_keys_without_init_signing() {
+        let req = make_request("list_keys", "", AccessPolicy::None);
+        let mut signing_storage = None;
+        let resp = handle_signing(&req, &mut signing_storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("signing not initialized")),);
+    }
+
+    #[test]
+    fn handle_sign_missing_data() {
+        let req = make_request("sign", "", AccessPolicy::None);
+        let mut signing_storage =
+            TpmSigningStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).ok();
+        let resp = handle_signing(&req, &mut signing_storage);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn handle_delete_signing_clears_signing_storage() {
+        let req = make_request("delete_signing", "", AccessPolicy::None);
+        let mut signing_storage = None;
+        let resp = handle_signing(&req, &mut signing_storage);
+        if let Some(err) = &resp.error {
+            assert!(
+                !err.is_empty(),
+                "delete_signing error message should not be empty"
+            );
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "delete_signing should return a result on success"
+            );
+        }
+        assert!(signing_storage.is_none());
+    }
+
+    #[test]
+    fn parse_init_signing_request() {
+        let json = r#"{"method": "init_signing", "params": {"access_policy": "none"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "init_signing");
+        assert_eq!(req.params.access_policy, AccessPolicy::None);
+    }
+
+    #[test]
+    fn parse_sign_request() {
+        let json = r#"{"method": "sign", "params": {"data": "aGVsbG8=", "access_policy": "none"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "sign");
+        assert_eq!(req.params.data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn parse_public_key_request() {
+        let json = r#"{"method": "public_key", "params": {}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "public_key");
+    }
+
+    #[test]
+    fn parse_list_keys_request() {
+        let json = r#"{"method": "list_keys", "params": {}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "list_keys");
+    }
+
+    #[test]
+    fn parse_delete_signing_request() {
+        let json = r#"{"method": "delete_signing", "params": {"key_label": "cache-key"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "delete_signing");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn sign_returns_platform_error_on_non_windows() {
+        let storage =
+            TpmSigningStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).unwrap();
+        let result = storage.sign(b"hello");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only supported on Windows"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn public_key_returns_platform_error_on_non_windows() {
+        let storage =
+            TpmSigningStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).unwrap();
+        let result = storage.public_key();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only supported on Windows"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn list_keys_returns_platform_error_on_non_windows() {
+        let storage =
+            TpmSigningStorage::new(TEST_APP_NAME, TEST_KEY_LABEL, AccessPolicy::None).unwrap();
+        let result = storage.list_keys();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only supported on Windows"));
     }
 
     // ----- BridgeServer construction -----

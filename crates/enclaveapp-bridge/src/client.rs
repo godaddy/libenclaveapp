@@ -263,6 +263,138 @@ pub fn bridge_delete(bridge_path: &Path, app_name: &str, key_label: &str) -> Res
     bridge_destroy(bridge_path, app_name, key_label)
 }
 
+// ---------------------------------------------------------------------------
+// Signing bridge operations
+// ---------------------------------------------------------------------------
+
+fn init_signing_request(
+    app_name: &str,
+    key_label: &str,
+    access_policy: AccessPolicy,
+) -> BridgeRequest {
+    BridgeRequest {
+        method: "init_signing".to_string(),
+        params: BridgeParams::new(
+            String::new(),
+            access_policy,
+            app_name.to_string(),
+            key_label.to_string(),
+        ),
+    }
+}
+
+fn call_bridge_after_signing_init(
+    bridge_path: &Path,
+    app_name: &str,
+    key_label: &str,
+    access_policy: AccessPolicy,
+    request: &BridgeRequest,
+) -> Result<BridgeResponse> {
+    let mut session = BridgeSession::spawn(bridge_path)?;
+    let response = (|| -> Result<BridgeResponse> {
+        session
+            .request(&init_signing_request(app_name, key_label, access_policy))?
+            .require_ok("bridge_init_signing")?;
+        session.request(request)
+    })();
+    finish_session(session, response)
+}
+
+/// Initialize the bridge-side signing key lifecycle for a specific app/label pair.
+pub fn bridge_init_signing(
+    bridge_path: &Path,
+    app_name: &str,
+    key_label: &str,
+    access_policy: AccessPolicy,
+) -> Result<()> {
+    let response = call_bridge(
+        bridge_path,
+        &init_signing_request(app_name, key_label, access_policy),
+    )?;
+    response.require_ok("bridge_init_signing")
+}
+
+/// Convenience: sign data via the bridge.
+pub fn bridge_sign(
+    bridge_path: &Path,
+    app_name: &str,
+    key_label: &str,
+    data: &[u8],
+    access_policy: AccessPolicy,
+) -> Result<Vec<u8>> {
+    let request = BridgeRequest {
+        method: "sign".to_string(),
+        params: BridgeParams::new(
+            encode_data(data),
+            access_policy,
+            app_name.to_string(),
+            key_label.to_string(),
+        ),
+    };
+    let response =
+        call_bridge_after_signing_init(bridge_path, app_name, key_label, access_policy, &request)?;
+    response.decode_result("bridge_sign")
+}
+
+/// Convenience: get the public key via the bridge.
+pub fn bridge_public_key(
+    bridge_path: &Path,
+    app_name: &str,
+    key_label: &str,
+    access_policy: AccessPolicy,
+) -> Result<Vec<u8>> {
+    let request = BridgeRequest {
+        method: "public_key".to_string(),
+        params: BridgeParams::new(
+            String::new(),
+            access_policy,
+            app_name.to_string(),
+            key_label.to_string(),
+        ),
+    };
+    let response =
+        call_bridge_after_signing_init(bridge_path, app_name, key_label, access_policy, &request)?;
+    response.decode_result("bridge_public_key")
+}
+
+/// Convenience: list signing keys via the bridge.
+pub fn bridge_list_keys(
+    bridge_path: &Path,
+    app_name: &str,
+    key_label: &str,
+    access_policy: AccessPolicy,
+) -> Result<Vec<String>> {
+    let request = BridgeRequest {
+        method: "list_keys".to_string(),
+        params: BridgeParams::new(
+            String::new(),
+            access_policy,
+            app_name.to_string(),
+            key_label.to_string(),
+        ),
+    };
+    let response =
+        call_bridge_after_signing_init(bridge_path, app_name, key_label, access_policy, &request)?;
+    let result_str = response.require_result("bridge_list_keys")?;
+    serde_json::from_str(result_str)
+        .map_err(|e| enclaveapp_core::Error::Serialization(format!("list_keys JSON: {e}")))
+}
+
+/// Delete a signing key via the bridge.
+pub fn bridge_delete_signing(bridge_path: &Path, app_name: &str, key_label: &str) -> Result<()> {
+    let request = BridgeRequest {
+        method: "delete_signing".to_string(),
+        params: BridgeParams::new(
+            String::new(),
+            AccessPolicy::None,
+            app_name.to_string(),
+            key_label.to_string(),
+        ),
+    };
+    let response = call_bridge(bridge_path, &request)?;
+    response.require_ok("bridge_delete_signing")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -630,5 +762,116 @@ while IFS= read -r _line; do :; done
         );
         cleanup_script(&script);
         drop(fs::remove_file(sentinel));
+    }
+
+    // ----- Signing bridge client tests -----
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_init_signing_sends_init_signing_method() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "init-signing.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"init_signing"'*'"app_name":"sshenc"'*'"key_label":"default"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        bridge_init_signing(&script, "sshenc", "default", AccessPolicy::None).unwrap();
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_sign_initializes_before_signing() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "sign.sh",
+            r#"#!/bin/sh
+read init_line
+case "$init_line" in
+  *'"method":"init_signing"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
+esac
+read request_line
+case "$request_line" in
+  *'"method":"sign"'*) printf '{"result":"c2lnbmF0dXJl","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        let signature =
+            bridge_sign(&script, "sshenc", "default", b"data", AccessPolicy::None).unwrap();
+        assert_eq!(signature, b"signature");
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_public_key_initializes_before_requesting() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "pubkey.sh",
+            r#"#!/bin/sh
+read init_line
+case "$init_line" in
+  *'"method":"init_signing"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
+esac
+read request_line
+case "$request_line" in
+  *'"method":"public_key"'*) printf '{"result":"cHVia2V5","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        let pubkey = bridge_public_key(&script, "sshenc", "default", AccessPolicy::None).unwrap();
+        assert_eq!(pubkey, b"pubkey");
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_list_keys_initializes_before_requesting() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "list-keys.sh",
+            r#"#!/bin/sh
+read init_line
+case "$init_line" in
+  *'"method":"init_signing"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
+esac
+read request_line
+case "$request_line" in
+  *'"method":"list_keys"'*) printf '{"result":"[\"key1\",\"key2\"]","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        let keys = bridge_list_keys(&script, "sshenc", "default", AccessPolicy::None).unwrap();
+        assert_eq!(keys, vec!["key1".to_string(), "key2".to_string()]);
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_delete_signing_sends_delete_signing_method() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "delete-signing.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"delete_signing"'*'"key_label":"default"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        bridge_delete_signing(&script, "sshenc", "default").unwrap();
+        cleanup_script(&script);
     }
 }
