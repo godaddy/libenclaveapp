@@ -369,46 +369,30 @@ unsafe fn ecies_decrypt(
     ct: &[u8],
     tag: &[u8],
 ) -> Result<Vec<u8>> {
-    let ecdh_alg_name = to_wide(ECDH_P256_ALGORITHM);
     let eccpub_blob_type = to_wide("ECCPUBLICBLOB");
 
-    // Open BCrypt ECDH provider.
-    let mut ecdh_alg = BCRYPT_ALG_HANDLE::default();
-    BCryptOpenAlgorithmProvider(
-        &mut ecdh_alg,
-        PCWSTR(ecdh_alg_name.as_ptr()),
-        None,
-        Default::default(),
-    )
-    .ok()
-    .map_err(|e| Error::DecryptFailed {
-        detail: format!("BCryptOpenAlgorithmProvider(ECDH): {e}"),
-    })?;
-
-    // Import ephemeral public key.
+    // Import ephemeral public key via NCrypt (not BCrypt) because
+    // NCryptSecretAgreement requires both handles to be NCrypt handles.
     let eph_blob = sec1_to_eccpublic_blob(ephemeral_pub_sec1, BCRYPT_ECDH_PUBLIC_P256_MAGIC)?;
-    let mut eph_key = BCRYPT_KEY_HANDLE::default();
-    BCryptImportKeyPair(
-        ecdh_alg,
-        BCRYPT_KEY_HANDLE::default(),
+    let mut eph_key = NCRYPT_KEY_HANDLE::default();
+    NCryptImportKey(
+        NCRYPT_PROV_HANDLE::default(),
+        NCRYPT_KEY_HANDLE::default(),
         PCWSTR(eccpub_blob_type.as_ptr()),
+        None,
         &mut eph_key,
         &eph_blob,
-        0,
+        NCRYPT_FLAGS::default(),
     )
-    .ok()
     .map_err(|e| Error::DecryptFailed {
-        detail: format!("BCryptImportKeyPair(eph): {e}"),
+        detail: format!("NCryptImportKey(eph): {e}"),
     })?;
 
     // NCryptSecretAgreement: TPM private key + ephemeral public key.
-    // We use the NCrypt variant because the private key lives in the TPM.
-    // Convert BCRYPT_KEY_HANDLE → NCRYPT_KEY_HANDLE (both are opaque handles
-    // to the same underlying CNG key object).
     let mut secret = NCRYPT_SECRET_HANDLE::default();
     NCryptSecretAgreement(
         tpm_key.as_key(),
-        NCRYPT_KEY_HANDLE(eph_key.0 as usize),
+        eph_key,
         &mut secret,
         NCRYPT_FLAGS::default(),
     )
@@ -446,9 +430,8 @@ unsafe fn ecies_decrypt(
     })?;
     derived_key.truncate(derived_len as usize);
 
-    let _ = NCryptFreeObject(NCRYPT_HANDLE(secret.0));
-    let _ = BCryptDestroyKey(eph_key).ok();
-    let _ = BCryptCloseAlgorithmProvider(ecdh_alg, 0).ok();
+    drop(NCryptFreeObject(NCRYPT_HANDLE(secret.0)));
+    drop(NCryptFreeObject(NCRYPT_HANDLE(eph_key.0)));
 
     // AES-256-GCM decrypt.
     aes_gcm_decrypt(&derived_key, nonce, ct, tag)
