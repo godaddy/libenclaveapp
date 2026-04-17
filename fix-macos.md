@@ -40,7 +40,7 @@ Uses Security.framework for full Keychain-native key lifecycle.
 
 Uses CryptoKit for SE operations + Keychain `kSecClassGenericPassword` for at-rest blob protection.
 
-- **Create:** CryptoKit `SecureEnclave.P256.*.PrivateKey()` -> get `dataRepresentation` blob -> generate random AES-256 wrapping key -> store wrapping key in Keychain as `kSecClassGenericPassword` (service: `com.enclaveapp.<app_name>`, account: `<label>`) -> encrypt blob with AES-GCM -> write encrypted blob to `.handle` file
+- **Create:** CryptoKit `SecureEnclave.P256.*.PrivateKey()` -> get `dataRepresentation` blob -> generate random AES-256 wrapping key -> store wrapping key in Keychain as `kSecClassGenericPassword` (service: `com.libenclaveapp.<app_name>`, account: `<label>`) -> encrypt blob with AES-GCM -> write encrypted blob to `.handle` file
 - **Use:** Read AES key from Keychain -> decrypt `.handle` -> reconstruct CryptoKit key -> sign/decrypt
 - **Delete:** Delete Keychain entry (`SecItemDelete` by service/account) + delete `.handle` file
 
@@ -179,7 +179,7 @@ fn decrypt_blob(wrapping_key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>>
 Use the `aes-gcm` crate (already a workspace dependency). The encrypted `.handle` format: `[12-byte nonce][ciphertext][16-byte GCM tag]`.
 
 The wrapping key is stored/loaded via the Keychain FFI helpers:
-- Service: `"com.enclaveapp.<app_name>"`
+- Service: `"com.libenclaveapp.<app_name>"`
 - Account: `"<label>"`
 
 ### Step 4: Modify `generate_and_save_key` (unsigned path)

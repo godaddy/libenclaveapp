@@ -82,7 +82,7 @@ It also centralizes WSL bridge lookup, access-policy handling, and app-specific 
 
 Beyond the backends, a handful of crates provide cross-consumer utilities:
 
-- **`enclaveapp-app-adapter`** — generic secret-delivery substrate used by Type 1-3 apps. Provides `BindingStore`, `SecretStore`, the program resolver, the `execve()`-based launcher (with `mlock` + zeroize of env-override bytes), provenance tracking, state-locking, and `TempConfig::write` (with the per-platform `create_platform_config()` memfd/tempfile selection).
+- **`enclaveapp-app-adapter`** — generic secret-delivery substrate used by Type 1-3 apps. Provides `BindingStore`, `SecretStore` (with typed `SecretRead { Present, Redacted, Absent }` read path that replaces the string-sentinel `"<redacted>"` round-trip), the program resolver, the `execve()`-based launcher (with `mlock` + zeroize of env-override bytes, optional `with_env_scrub(patterns)` to remove matching inherited env vars from both child and parent, and per-child `RLIMIT_CORE = 0`), provenance tracking, state-locking, and `TempConfig::write` (with the per-platform `create_platform_config()` memfd/tempfile selection).
 - **`enclaveapp-cache`** — the shared on-disk cache file format (`[magic][version][flags][length-prefixed blobs]`). Consumed by sso-jwt's token cache and awsenc's credential cache.
 - **`enclaveapp-tpm-bridge`** — the shared bridge server crate; delegated to by the per-app bridge binaries.
 - **`enclaveapp-build-support`** — factored-out helpers for Windows `build.rs` resource compilation.
@@ -94,8 +94,12 @@ Beyond the backends, a handful of crates provide cross-consumer utilities:
 - `setrlimit(RLIMIT_CORE, 0)` on all Unix — no core dumps that could capture secret buffers.
 - `prctl(PR_SET_DUMPABLE, 0)` on Linux — `/proc/<pid>/mem` becomes root-only, `ptrace` attach from same-UID peers is denied.
 - `prctl(PR_SET_NO_NEW_PRIVS, 1)` on Linux — subsequent `exec*()` can't gain setuid/file-capabilities privileges.
+- `SetProcessMitigationPolicy` on Windows (safe subset):
+  - `ProcessStrictHandleCheckPolicy` with `RaiseExceptionOnInvalidHandleReference` + `HandleExceptionsPermanentlyEnabled` — turns handle-confusion bugs into `STATUS_INVALID_HANDLE` rather than silent misuse.
+  - `ProcessExtensionPointDisablePolicy` with `DisableExtensionPoints` — blocks AppInit_DLLs, shim engines, and other legacy DLL-injection extension points.
+  - `ProcessImageLoadPolicy` with `NoRemoteImages` + `NoLowMandatoryLabelImages` — refuses DLL loads from UNC paths and low-integrity files.
 
-See `crates/enclaveapp-core/src/process.rs`. `mlock_buffer` / `munlock_buffer` are exposed for consumer crates that want to pin specific byte buffers in RAM.
+See `crates/enclaveapp-core/src/process.rs`. `mlock_buffer` / `munlock_buffer` are exposed for consumer crates that want to pin specific byte buffers in RAM. Type 2 apps also clamp `RLIMIT_CORE = 0` on the **spawned child** via a `pre_exec` hook in `enclaveapp-app-adapter::launcher`, so a crash of the wrapped target (e.g. `npm`) cannot core-dump its secret-laden environment.
 
 ## Access policy model
 
@@ -180,7 +184,7 @@ Signing keys are long-lived identity keys (e.g., SSH keys). At Levels 1-3, the h
 
 | Level | Backend | Who signs? | Private key exportable? | User presence | Key storage |
 |:-----:|---------|-----------|:----------------------:|---------------|-------------|
-| **1** | macOS Secure Enclave | **The SE hardware.** `sshenc` sends data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. Works for both signed and unsigned binaries on Apple Silicon. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` on disk is an opaque SE handle (not key material); it is AES-256-GCM wrapped under a 32-byte key stored in the login Keychain (service `com.enclaveapp.<app>`, account `<label>`). File format `[EHW1 magic][nonce][ciphertext][tag]`. | Touch ID / biometric enforced by SE hardware per-signature (when access policy is set). | Secure Enclave coprocessor + Keychain-wrapped handle on disk (0600). |
+| **1** | macOS Secure Enclave | **The SE hardware.** `sshenc` sends data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. Works for both signed and unsigned binaries on Apple Silicon. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` on disk is an opaque SE handle (not key material); it is AES-256-GCM wrapped under a 32-byte key stored in the login Keychain (service `com.libenclaveapp.<app>`, account `<label>`). File format `[EHW1 magic][nonce][ciphertext][tag]`. | Touch ID / biometric enforced by SE hardware per-signature (when access policy is set). | Secure Enclave coprocessor + Keychain-wrapped handle on disk (0600). |
 | **2** | Windows TPM 2.0 | **The TPM hardware.** CNG sends signing requests to the TPM via NCrypt. | **No** — key is a non-exportable TPM object. | Windows Hello (biometric/PIN) enforced per-signature via `NCRYPT_UI_POLICY`. | TPM 2.0 chip. |
 | **3** | Linux TPM 2.0 | **The TPM hardware.** Signing performed by the TPM via `tss-esapi`. | **No** — key is TPM-resident. | Not enforced (no standard Linux biometric API). | TPM 2.0 device (`/dev/tpmrm0`). glibc only. |
 | **4** | Software (Linux glibc, keyring) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing via the `p256` crate. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
@@ -208,7 +212,7 @@ The `com.apple.developer.secure-enclave` entitlement is a **Security.framework**
 
 **Handle protection for unsigned apps.** The SE's `dataRepresentation` is an opaque handle blob that allows the same device's SE to reconstruct the key reference. While the private key itself cannot be extracted from this blob, the blob is stored as a file on disk — and another process running as the same user could copy it and use it to request SE operations.
 
-**Implemented.** `generate_and_save_key` creates a fresh 32-byte AES-256 wrapping key per label, stores it in the login keychain as a `kSecClassGenericPassword` item (service `com.enclaveapp.<app>`, account `<label>`), AES-256-GCM encrypts the `dataRepresentation` under that key, and writes the sealed blob to `.handle` with the magic prefix `EHW1`. Format: `[magic(4)][nonce(12)][ciphertext][tag(16)]`. See `crates/enclaveapp-apple/src/keychain_wrap.rs`.
+**Implemented.** `generate_and_save_key` creates a fresh 32-byte AES-256 wrapping key per label, stores it in the login keychain as a `kSecClassGenericPassword` item (service `com.libenclaveapp.<app>`, account `<label>`), AES-256-GCM encrypts the `dataRepresentation` under that key, and writes the sealed blob to `.handle` with the magic prefix `EHW1`. Format: `[magic(4)][nonce(12)][ciphertext][tag(16)]`. See `crates/enclaveapp-apple/src/keychain_wrap.rs`.
 
 Legacy plaintext `.handle` files are accepted by `load_handle` for transparent migration; they re-wrap on the next rotation. `delete_key` removes the keychain entry alongside the on-disk artifacts.
 
@@ -339,16 +343,31 @@ Operators who install the bridge outside these locations must symlink into one o
 - `BRIDGE_SHUTDOWN_TIMEOUT = 5 s` after stdin close before the child is killed.
 - `BridgeSession::Drop` kills and reaps the child — no zombie processes.
 
-Authenticode / `WinVerifyTrust` verification on the resolved bridge binary is a tracked hardening gap for environments where the Windows host itself is semi-trusted.
+Before spawning the bridge binary, `require_bridge_is_authenticode_signed` (`crates/enclaveapp-bridge/src/client.rs`) parses the PE header's `IMAGE_DIRECTORY_ENTRY_SECURITY` slot and refuses binaries that carry no Authenticode signature block — so the "attacker replaces the admin-path install with their own `cargo build` exe" case fails closed. Full `WinVerifyTrust` chain verification is out of scope from the WSL side and is an acknowledged residual risk. Dev builds can opt out via `ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED=1`.
 
-## Credential cache file tamper
+Concurrent bridge calls from two threads in the same client process are serialized by a process-wide `BRIDGE_SESSION_LOCK: Mutex<()>` held across spawn → request → shutdown. Without it, two threads would fire two back-to-back Windows Hello prompts, contend for the same TPM key slot, and double-bill TPM op quota. Mutex poisoning is recovered with `into_inner()` so one crashed session does not wedge the client for the process lifetime.
 
-Credential caches are stored as `[header][AES-GCM ciphertext]` pairs on disk. The header (magic, version, flags, timestamps, risk level, optional session-expiration fields) is **not** authenticated by AAD — the `EncryptionStorage::encrypt` / `decrypt` trait does not currently accept associated data. A same-UID attacker with file-write access to the cache file can edit header fields without invalidating the ciphertext.
+## Credential cache file tamper + rollback
 
-Consumer-layer mitigations already neutralize the practical risk-level-downgrade threat:
+Credential caches on disk have an unencrypted header (magic, version, flags, timestamps, risk level, optional session-expiration fields) and an AES-GCM ciphertext. The ciphertext body is already tag-authenticated. Header fields and older-ciphertext replay are addressed by an app-layer envelope that wraps the plaintext before encryption:
 
-- **`max(header, config)` on read** — sso-jwt's `effective_cached_risk_level` (`sso-jwt-lib/src/cache.rs:57-59`) and awsenc's equivalent always clamp the effective risk level back up to the configured minimum. Editing the header down does nothing.
-- **Server-side expiration is authoritative** — STS credentials (`awsenc`) carry `Expiration`; JWTs (`sso-jwt`) carry `exp`. Header-rolled timestamps don't extend server acceptance.
-- **Payload-embedded timestamps** — both consumers recheck `session_start` / `token_iat` / `expiration` *after* decrypt, ignoring whatever the unencrypted header claims.
+- **Envelope format** (`crates/enclaveapp-cache/src/envelope.rs`):
+  `[4B "APL1"][32B SHA-256(header bytes)][8B BE u64 counter][payload]`
+  passed to `EncryptionStorage::encrypt`.
+- **Header binding.** `SHA-256` covers the exact unencrypted header bytes; tampering with any header field is detected on decrypt as an envelope hash mismatch. The trait signature did not change, so all backends (SE, CNG, Linux TPM, keyring, WSL bridge) inherit the protection uniformly.
+- **Rollback counter.** The 8-byte counter is bumped on every successful write and persisted in a sibling `<cache>.counter` sidecar guarded by an exclusive `fs4` flock. On decrypt, the embedded counter must be `>= sidecar`; older ciphertexts are rejected as `Rollback { observed, expected_at_least }`.
+- **Legacy-cache migration.** `unwrap_plaintext` accepts pre-envelope payloads (no `APL1` magic) as legacy with `counter = 0`. Existing installs continue to decrypt; the first write after upgrade lands in the new format.
 
-AAD binding the header to the ciphertext (a proper cryptographic fix) is deferred. It would require a trait signature change across all four backends (SE, CNG, keyring, test-software) plus every consumer, plus a one-time on-disk format migration. See `THREAT_MODEL.md` § "Credential cache header tamper" for the full rationale.
+Consumer-layer defenses layer on top:
+
+- **`max(header, config)` on read** — sso-jwt and awsenc always clamp the effective risk level to at least the configured minimum (defense-in-depth for pre-migration legacy caches).
+- **Server-side expiration is authoritative** — STS credentials carry `Expiration`; JWTs carry `exp`. Even a rolled-back ciphertext expires at the real server-side deadline.
+- **Payload-embedded timestamps** — both consumers recheck `session_start` / `token_iat` / `expiration` *after* decrypt.
+
+Residual risk: an attacker who can rewrite **both** the `.enc` cache and the `.counter` sidecar in sync can still replay within the server-side validity window. Same-UID write-access to the cache dir is a generic trust-boundary assumption.
+
+## Metadata `.meta` tamper
+
+`KeyMeta` JSON (type, access policy, app-specific fields) ships next to every key as `<label>.meta`. Hardware backends (Apple SE, Windows CNG, Linux TPM) fix the access policy at key-creation time inside the chip, so `.meta` tamper on those backends is a UI-deception risk only — signing still prompts for Touch ID / Windows Hello regardless of what the JSON claims.
+
+On the **software / keyring backend** the hardware does not re-enforce, so `.meta` tamper was a full policy-downgrade vector. `metadata::save_meta_with_hmac` / `load_meta_with_hmac` now write and verify a `<label>.meta.hmac` HMAC-SHA256 sidecar keyed by a per-app random 32-byte HMAC key stored in the system keyring under `com.libenclaveapp.<app>` / `__meta_hmac_key__`. `enclaveapp-app-storage::ensure_key` verifies the sidecar on Linux; a mismatch yields a hard `meta_hmac_verify` error and refuses to load the key. Pre-upgrade keys without a sidecar fall through to the plain `load_meta` path for migration and pick up the sidecar on next regeneration.

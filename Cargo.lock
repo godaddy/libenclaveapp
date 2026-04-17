@@ -375,6 +375,8 @@ name = "enclaveapp-cache"
 version = "0.1.0"
 dependencies = [
  "enclaveapp-core",
+ "fs4",
+ "sha2",
  "tempfile",
 ]
 
@@ -387,9 +389,11 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "toml 0.8.23",
  "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -406,6 +410,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -437,6 +442,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
