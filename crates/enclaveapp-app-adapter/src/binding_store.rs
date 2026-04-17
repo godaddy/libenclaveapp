@@ -55,8 +55,19 @@ impl JsonFileBindingStore {
         ensure_parent_dir(&self.path)?;
         let json = serde_json::to_string_pretty(records)?;
         let temp_path = temp_path_for(&self.path);
-        fs::write(&temp_path, json)?;
-        set_file_permissions(&temp_path)?;
+        {
+            use std::io::Write;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.flush()?;
+        }
         fs::rename(&temp_path, &self.path)?;
         Ok(())
     }
@@ -284,19 +295,6 @@ fn set_dir_permissions(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn set_dir_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_file_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
