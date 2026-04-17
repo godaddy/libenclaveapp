@@ -6,6 +6,11 @@
 //! Uses AES-256-GCM with a random in-memory key. Provides no hardware
 //! backing; suitable only for tests and development.
 
+// aes-gcm 0.10 still uses generic-array 0.14 internally and emits a
+// deprecation notice on `Nonce::from_slice` — the 1.x migration is
+// upstream work, silence here so `-D warnings` doesn't trip.
+#![allow(deprecated)]
+
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use rand::RngCore;

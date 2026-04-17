@@ -12,16 +12,16 @@ workspace = true
 
 [features]
 default = []
-mock = ["aes-gcm", "rand"]
 
 [dependencies]
 enclaveapp-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = "0.1"
 
-# Mock backend (feature-gated)
-aes-gcm = { workspace = true, optional = true }
-rand = { workspace = true, optional = true }
+# Mock backend — always compiled so `ENCLAVEAPP_MOCK_STORAGE=1` can
+# swap it in at runtime without any feature flag gymnastics.
+aes-gcm = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 enclaveapp-test-support = { workspace = true }
