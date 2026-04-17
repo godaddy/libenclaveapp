@@ -23,6 +23,21 @@ pub trait EnclaveKeyManager: Send + Sync {
 
     /// Check if the hardware security backend is available on this system.
     fn is_available(&self) -> bool;
+
+    /// Check whether a key with this label exists, without creating it.
+    ///
+    /// Backends that route through the WSL bridge MUST override this —
+    /// the default implementation calls `public_key`, which on the bridge
+    /// has load-or-create semantics and would create the key as a
+    /// side effect. Native backends return `KeyNotFound` from
+    /// `public_key` for missing keys, so the default is safe there.
+    fn key_exists(&self, label: &str) -> Result<bool> {
+        match self.public_key(label) {
+            Ok(_) => Ok(true),
+            Err(crate::Error::KeyNotFound { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// ECDSA signing operations. Used by sshenc for SSH key signing.

@@ -216,6 +216,15 @@ pub fn handle_request(
             }
             Err(e) => BridgeResponse::error(&format!("delete_signing failed: {e}")),
         },
+        // Load-only existence check: returns "true"/"false" and does NOT
+        // create the key. Does not require prior init_signing.
+        // Needed because `init_signing` has load-or-create semantics, so
+        // clients that use public_key/list_keys as an existence test end
+        // up creating the key as a side effect.
+        "signing_key_exists" => match TpmSigningStorage::key_exists(app_name, key_label) {
+            Ok(exists) => BridgeResponse::success(if exists { "true" } else { "false" }),
+            Err(e) => BridgeResponse::error(&format!("signing_key_exists failed: {e}")),
+        },
         other => BridgeResponse::error(&format!("unknown method: {other}")),
     }
 }

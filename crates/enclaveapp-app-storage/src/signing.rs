@@ -89,6 +89,13 @@ impl EnclaveKeyManager for BridgeSignerWrapper {
     fn is_available(&self) -> bool {
         true
     }
+
+    fn key_exists(&self, label: &str) -> enclaveapp_core::Result<bool> {
+        // MUST NOT use the default `public_key`-based impl: on the WSL bridge,
+        // `public_key` routes through `init_signing` which has load-or-create
+        // semantics and would create the key as a side effect of the check.
+        enclaveapp_bridge::bridge_signing_key_exists(&self.bridge_path, &self.app_name, label)
+    }
 }
 
 #[cfg(target_os = "linux")]

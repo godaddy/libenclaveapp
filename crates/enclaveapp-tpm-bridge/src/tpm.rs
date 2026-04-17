@@ -213,6 +213,22 @@ mod platform {
                 .delete_key(key_label)
                 .map_err(|e| format!("key delete failed: {e}"))
         }
+
+        /// Check if a signing key exists without creating it. Unlike `new()`,
+        /// this does not call `ensure_signing_key` so it has no side effects.
+        pub fn key_exists(app_name: &str, key_label: &str) -> Result<bool, String> {
+            let signer = TpmSigner::new(app_name);
+
+            if !signer.is_available() {
+                return Err("TPM not available".to_string());
+            }
+
+            match signer.public_key(key_label) {
+                Ok(_) => Ok(true),
+                Err(enclaveapp_core::Error::KeyNotFound { .. }) => Ok(false),
+                Err(e) => Err(e.to_string()),
+            }
+        }
     }
 }
 
@@ -296,6 +312,10 @@ mod platform {
         #[allow(clippy::unnecessary_wraps)]
         pub fn delete(_app_name: &str, _key_label: &str) -> Result<(), String> {
             Ok(())
+        }
+
+        pub fn key_exists(_app_name: &str, _key_label: &str) -> Result<bool, String> {
+            Err("TPM signing bridge is only supported on Windows".to_string())
         }
     }
 }

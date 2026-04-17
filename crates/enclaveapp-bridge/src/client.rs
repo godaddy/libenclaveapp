@@ -454,6 +454,37 @@ pub fn bridge_delete_signing(bridge_path: &Path, app_name: &str, key_label: &str
     response.require_ok("bridge_delete_signing")
 }
 
+/// Check if a signing key exists on the bridge side without creating it.
+///
+/// Unlike `bridge_public_key` / `bridge_list_keys`, this does NOT invoke
+/// `init_signing`, so the TPM key is never created as a side effect of
+/// the check. Use this for duplicate-label guards.
+pub fn bridge_signing_key_exists(
+    bridge_path: &Path,
+    app_name: &str,
+    key_label: &str,
+) -> Result<bool> {
+    let request = BridgeRequest {
+        method: "signing_key_exists".to_string(),
+        params: BridgeParams::new(
+            String::new(),
+            AccessPolicy::None,
+            app_name.to_string(),
+            key_label.to_string(),
+        ),
+    };
+    let response = call_bridge(bridge_path, &request)?;
+    let result = response.require_result("bridge_signing_key_exists")?;
+    match result {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(enclaveapp_core::Error::KeyOperation {
+            operation: "bridge_signing_key_exists".into(),
+            detail: format!("unexpected result: {other}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -937,6 +968,82 @@ esac
         );
         bridge_delete_signing(&script, "sshenc", "default").unwrap();
         cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_signing_key_exists_returns_true() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "exists-true.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"signing_key_exists"'*'"key_label":"mine"'*) printf '{"result":"true","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        let exists = bridge_signing_key_exists(&script, "sshenc", "mine").unwrap();
+        assert!(exists);
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_signing_key_exists_returns_false() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script(
+            "exists-false.sh",
+            r#"#!/bin/sh
+read request_line
+case "$request_line" in
+  *'"method":"signing_key_exists"'*) printf '{"result":"false","error":null}\n' ;;
+  *) printf '{"result":null,"error":"unexpected request"}\n' ;;
+esac
+"#,
+        );
+        let exists = bridge_signing_key_exists(&script, "sshenc", "missing").unwrap();
+        assert!(!exists);
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_signing_key_exists_does_not_call_init_signing() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        // Bridge that records every request into a sentinel file and
+        // rejects any init_signing request.
+        let sentinel = std::env::temp_dir().join(format!(
+            "enclaveapp-bridge-exists-nolog-{}-{}",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        drop(fs::remove_file(&sentinel));
+        let script = temp_script(
+            "exists-no-init.sh",
+            &format!(
+                r#"#!/bin/sh
+read request_line
+echo "$request_line" >> "{sentinel}"
+case "$request_line" in
+  *'"method":"init_signing"'*) printf '{{"result":null,"error":"should not init"}}\n'; exit 0 ;;
+  *'"method":"signing_key_exists"'*) printf '{{"result":"false","error":null}}\n' ;;
+  *) printf '{{"result":null,"error":"unexpected method"}}\n' ;;
+esac
+"#,
+                sentinel = sentinel.display()
+            ),
+        );
+        let exists = bridge_signing_key_exists(&script, "sshenc", "probe").unwrap();
+        assert!(!exists);
+        let log = fs::read_to_string(&sentinel).unwrap_or_default();
+        assert!(
+            !log.contains("init_signing"),
+            "exists-check must not invoke init_signing, log was: {log}"
+        );
+        cleanup_script(&script);
+        drop(fs::remove_file(&sentinel));
     }
 
     #[cfg(unix)]
