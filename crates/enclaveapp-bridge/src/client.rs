@@ -705,6 +705,7 @@ mod tests {
 
     // ---- Authenticode / PE signature check -----------------------------
 
+    #[cfg(unix)]
     fn make_pe_bytes(security_size: u32, magic: u16) -> Vec<u8> {
         // DOS header (64 bytes) + NT sig (4) + COFF (20) + optional header
         // + data directories.
