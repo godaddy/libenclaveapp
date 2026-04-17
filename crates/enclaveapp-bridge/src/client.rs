@@ -5,13 +5,36 @@
 //! communicates via JSON-RPC over stdin/stdout.
 
 use crate::protocol::*;
+use enclaveapp_core::timeout::{
+    run_with_timeout, wait_with_timeout, LineReaderWithTimeout, TimeoutResult,
+};
 use enclaveapp_core::{AccessPolicy, Result};
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Maximum response size from the bridge (64 KB).
 const MAX_BRIDGE_RESPONSE_BYTES: usize = 64 * 1024;
+
+/// Default timeout for a single bridge request/response cycle. Covers
+/// TPM operations including biometric prompts (Windows Hello can take
+/// up to ~60s in practice). Override via `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS`.
+const DEFAULT_BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Timeout for `which` bridge discovery. Should be sub-second in practice.
+const BRIDGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Timeout for bridge shutdown (after we close stdin, it should exit promptly).
+const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn bridge_request_timeout() -> Duration {
+    std::env::var("ENCLAVEAPP_BRIDGE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_BRIDGE_REQUEST_TIMEOUT)
+}
 
 /// Find the bridge executable on the Windows filesystem (from WSL).
 ///
@@ -34,7 +57,11 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
         format!("{app_name}-tpm-bridge.exe"),
         format!("{app_name}-bridge.exe"),
     ] {
-        if let Ok(output) = Command::new("which").arg(&name).output() {
+        let mut cmd = Command::new("which");
+        cmd.arg(&name);
+        if let Ok(TimeoutResult::Completed(output)) =
+            run_with_timeout(cmd, BRIDGE_DISCOVERY_TIMEOUT)
+        {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -48,8 +75,9 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
 
 struct BridgeSession {
     child: std::process::Child,
-    stdout: std::io::BufReader<std::process::ChildStdout>,
+    reader: LineReaderWithTimeout,
     finished: bool,
+    request_timeout: Duration,
 }
 
 impl BridgeSession {
@@ -74,8 +102,9 @@ impl BridgeSession {
 
         Ok(Self {
             child,
-            stdout: std::io::BufReader::new(stdout),
+            reader: LineReaderWithTimeout::new(stdout),
             finished: false,
+            request_timeout: bridge_request_timeout(),
         })
     }
 
@@ -88,13 +117,25 @@ impl BridgeSession {
             stdin.flush().map_err(enclaveapp_core::Error::Io)?;
         }
 
-        let mut line = String::new();
-        let bytes_read = self
-            .stdout
-            .read_line(&mut line)
-            .map_err(enclaveapp_core::Error::Io)?;
+        let line = match self.reader.recv_line(self.request_timeout) {
+            TimeoutResult::Completed(Ok(line)) => line,
+            TimeoutResult::Completed(Err(e)) => return Err(enclaveapp_core::Error::Io(e)),
+            TimeoutResult::TimedOut => {
+                // Kill the child so we're not leaving a stuck TPM op running.
+                drop(self.child.kill());
+                drop(self.child.wait());
+                self.finished = true;
+                return Err(enclaveapp_core::Error::KeyOperation {
+                    operation: "bridge_read".into(),
+                    detail: format!(
+                        "bridge did not respond within {}s (set ENCLAVEAPP_BRIDGE_TIMEOUT_SECS to override)",
+                        self.request_timeout.as_secs()
+                    ),
+                });
+            }
+        };
 
-        if bytes_read > MAX_BRIDGE_RESPONSE_BYTES {
+        if line.len() > MAX_BRIDGE_RESPONSE_BYTES {
             return Err(enclaveapp_core::Error::KeyOperation {
                 operation: "bridge_read".into(),
                 detail: format!("bridge response exceeds {MAX_BRIDGE_RESPONSE_BYTES} byte limit"),
@@ -116,7 +157,25 @@ impl BridgeSession {
 
     fn finish(mut self) -> Result<()> {
         drop(self.child.stdin.take());
-        let status = self.child.wait().map_err(enclaveapp_core::Error::Io)?;
+        // Give the bridge a bounded window to exit cleanly after stdin close.
+        // If it hangs (e.g. wedged TPM state), kill it rather than blocking forever.
+        let status = match wait_with_timeout(&mut self.child, BRIDGE_SHUTDOWN_TIMEOUT)
+            .map_err(enclaveapp_core::Error::Io)?
+        {
+            TimeoutResult::Completed(status) => status,
+            TimeoutResult::TimedOut => {
+                drop(self.child.kill());
+                drop(self.child.wait());
+                self.finished = true;
+                return Err(enclaveapp_core::Error::KeyOperation {
+                    operation: "bridge_shutdown".into(),
+                    detail: format!(
+                        "bridge did not exit within {}s after stdin close",
+                        BRIDGE_SHUTDOWN_TIMEOUT.as_secs()
+                    ),
+                });
+            }
+        };
         self.finished = true;
         if status.success() {
             Ok(())
@@ -666,7 +725,7 @@ printf '{"result":"","error":null}\n'
             // Session dropped here — Drop should kill + wait the child
         }
         // Give the OS a moment to reap
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
         // Verify the process is gone using `kill -0 <pid>` (signal 0 checks existence)
         let status = Command::new("kill")
             .args(["-0", &child_pid.to_string()])
@@ -877,6 +936,35 @@ esac
 "#,
         );
         bridge_delete_signing(&script, "sshenc", "default").unwrap();
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_read_times_out_on_silent_bridge() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        // Bridge that accepts a request but never responds.
+        let script = temp_script("silent-bridge.sh", "#!/bin/sh\nread req\nsleep 120\n");
+        // Force a very short timeout for this test.
+        std::env::set_var("ENCLAVEAPP_BRIDGE_TIMEOUT_SECS", "1");
+        let start = std::time::Instant::now();
+        let request = BridgeRequest {
+            method: "init".to_string(),
+            params: BridgeParams::new(String::new(), AccessPolicy::None, "t".into(), "k".into()),
+        };
+        let err = call_bridge(&script, &request).unwrap_err();
+        std::env::remove_var("ENCLAVEAPP_BRIDGE_TIMEOUT_SECS");
+        // Should fail well before the bridge's 120s sleep finishes.
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "timeout should fire quickly, took {:?}",
+            start.elapsed()
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did not respond") || msg.contains("timeout"),
+            "expected timeout error, got: {msg}"
+        );
         cleanup_script(&script);
     }
 }

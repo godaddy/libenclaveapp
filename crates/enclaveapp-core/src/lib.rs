@@ -13,6 +13,7 @@ pub mod metadata;
 pub mod platform;
 pub mod process;
 pub mod quoting;
+pub mod timeout;
 pub mod traits;
 pub mod types;
 

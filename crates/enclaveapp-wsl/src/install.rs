@@ -9,6 +9,18 @@
 use crate::detect::{detect_distros, WslDistro};
 use crate::shell_config::{install_block, uninstall_block, ShellBlockConfig};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::time::Duration;
+
+/// Timeout for package manager installs (socat via apt/apk/dnf). Package
+/// downloads can legitimately take several minutes on slow networks, so
+/// allow a generous window but refuse to hang forever.
+#[cfg(target_os = "windows")]
+const WSL_DEP_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Timeout for quick WSL shell commands (chmod, which, etc.).
+#[cfg(target_os = "windows")]
+const WSL_QUICK_CMD_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub use crate::detect::decode_wsl_output;
 
@@ -264,14 +276,15 @@ fn copy_linux_binary(
     }
     std::fs::copy(src, &dest).map_err(|e| format!("copy binary: {e}"))?;
 
-    // Make executable via WSL
+    // Make executable via WSL (bounded timeout so a wedged distro can't hang us).
     if let Some(linux_home) = find_linux_home(distro_name) {
         let linux_path = format!("{linux_home}/{target}");
-        drop(
-            std::process::Command::new("wsl")
-                .args(["-d", distro_name, "--", "chmod", "+x", &linux_path])
-                .status(),
-        );
+        let mut cmd = std::process::Command::new("wsl");
+        cmd.args(["-d", distro_name, "--", "chmod", "+x", &linux_path]);
+        drop(enclaveapp_core::timeout::run_status_with_timeout(
+            cmd,
+            WSL_QUICK_CMD_TIMEOUT,
+        ));
     }
 
     actions.push(format!("Installed binary to ~/{target}"));
@@ -281,22 +294,30 @@ fn copy_linux_binary(
 /// Install bridge dependencies (socat + npiperelay) into a WSL distro.
 #[cfg(target_os = "windows")]
 fn install_bridge_deps(distro_name: &str, actions: &mut Vec<String>) -> Result<(), String> {
-    // Check and install socat
+    // Check and install socat (bounded by WSL_DEP_INSTALL_TIMEOUT so apt/dnf
+    // can't hang indefinitely on a stalled mirror or kernel panic).
     if !wsl_has_command(distro_name, "socat") {
-        let status = std::process::Command::new("wsl")
-            .args([
-                "-d",
-                distro_name,
-                "--",
-                "bash",
-                "-c",
-                "sudo apt-get install -y socat 2>/dev/null \
-                 || sudo apk add socat 2>/dev/null \
-                 || sudo dnf install -y socat 2>/dev/null",
-            ])
-            .status();
-        match status {
-            Ok(s) if s.success() => actions.push("Installed socat".to_string()),
+        let mut cmd = std::process::Command::new("wsl");
+        cmd.args([
+            "-d",
+            distro_name,
+            "--",
+            "bash",
+            "-c",
+            "sudo apt-get install -y socat 2>/dev/null \
+             || sudo apk add socat 2>/dev/null \
+             || sudo dnf install -y socat 2>/dev/null",
+        ]);
+        match enclaveapp_core::timeout::run_status_with_timeout(cmd, WSL_DEP_INSTALL_TIMEOUT) {
+            Ok(enclaveapp_core::timeout::TimeoutResult::Completed(s)) if s.success() => {
+                actions.push("Installed socat".to_string());
+            }
+            Ok(enclaveapp_core::timeout::TimeoutResult::TimedOut) => {
+                actions.push(format!(
+                    "Warning: socat install timed out after {}s",
+                    WSL_DEP_INSTALL_TIMEOUT.as_secs()
+                ));
+            }
             _ => actions.push("Warning: could not install socat automatically".to_string()),
         }
     } else {
@@ -319,10 +340,12 @@ fn install_bridge_deps(distro_name: &str, actions: &mut Vec<String>) -> Result<(
 /// Check if a command exists in a WSL distro.
 #[cfg(target_os = "windows")]
 fn wsl_has_command(distro_name: &str, cmd: &str) -> bool {
-    std::process::Command::new("wsl")
-        .args(["-d", distro_name, "--", "command", "-v", cmd])
-        .output()
-        .is_ok_and(|o| o.status.success())
+    let mut wsl = std::process::Command::new("wsl");
+    wsl.args(["-d", distro_name, "--", "command", "-v", cmd]);
+    matches!(
+        enclaveapp_core::timeout::run_with_timeout(wsl, WSL_QUICK_CMD_TIMEOUT),
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(o)) if o.status.success()
+    )
 }
 
 #[cfg(test)]
