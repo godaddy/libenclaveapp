@@ -19,6 +19,11 @@ use enclaveapp_core::types::validate_label;
 use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use p256::SecretKey;
 use std::path::PathBuf;
+#[cfg_attr(
+    not(all(feature = "keyring-storage", target_env = "gnu")),
+    allow(unused_imports)
+)]
+use zeroize::{Zeroize, Zeroizing};
 
 /// Version byte for encrypted key files.
 const ENCRYPTED_KEY_VERSION: u8 = 0x01;
@@ -106,6 +111,50 @@ fn keyring_available(app_name: &str) -> bool {
     }
 }
 
+/// Keyring account name under which the per-app meta-HMAC key is stored.
+///
+/// The meta-HMAC key is a random 32-byte value, generated on first use
+/// and reused across all keys for the app. It authenticates
+/// `<label>.meta` JSON contents so a same-UID attacker cannot rewrite
+/// `AccessPolicy` (or any other policy-bearing meta field) without
+/// also having keyring access.
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
+const META_HMAC_ACCOUNT: &str = "__meta_hmac_key__";
+
+/// Load or create the per-app meta-HMAC key in the system keyring.
+///
+/// Returns `Ok(Some(key))` when keyring access succeeds, `Ok(None)`
+/// when the keyring is unavailable — callers fall back to writing
+/// plain (unauthenticated) meta in that case so the library stays
+/// functional on systems without a running Secret Service.
+///
+/// Exposed publicly so `enclaveapp-app-storage` can pass the key
+/// into `metadata::load_meta_with_hmac` at `ensure_key` time without
+/// taking its own keyring dependency.
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
+pub fn meta_hmac_key(app_name: &str) -> Option<Zeroizing<Vec<u8>>> {
+    use rand::RngCore;
+    let entry = keyring::Entry::new(app_name, META_HMAC_ACCOUNT).ok()?;
+    match entry.get_secret() {
+        Ok(bytes) if bytes.len() == 32 => Some(Zeroizing::new(bytes)),
+        Ok(_) | Err(_) => {
+            let mut buf = [0_u8; 32];
+            rand::thread_rng().fill_bytes(&mut buf);
+            entry.set_secret(&buf).ok()?;
+            let out = Zeroizing::new(buf.to_vec());
+            // Wipe the local array; Zeroizing only wraps the Vec copy.
+            buf.zeroize();
+            Some(out)
+        }
+    }
+}
+
+#[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
+#[allow(dead_code)]
+pub fn meta_hmac_key(_app_name: &str) -> Option<Zeroizing<Vec<u8>>> {
+    None
+}
+
 /// Save the private key bytes to a `.key` file, encrypting with a keyring-stored
 /// KEK when `use_keyring` is true. When `use_keyring` is false (testing only),
 /// falls back to unencrypted file storage.
@@ -166,22 +215,27 @@ fn save_encrypted(
     use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
     use rand::RngCore;
 
-    // Generate random KEK
-    let mut kek = [0_u8; KEK_SIZE];
-    rand::thread_rng().fill_bytes(&mut kek);
+    // Generate random KEK. Wrap in Zeroizing so we wipe it after use.
+    let mut kek_arr = [0_u8; KEK_SIZE];
+    rand::thread_rng().fill_bytes(&mut kek_arr);
+    let kek = Zeroizing::new(kek_arr);
+    // Local mutable was required for fill_bytes; wipe the intermediate.
+    kek_arr.zeroize();
 
     // Store KEK in keyring
     let entry = keyring::Entry::new(app_name, label).map_err(|e| Error::KeyOperation {
         operation: "keyring_entry".into(),
         detail: e.to_string(),
     })?;
-    entry.set_secret(&kek).map_err(|e| Error::KeyOperation {
-        operation: "keyring_store".into(),
-        detail: e.to_string(),
-    })?;
+    entry
+        .set_secret(kek.as_slice())
+        .map_err(|e| Error::KeyOperation {
+            operation: "keyring_store".into(),
+            detail: e.to_string(),
+        })?;
 
     // Encrypt with AES-256-GCM
-    let cipher = Aes256Gcm::new_from_slice(&kek).map_err(|e| Error::KeyOperation {
+    let cipher = Aes256Gcm::new_from_slice(kek.as_slice()).map_err(|e| Error::KeyOperation {
         operation: "aes_init".into(),
         detail: e.to_string(),
     })?;
@@ -211,16 +265,21 @@ fn save_encrypted(
 }
 
 /// Load the private key bytes from a `.key` file, decrypting if necessary.
+///
+/// The returned `Zeroizing<Vec<u8>>` wipes the plaintext key material when
+/// the caller drops it. This is load-bearing for the threat-model commitment
+/// that keyring/software-backend plaintext key bytes do not linger in heap
+/// allocations after use.
 fn load_private_key_bytes(
     app_name: &str,
     key_path: &std::path::Path,
     label: &str,
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     let bytes = metadata::read_no_follow(key_path)?;
 
     // Backward compatibility: raw 32-byte key (unencrypted)
     if bytes.len() == RAW_KEY_SIZE {
-        return Ok(bytes);
+        return Ok(Zeroizing::new(bytes));
     }
 
     // Encrypted format: version(1) + nonce(12) + encrypted_key(32) + tag(16) = 61
@@ -253,8 +312,16 @@ fn load_private_key_bytes(
 }
 
 /// Decrypt an encrypted key file using the KEK from the keyring.
+///
+/// The KEK retrieved from the keyring is zeroized on drop (wrapped in
+/// `Zeroizing<Vec<u8>>`). The decrypted plaintext key bytes are also
+/// returned as `Zeroizing<Vec<u8>>` so they never linger past the caller.
 #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
-fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<Vec<u8>> {
+fn decrypt_private_key(
+    app_name: &str,
+    file_data: &[u8],
+    label: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
     use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 
     let nonce_bytes = &file_data[1..1 + GCM_NONCE_SIZE];
@@ -265,10 +332,10 @@ fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<
         operation: "keyring_entry".into(),
         detail: e.to_string(),
     })?;
-    let kek = entry.get_secret().map_err(|e| Error::KeyOperation {
+    let kek = Zeroizing::new(entry.get_secret().map_err(|e| Error::KeyOperation {
         operation: "keyring_retrieve".into(),
         detail: format!("cannot retrieve key encryption key from keyring: {e}"),
-    })?;
+    })?);
 
     if kek.len() != KEK_SIZE {
         return Err(Error::KeyOperation {
@@ -288,6 +355,7 @@ fn decrypt_private_key(app_name: &str, file_data: &[u8], label: &str) -> Result<
 
     cipher
         .decrypt(nonce, encrypted)
+        .map(Zeroizing::new)
         .map_err(|e| Error::KeyOperation {
             operation: "decrypt_key".into(),
             detail: format!("failed to decrypt private key: {e}"),
@@ -331,16 +399,30 @@ pub fn generate_and_save(
     // SEC1 uncompressed public key (65 bytes: 0x04 || X || Y)
     let pub_bytes: Vec<u8> = public_key.to_encoded_point(false).as_bytes().to_vec();
 
-    // Save private key (encrypted if keyring is available, plaintext otherwise)
-    let secret_bytes = secret_key.to_bytes();
+    // Save private key (encrypted if keyring is available, plaintext
+    // otherwise). Wrap the plaintext byte buffer in Zeroizing so the
+    // raw key is wiped as soon as we've written the encrypted form.
+    let secret_bytes = Zeroizing::new(secret_key.to_bytes().to_vec());
     save_private_key(config, &key_path, &secret_bytes, label)?;
 
     // Save cached public key
     metadata::save_pub_key(&dir, label, &pub_bytes)?;
 
-    // Save metadata
+    // Save metadata with an HMAC sidecar so a same-UID attacker cannot
+    // rewrite `AccessPolicy` in `.meta` without also having access to
+    // the per-app meta-HMAC key in the system keyring. If the keyring
+    // is unavailable (no Secret Service) we fall back to the plain
+    // save_meta path — the keyring is strictly weaker than hardware
+    // anyway and we document the residual risk.
     let meta = KeyMeta::new(label, key_type, policy);
-    metadata::save_meta(&dir, label, &meta)?;
+    match meta_hmac_key(&config.app_name) {
+        Some(hmac_key) => {
+            metadata::save_meta_with_hmac(&dir, label, &meta, hmac_key.as_slice())?;
+        }
+        None => {
+            metadata::save_meta(&dir, label, &meta)?;
+        }
+    }
 
     Ok(pub_bytes)
 }

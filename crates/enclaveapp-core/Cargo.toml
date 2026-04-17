@@ -18,4 +18,9 @@ dirs = { workspace = true }
 thiserror = { workspace = true }
 libc = { workspace = true }
 fs2 = { workspace = true }
+sha2 = { workspace = true }
 tracing = "0.1"
+
+# Windows-only: SetProcessMitigationPolicy for `harden_process`.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

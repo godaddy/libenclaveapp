@@ -241,6 +241,30 @@ pub fn save_meta(dir: &Path, label: &str, meta: &KeyMeta) -> Result<()> {
     atomic_write(&meta_path, json.as_bytes())
 }
 
+/// Save key metadata plus an HMAC sidecar (`<label>.meta.hmac`) that
+/// authenticates the meta JSON under `hmac_key`.
+///
+/// Intended for backends whose meta tamper is a full policy bypass —
+/// i.e. the software/keyring backend, where the hardware does not
+/// re-enforce `AccessPolicy` at sign/decrypt time. Callers that hold
+/// a per-app HMAC key (stored in the system keyring alongside the
+/// KEK) invoke this instead of [`save_meta`]. The hardware backends
+/// continue to call the plain [`save_meta`] because their key
+/// enforcement is fixed at key-creation time on the chip and cannot
+/// be relaxed by editing `.meta`.
+pub fn save_meta_with_hmac(dir: &Path, label: &str, meta: &KeyMeta, hmac_key: &[u8]) -> Result<()> {
+    crate::types::validate_label(label)?;
+    let meta_path = dir.join(format!("{label}.meta"));
+    let json =
+        serde_json::to_string_pretty(meta).map_err(|e| Error::Serialization(e.to_string()))?;
+    atomic_write(&meta_path, json.as_bytes())?;
+
+    let tag = compute_meta_hmac(hmac_key, json.as_bytes());
+    let hmac_path = dir.join(format!("{label}.meta.hmac"));
+    atomic_write(&hmac_path, tag.as_bytes())?;
+    Ok(())
+}
+
 /// Load key metadata from a JSON file. Returns a default if the file doesn't exist.
 pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
     crate::types::validate_label(label)?;
@@ -256,6 +280,95 @@ pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
     }
     let content = read_to_string_no_follow(&meta_path)?;
     serde_json::from_str(&content).map_err(|e| Error::Serialization(e.to_string()))
+}
+
+/// Load key metadata with an HMAC check.
+///
+/// If a sidecar `<label>.meta.hmac` exists, the HMAC is verified
+/// against `hmac_key`; on mismatch, returns [`Error::KeyOperation`]
+/// with `operation = "meta_hmac_verify"`. If the sidecar is absent,
+/// the meta is loaded verbatim — this preserves migration for
+/// legacy caches from before the sidecar shipped. Callers that care
+/// about strict verification should check for sidecar presence
+/// explicitly before accepting loaded meta.
+pub fn load_meta_with_hmac(dir: &Path, label: &str, hmac_key: &[u8]) -> Result<KeyMeta> {
+    crate::types::validate_label(label)?;
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return load_meta(dir, label);
+    }
+    let content = read_to_string_no_follow(&meta_path)?;
+
+    let hmac_path = dir.join(format!("{label}.meta.hmac"));
+    if hmac_path.exists() {
+        let expected_hex = read_to_string_no_follow(&hmac_path)?;
+        let actual_hex = compute_meta_hmac(hmac_key, content.as_bytes());
+        if !constant_time_eq(expected_hex.trim().as_bytes(), actual_hex.as_bytes()) {
+            return Err(Error::KeyOperation {
+                operation: "meta_hmac_verify".into(),
+                detail: format!(
+                    "`.meta.hmac` does not match the stored `.meta` JSON for label {label}: \
+                     metadata was tampered with after save"
+                ),
+            });
+        }
+    }
+
+    serde_json::from_str(&content).map_err(|e| Error::Serialization(e.to_string()))
+}
+
+/// Compute HMAC-SHA256 over `data` keyed by `key`, hex-encoded.
+///
+/// Implemented directly over SHA-256 per RFC 2104 so we don't pull in
+/// a new dep for a single use. The output is lowercase hex, 64 chars.
+fn compute_meta_hmac(key: &[u8], data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    const BLOCK_SIZE: usize = 64; // SHA-256 block size
+
+    // Prepare K' — either pad to block size, or hash first if key > block.
+    let mut k = [0_u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hashed = Sha256::digest(key);
+        k[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36_u8; BLOCK_SIZE];
+    let mut opad = [0x5c_u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(data);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+    let outer_digest = outer.finalize();
+
+    let mut out = String::with_capacity(64);
+    for byte in outer_digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Constant-time equality. Returns `true` iff `a == b`.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Save a cached public key file.
@@ -323,7 +436,7 @@ pub fn list_labels_for_extensions(dir: &Path, extensions: &[&str]) -> Result<Vec
 /// Delete all files associated with a key label.
 pub fn delete_key_files(dir: &Path, label: &str) -> Result<()> {
     crate::types::validate_label(label)?;
-    let extensions = ["meta", "pub", "handle", "ssh.pub"];
+    let extensions = ["meta", "meta.hmac", "pub", "handle", "ssh.pub"];
     let mut found_any = false;
     for ext in &extensions {
         let path = dir.join(format!("{label}.{ext}"));
@@ -435,6 +548,88 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("enclaveapp-core-test-{pid}-{id}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn meta_hmac_roundtrip_accepts_unchanged_meta() {
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new(
+            "roundtrip",
+            KeyType::Encryption,
+            AccessPolicy::BiometricOnly,
+        );
+        save_meta_with_hmac(&dir, "roundtrip", &meta, hmac_key).unwrap();
+        let loaded = load_meta_with_hmac(&dir, "roundtrip", hmac_key).unwrap();
+        assert_eq!(loaded.access_policy, AccessPolicy::BiometricOnly);
+        assert_eq!(loaded.label, "roundtrip");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn meta_hmac_rejects_tampered_meta() {
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new("tamper", KeyType::Encryption, AccessPolicy::BiometricOnly);
+        save_meta_with_hmac(&dir, "tamper", &meta, hmac_key).unwrap();
+
+        // Rewrite .meta to flip AccessPolicy → None, leaving the HMAC sidecar untouched.
+        let meta_path = dir.join("tamper.meta");
+        let raw = std::fs::read_to_string(&meta_path).unwrap();
+        let tampered = raw.replace("biometric_only", "none");
+        std::fs::write(&meta_path, tampered).unwrap();
+
+        let err = load_meta_with_hmac(&dir, "tamper", hmac_key).unwrap_err();
+        assert!(
+            err.to_string().contains("meta_hmac_verify"),
+            "expected HMAC-verify failure, got: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn meta_hmac_rejects_wrong_key() {
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new("wrongkey", KeyType::Encryption, AccessPolicy::None);
+        save_meta_with_hmac(&dir, "wrongkey", &meta, hmac_key).unwrap();
+
+        let bad_key = b"different-hmac-key-material-32by";
+        let err = load_meta_with_hmac(&dir, "wrongkey", bad_key).unwrap_err();
+        assert!(err.to_string().contains("meta_hmac_verify"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn meta_hmac_load_without_sidecar_is_transparent() {
+        // Legacy caches saved before the sidecar shipped must load OK.
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
+        save_meta(&dir, "legacy", &meta).unwrap(); // no sidecar
+        let loaded = load_meta_with_hmac(&dir, "legacy", hmac_key).unwrap();
+        assert_eq!(loaded.label, "legacy");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn compute_meta_hmac_is_stable() {
+        // HMAC-SHA256 of an empty message under an empty key, from RFC 4231
+        // test vector 1 isn't directly applicable (uses 20-byte key), so we
+        // just assert our function is deterministic.
+        let key = b"k";
+        let data = b"message";
+        let a = compute_meta_hmac(key, data);
+        let b = compute_meta_hmac(key, data);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64); // 32 bytes hex-encoded
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_length_mismatch() {
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
     }
 
     #[test]
