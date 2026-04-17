@@ -24,15 +24,19 @@ The current workspace supports four active consumers:
 ```
 libenclaveapp/
   crates/
-    enclaveapp-core/          Traits, types, metadata, shared utilities
+    enclaveapp-core/          Traits, types, metadata, shared utilities, process hardening
     enclaveapp-app-storage/   App-level bootstrap for encryption/signing
-    enclaveapp-apple/         macOS Secure Enclave backend
-    enclaveapp-windows/       Windows TPM backend
-    enclaveapp-linux-tpm/     Linux TPM backend
+    enclaveapp-app-adapter/   Secret delivery substrate (BindingStore, SecretStore, launcher, ...)
+    enclaveapp-apple/         macOS Secure Enclave backend (CryptoKit + Keychain wrapping)
+    enclaveapp-windows/       Windows TPM backend (CNG)
+    enclaveapp-linux-tpm/     Linux TPM backend (tss-esapi)
     enclaveapp-keyring/       Keyring-backed backend (Linux production)
-    enclaveapp-test-software/ Test-only plaintext backend
+    enclaveapp-test-software/ Test-only plaintext backend (not shipped in production)
     enclaveapp-wsl/           WSL detection and shell/profile helpers
     enclaveapp-bridge/        JSON-RPC bridge protocol + WSL client
+    enclaveapp-tpm-bridge/    Shared TPM bridge server (JSON-RPC stdio, used by awsenc/sshenc/sso-jwt)
+    enclaveapp-cache/         Shared binary cache file format (magic + length-prefixed blobs)
+    enclaveapp-build-support/ Shared build.rs helpers (Windows PE resource compilation)
     enclaveapp-test-support/  Mock backend for tests
 ```
 
@@ -70,8 +74,28 @@ It also centralizes WSL bridge lookup, access-policy handling, and app-specific 
 
 ### WSL support
 
-- `enclaveapp-bridge` defines the JSON-RPC bridge client and protocol
+- `enclaveapp-bridge` defines the JSON-RPC bridge **client** and wire protocol
+- `enclaveapp-tpm-bridge` is the shared JSON-RPC bridge **server** (runs natively on Windows; parameterized by `app_name` / `key_label`). `awsenc-tpm-bridge`, `sshenc-tpm-bridge`, and `sso-jwt-tpm-bridge` are thin wrappers over it.
 - `enclaveapp-wsl` handles WSL detection, distro enumeration, shell/profile changes, and install helpers
+
+### Shared infrastructure
+
+Beyond the backends, a handful of crates provide cross-consumer utilities:
+
+- **`enclaveapp-app-adapter`** — generic secret-delivery substrate used by Type 1-3 apps. Provides `BindingStore`, `SecretStore`, the program resolver, the `execve()`-based launcher (with `mlock` + zeroize of env-override bytes), provenance tracking, state-locking, and `TempConfig::write` (with the per-platform `create_platform_config()` memfd/tempfile selection).
+- **`enclaveapp-cache`** — the shared on-disk cache file format (`[magic][version][flags][length-prefixed blobs]`). Consumed by sso-jwt's token cache and awsenc's credential cache.
+- **`enclaveapp-tpm-bridge`** — the shared bridge server crate; delegated to by the per-app bridge binaries.
+- **`enclaveapp-build-support`** — factored-out helpers for Windows `build.rs` resource compilation.
+
+### Process hardening
+
+`enclaveapp_core::process::harden_process()` is called as the first line of every enclave app binary's `main()`. It applies, best-effort (failures warn but don't abort):
+
+- `setrlimit(RLIMIT_CORE, 0)` on all Unix — no core dumps that could capture secret buffers.
+- `prctl(PR_SET_DUMPABLE, 0)` on Linux — `/proc/<pid>/mem` becomes root-only, `ptrace` attach from same-UID peers is denied.
+- `prctl(PR_SET_NO_NEW_PRIVS, 1)` on Linux — subsequent `exec*()` can't gain setuid/file-capabilities privileges.
+
+See `crates/enclaveapp-core/src/process.rs`. `mlock_buffer` / `munlock_buffer` are exposed for consumer crates that want to pin specific byte buffers in RAM.
 
 ## Access policy model
 
@@ -159,8 +183,8 @@ Signing keys are long-lived identity keys (e.g., SSH keys). At Levels 1-3, the h
 | **1** | macOS Secure Enclave | **The SE hardware.** `sshenc` sends data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. Works for both signed and unsigned binaries on Apple Silicon. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` on disk is an opaque SE handle (not key material); it is written with 0600 permissions today. AES-GCM wrapping under a Keychain-stored key is planned (see `fix-macos.md`) and not yet implemented. | Touch ID / biometric enforced by SE hardware per-signature (when access policy is set). | Secure Enclave coprocessor + handle file on disk (0600). Keychain-wrapped handle is a planned hardening. |
 | **2** | Windows TPM 2.0 | **The TPM hardware.** CNG sends signing requests to the TPM via NCrypt. | **No** — key is a non-exportable TPM object. | Windows Hello (biometric/PIN) enforced per-signature via `NCRYPT_UI_POLICY`. | TPM 2.0 chip. |
 | **3** | Linux TPM 2.0 | **The TPM hardware.** Signing performed by the TPM via `tss-esapi`. | **No** — key is TPM-resident. | Not enforced (no standard Linux biometric API). | TPM 2.0 device (`/dev/tpmrm0`). glibc only. |
-| **4** | Software (Linux glibc) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing via the `p256` crate. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
-| **5** | Software (Linux musl) | **Software.** Private key read from disk into memory. | **Yes (plaintext on disk)** — P-256 private key stored as a file with 0o600 permissions. | Not enforced. | `~/.config/{app}/keys/` plaintext. |
+| **4** | Software (Linux glibc, keyring) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing via the `p256` crate. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
+| **—** | `enclaveapp-test-software` | **Software, plaintext.** Test-only. Not used in any shipped binary. Never selected at runtime. | Yes (plaintext). | Not enforced. | Exists only to exercise the trait plumbing in unit tests. Linux musl builds are **not a supported production target** for libenclaveapp. |
 
 #### Encryption key security
 
@@ -173,8 +197,8 @@ The blast radius of encryption key compromise is further bounded by the expirati
 | **1** | macOS Secure Enclave | **The SE hardware.** ECDH key agreement happens inside the SE. The shared secret is derived internally; only the AES-GCM decryption of the ciphertext body happens in software. Handle blob stored 0600 on disk; Keychain-wrapped handle is a planned hardening (see `fix-macos.md`). | **No** — impossible. | Touch ID / biometric can be required per-decrypt. | Ciphertext on disk can only be decrypted by the SE that created the key. Full disk access is insufficient without the SE. |
 | **2** | Windows TPM 2.0 | **The TPM hardware** performs ECDH. | **No** — TPM-bound. | Windows Hello can be required per-decrypt. | Only decryptable on the same machine's TPM. |
 | **3** | Linux TPM 2.0 | **The TPM hardware** via `tss-esapi`. | **No** — TPM-bound. | Not enforced. | Same machine-binding as Windows TPM. |
-| **4** | Software (Linux glibc) | **Software.** P-256 key decrypted from keyring. | **Yes (encrypted at rest)** — keyring-protected. | Not enforced. | Keyring-encrypted key protects cache at rest. |
-| **5** | Software (Linux musl) | **Software.** P-256 key read from disk. | **Yes (plaintext on disk)** — 0o600 permissions only. | Not enforced. | Cache protection relies entirely on filesystem permissions. |
+| **4** | Software (Linux glibc, keyring) | **Software.** P-256 key decrypted from keyring. | **Yes (encrypted at rest)** — keyring-protected. | Not enforced. | Keyring-encrypted key protects cache at rest. |
+| **—** | `enclaveapp-test-software` | **Software, plaintext.** Test-only; not selected at runtime. | Yes (plaintext). | Not enforced. | Exists to exercise the trait plumbing in unit tests. Linux musl is not a supported production target. |
 
 #### macOS: Secure Enclave access and key persistence
 
@@ -194,17 +218,19 @@ The `com.apple.developer.secure-enclave` entitlement is a **Security.framework**
 
 In both cases, the SE performs all ECDSA signing and ECDH key agreement. The AES-256-GCM wrapping layer protects the persistence of the SE handle, not the cryptographic operations themselves.
 
-#### macOS signed vs. unsigned
+#### macOS path in practice (signed and unsigned)
 
-On macOS, the `enclaveapp-apple` backend auto-detects which path to use at runtime:
+There is one code path. `CryptoKit`'s `SecureEnclave.P256.*.PrivateKey` APIs work **without** a Developer ID cert or entitlements, and the SE always performs all ECDSA and ECDH operations regardless of signing state. The signing identity only affects the login-keychain UX for the AES-256-GCM wrapping key (see the previous section):
 
-- **Signed/entitled (Level 1):** The app is code-signed with a Developer ID certificate and has the Secure Enclave entitlement. Keys are created inside SE hardware via `SecureEnclave.P256.Signing.PrivateKey` / `SecureEnclave.P256.KeyAgreement.PrivateKey`. The key material physically cannot be extracted. This is the production path for distributed binaries.
+- **Ad-hoc signed** (default from `swiftc` / `rustc`, `cargo build`, `brew install`): one "Always Allow" prompt per binary rebuild at the same path. Silent until the next upgrade.
+- **Trusted signing identity** (e.g. Apple Developer ID): zero prompts across rebuilds — the keychain scopes access by identity, not hash.
+- **Different binary at a different path**: always prompted, regardless of signing.
 
-- **Unsigned/development (Level 4):** The app is not code-signed or lacks entitlements (typical during local development with `cargo build`). Keys are created via regular `CryptoKit.P256` (not SE-bound). The private key's `dataRepresentation` is currently written to disk as a 0600 `.handle` file without additional wrapping; Keychain-backed AES-GCM wrapping is planned (see `fix-macos.md`). Even today the keys are not hardware-bound in this mode.
+The "entitled path" (Path 1 in `fix-macos.md` — `SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` / `kSecAttrIsPermanent`) is **deferred**. It requires a provisioning profile that ad-hoc-signed and self-signed binaries cannot obtain. The current Path-2 wrapping already closes the same-UID `.handle` theft threat for Homebrew and `cargo install` distribution.
 
-#### Linux glibc vs. musl
+#### Linux
 
-Glibc builds can access the system keyring (D-Bus Secret Service / GNOME Keyring / KWallet) to encrypt private key files at rest (Level 5). Musl builds (Alpine, static binaries) have no keyring and store keys as plaintext files with 0o600 permissions (Level 6). Both can use TPM 2.0 when available (glibc only, via `tss-esapi`), which upgrades to Level 3.
+Glibc builds with the system keyring (D-Bus Secret Service / GNOME Keyring / KWallet) use the `enclaveapp-keyring` backend to encrypt private key files at rest (Level 4). Glibc builds also use TPM 2.0 via `tss-esapi` when it's available (Level 3). Linux musl is not a supported production target; the `enclaveapp-test-software` plaintext backend exists only for unit-test plumbing.
 
 ### Windows shell environments
 
@@ -246,7 +272,7 @@ Enclave apps are native binaries and work under any shell that can invoke execut
 
 ## Application integration types
 
-Every enclave app is classified by how it delivers secrets to the target application. The `enclaveapp-app-adapter` crate defines three integration types, listed from most secure to least secure:
+Every enclave app is classified by how it delivers secrets to the target application. The `enclaveapp-app-adapter` crate defines four integration types, listed from most-controlled to least-controlled:
 
 ### Type 1: HelperTool
 
@@ -286,9 +312,41 @@ The security value of a Type 4 app is in the **acquisition and caching** layers:
 
 ### Consumer mapping
 
-| Consumer | Integration Type | Mechanism |
-|---|---|---|
-| `sshenc` | Type 1 (HelperTool) | SSH agent protocol; keys used in-process for signing |
-| `awsenc` | Type 1 (HelperTool) | `credential_process` directive in `~/.aws/config` |
-| `npmenc` | Type 2 (EnvInterpolation) | `.npmrc` with `${NPM_TOKEN}` placeholders |
-| `sso-jwt` | Type 4 (CredentialSource) | Obtains and caches JWTs; consumed by Type 1/2/3 apps as a token provider |
+| Consumer | Ships binaries | Integration Type | Mechanism |
+|---|---|---|---|
+| `sshenc` | `sshenc`, `sshenc-agent`, `sshenc-keygen`, `sshenc-pkcs11`, `gitenc`, `sshenc-tpm-bridge` | Type 1 (HelperTool) | SSH agent protocol; keys used in-process for signing |
+| `awsenc` | `awsenc`, `awsenc-tpm-bridge` | Type 1 (HelperTool) | `credential_process` directive in `~/.aws/config` |
+| `npmenc` | `npmenc`, `npxenc` | Type 2 (EnvInterpolation) | `.npmrc` with `${NPM_TOKEN}` placeholders |
+| `sso-jwt` | `sso-jwt`, `sso-jwt-napi`, `sso-jwt-tpm-bridge` | Type 4 (CredentialSource) | Obtains and caches JWTs; consumed by Type 1/2/3 apps as a token provider |
+
+## WSL bridge discovery
+
+The WSL client (`enclaveapp-bridge::client::find_bridge`) searches a fixed list of `/mnt/c/` paths for the Windows bridge binary — PATH-based fallback via `which` was removed because a user-writable `$PATH` entry could substitute a malicious bridge, and the library performs no Authenticode verification on the resolved executable. Candidate paths:
+
+```
+/mnt/c/Program Files/<app>/<app>-tpm-bridge.exe
+/mnt/c/ProgramData/<app>/<app>-tpm-bridge.exe
+/mnt/c/Program Files/<app>/<app>-bridge.exe
+/mnt/c/ProgramData/<app>/<app>-bridge.exe
+```
+
+Operators who install the bridge outside these locations must symlink into one of them. The bridge protocol enforces additional runtime bounds:
+
+- `MAX_BRIDGE_RESPONSE_BYTES = 64 KB` — oversized responses are rejected.
+- `DEFAULT_BRIDGE_REQUEST_TIMEOUT = 120 s` — covers Windows Hello prompts; override via `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS`.
+- `BRIDGE_SHUTDOWN_TIMEOUT = 5 s` after stdin close before the child is killed.
+- `BridgeSession::Drop` kills and reaps the child — no zombie processes.
+
+Authenticode / `WinVerifyTrust` verification on the resolved bridge binary is a tracked hardening gap for environments where the Windows host itself is semi-trusted.
+
+## Credential cache file tamper
+
+Credential caches are stored as `[header][AES-GCM ciphertext]` pairs on disk. The header (magic, version, flags, timestamps, risk level, optional session-expiration fields) is **not** authenticated by AAD — the `EncryptionStorage::encrypt` / `decrypt` trait does not currently accept associated data. A same-UID attacker with file-write access to the cache file can edit header fields without invalidating the ciphertext.
+
+Consumer-layer mitigations already neutralize the practical risk-level-downgrade threat:
+
+- **`max(header, config)` on read** — sso-jwt's `effective_cached_risk_level` (`sso-jwt-lib/src/cache.rs:57-59`) and awsenc's equivalent always clamp the effective risk level back up to the configured minimum. Editing the header down does nothing.
+- **Server-side expiration is authoritative** — STS credentials (`awsenc`) carry `Expiration`; JWTs (`sso-jwt`) carry `exp`. Header-rolled timestamps don't extend server acceptance.
+- **Payload-embedded timestamps** — both consumers recheck `session_start` / `token_iat` / `expiration` *after* decrypt, ignoring whatever the unencrypted header claims.
+
+AAD binding the header to the ciphertext (a proper cryptographic fix) is deferred. It would require a trait signature change across all four backends (SE, CNG, keyring, test-software) plus every consumer, plus a one-time on-disk format migration. See `THREAT_MODEL.md` § "Credential cache header tamper" for the full rationale.
