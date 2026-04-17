@@ -12,6 +12,42 @@ use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::*;
 use windows::Win32::Security::OBJECT_SECURITY_INFORMATION;
 
+/// Expected in-memory size of `NCRYPT_UI_POLICY` as the Windows API
+/// defines it — `DWORD dwVersion`, `DWORD dwFlags`, and three
+/// `LPCWSTR` pointers. This mirrors the C declaration in
+/// `ncrypt.h`:
+/// ```c
+/// typedef struct NCRYPT_UI_POLICY {
+///     DWORD   dwVersion;
+///     DWORD   dwFlags;
+///     LPCWSTR pszCreationTitle;
+///     LPCWSTR pszFriendlyName;
+///     LPCWSTR pszDescription;
+/// } NCRYPT_UI_POLICY;
+/// ```
+/// On 64-bit Windows: 4 + 4 + 8 + 8 + 8 = 32 bytes. The trailing
+/// pointer alignment adds nothing on x64 (pointers are already
+/// naturally aligned), so the struct lays out at exactly 32 bytes.
+/// On 32-bit Windows: 4 + 4 + 4 + 4 + 4 = 20 bytes. We support both.
+///
+/// A silent `windows-rs` struct-layout change would change
+/// `size_of::<NCRYPT_UI_POLICY>()`, which would desync from what
+/// `NCryptSetProperty` / `NCryptGetProperty` expect via the `cbInput`
+/// argument. The compile-time assertion below catches that at build
+/// time rather than at runtime.
+const EXPECTED_NCRYPT_UI_POLICY_SIZE: usize = if cfg!(target_pointer_width = "64") {
+    32
+} else {
+    20
+};
+
+const _: () = assert!(
+    std::mem::size_of::<NCRYPT_UI_POLICY>() == EXPECTED_NCRYPT_UI_POLICY_SIZE,
+    "NCRYPT_UI_POLICY layout changed — NCryptSetProperty / NCryptGetProperty \
+     cbInput values in this module will desync. Update the expected size \
+     constant after auditing the new layout."
+);
+
 /// Set a Windows Hello UI policy on a key handle.
 ///
 /// When the policy is anything other than `None`, the key is marked with

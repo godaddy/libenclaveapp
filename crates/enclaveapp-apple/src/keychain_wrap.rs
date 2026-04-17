@@ -157,7 +157,7 @@ pub fn decrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], blob: &[u8]) -> Result<Ve
 /// given app. The account is the key `<label>` so every key gets its own
 /// wrapping-key entry.
 pub fn service_name_for(app_name: &str) -> String {
-    format!("com.enclaveapp.{app_name}")
+    format!("com.libenclaveapp.{app_name}")
 }
 
 /// Store a wrapping key in the login keychain. Replaces any existing
@@ -268,7 +268,12 @@ pub fn keychain_delete(app_name: &str, label: &str) -> Result<()> {
             account_bytes.len() as i32,
         )
     };
-    if rc == 0 {
+    // 12 = SE_ERR_KEYCHAIN_NOT_FOUND, which the Swift side now also
+    // returns when no default keychain is reachable. `keychain_delete`
+    // is idempotent — treat both "entry already absent" and "no
+    // keychain to look in" as success so uninstall / cleanup don't
+    // error out in isolated `$HOME` contexts.
+    if rc == 0 || rc == 12 {
         Ok(())
     } else {
         Err(Error::KeyOperation {
@@ -462,8 +467,8 @@ mod tests {
 
     #[test]
     fn service_name_matches_expected_format() {
-        assert_eq!(service_name_for("sshenc"), "com.enclaveapp.sshenc");
-        assert_eq!(service_name_for("awsenc"), "com.enclaveapp.awsenc");
+        assert_eq!(service_name_for("sshenc"), "com.libenclaveapp.sshenc");
+        assert_eq!(service_name_for("awsenc"), "com.libenclaveapp.awsenc");
     }
 
     // ───── Real-keychain integration tests (macOS only) ─────

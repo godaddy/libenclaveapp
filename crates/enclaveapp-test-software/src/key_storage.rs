@@ -18,6 +18,7 @@ use enclaveapp_core::types::validate_label;
 use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
 use p256::SecretKey;
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 /// Always available (no hardware required).
 pub fn is_available() -> bool {
@@ -78,8 +79,10 @@ pub fn generate_and_save(
     let public_key = secret_key.public_key();
     let pub_bytes: Vec<u8> = public_key.to_encoded_point(false).as_bytes().to_vec();
 
-    // Plaintext storage (test only)
-    let secret_bytes = secret_key.to_bytes();
+    // Plaintext storage (test only). The byte buffer is zeroized on
+    // drop so we don't leave key material in test-harness heaps across
+    // parallel runs.
+    let secret_bytes = Zeroizing::new(secret_key.to_bytes().to_vec());
     metadata::atomic_write(&key_path, &secret_bytes)?;
     metadata::restrict_file_permissions(&key_path)?;
 
@@ -100,7 +103,9 @@ pub fn load_secret_key(config: &SoftwareConfig, label: &str) -> Result<SecretKey
             label: label.to_string(),
         });
     }
-    let bytes = metadata::read_no_follow(&key_path)?;
+    // Wipe the raw key-file bytes after we've built the SecretKey so
+    // they don't linger in test-harness heap.
+    let bytes = Zeroizing::new(metadata::read_no_follow(&key_path)?);
     SecretKey::from_slice(&bytes).map_err(|e| Error::KeyOperation {
         operation: "load_secret_key".into(),
         detail: e.to_string(),

@@ -259,6 +259,24 @@ impl AppEncryptionStorage {
         expected_policy: AccessPolicy,
     ) -> Result<()> {
         if encryptor.public_key(&config.key_label).is_ok() {
+            // Key exists — verify the `.meta.hmac` sidecar first when a
+            // per-app meta-HMAC key is available in the system keyring
+            // (Linux / keyring backend only). A HMAC mismatch is a hard
+            // failure: someone rewrote `.meta` after save, so we don't
+            // trust any stored policy and refuse to proceed.
+            #[cfg(target_os = "linux")]
+            if let Some(hmac_key) = enclaveapp_keyring::meta_hmac_key(&config.app_name) {
+                if let Err(e) =
+                    metadata::load_meta_with_hmac(keys_dir, &config.key_label, hmac_key.as_slice())
+                {
+                    let msg = e.to_string();
+                    if msg.contains("meta_hmac_verify") {
+                        return Err(StorageError::KeyInitFailed(msg));
+                    }
+                    // Non-HMAC errors (missing file, deserialize, etc.)
+                    // fall through to the legacy handling below.
+                }
+            }
             // Key exists — check policy match.
             if let Ok(meta) = metadata::load_meta(keys_dir, &config.key_label) {
                 if meta.access_policy != expected_policy {

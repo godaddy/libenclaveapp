@@ -10,6 +10,7 @@ use enclaveapp_core::{AccessPolicy, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Maximum response size from the bridge (64 KB).
@@ -48,9 +49,14 @@ fn bridge_request_timeout() -> Duration {
 /// Only fixed admin-path install locations are included in the auto-discovery
 /// fallback. PATH-based lookup via `which` was removed intentionally — a
 /// user-writable `$PATH` entry on the WSL side could substitute a malicious
-/// bridge binary, and this library performs no Authenticode verification
-/// on the resolved executable. Users who install to non-admin paths (scoop,
-/// a manual build) must set `ENCLAVEAPP_BRIDGE_PATH` explicitly.
+/// bridge binary. Users who install to non-admin paths (scoop, a manual
+/// build) must set `ENCLAVEAPP_BRIDGE_PATH` explicitly.
+///
+/// The resolved executable is additionally gated by
+/// [`require_bridge_is_authenticode_signed`] at spawn time — a replaced
+/// binary with no Authenticode signature is refused even if it landed at
+/// a trusted path. That check can be opted out of for dev / CI builds via
+/// `ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED=1`.
 #[allow(clippy::print_stderr)] // user-facing warning for misconfigured env var
 pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
     // 1. Explicit env var override (app-specific, then generic).
@@ -87,6 +93,121 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
         .map(|(path, _)| path)
 }
 
+/// Env var to opt out of the Authenticode-signature check on the bridge
+/// binary. Intended for dev / CI builds; production installs ship signed
+/// bridges and should leave this unset.
+const ALLOW_UNSIGNED_ENV: &str = "ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED";
+
+/// Refuse to spawn a bridge binary that lacks an Authenticode signature
+/// block.
+///
+/// Parses the PE header's Certificate Table data directory
+/// (`IMAGE_DIRECTORY_ENTRY_SECURITY`, index 4) and rejects the binary if
+/// that directory is absent or zero-sized. This does NOT verify the
+/// signature cryptographically or chase the certificate chain — that
+/// requires `WinVerifyTrust` on Windows, which isn't reachable from the
+/// WSL side without an extra helper process. What it does catch is the
+/// concrete attack in the threat model: an attacker who replaces the
+/// bridge binary with one they compiled themselves (e.g. ad-hoc `cargo
+/// build` output that ships no signature at all). Admin-held replacement
+/// with a validly-signed-but-malicious binary is out of scope and
+/// acknowledged as such in the threat model.
+///
+/// Opt-out: set `ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED=1`.
+pub fn require_bridge_is_authenticode_signed(bridge_path: &Path) -> Result<()> {
+    if std::env::var_os(ALLOW_UNSIGNED_ENV).is_some() {
+        return Ok(());
+    }
+    // Only PE binaries have Authenticode. Anything that's not `.exe`
+    // (test shell scripts, developer wrappers) bypasses this check —
+    // the real WSL bridge is always `*.exe`.
+    let is_exe = bridge_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+    if !is_exe {
+        return Ok(());
+    }
+    match pe_has_authenticode_table(bridge_path) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(enclaveapp_core::Error::KeyOperation {
+            operation: "bridge_verify".into(),
+            detail: format!(
+                "bridge binary at {} has no Authenticode signature; refusing to spawn. \
+                 Reinstall from a signed release or set {ALLOW_UNSIGNED_ENV}=1 to bypass.",
+                bridge_path.display()
+            ),
+        }),
+        Err(detail) => Err(enclaveapp_core::Error::KeyOperation {
+            operation: "bridge_verify".into(),
+            detail,
+        }),
+    }
+}
+
+/// Inspect a PE file's optional-header data-directory table and return
+/// whether the `IMAGE_DIRECTORY_ENTRY_SECURITY` (index 4) slot points to
+/// a non-empty certificate table.
+///
+/// Layout references:
+/// - DOS header: 64 bytes, with `e_lfanew: u32` at offset 0x3C
+///   pointing to the NT header.
+/// - NT signature: "PE\0\0" (4 bytes).
+/// - COFF file header: 20 bytes; `machine` at offset 0.
+/// - Optional header: starts immediately after COFF. First 2 bytes are
+///   the magic (PE32 = 0x10b, PE32+ = 0x20b) which determines whether
+///   the data directory table starts at offset 96 (PE32) or 112 (PE32+).
+/// - Data directory `IMAGE_DIRECTORY_ENTRY_SECURITY` is slot 4:
+///   `virtual_address: u32, size: u32` — size > 0 means the binary
+///   has an Authenticode cert table appended.
+fn pe_has_authenticode_table(path: &Path) -> std::result::Result<bool, String> {
+    let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if data.len() < 0x40 {
+        return Err("file too small for DOS header".into());
+    }
+    if &data[0..2] != b"MZ" {
+        return Err("not a PE image (missing MZ magic)".into());
+    }
+    let e_lfanew = u32::from_le_bytes(
+        data[0x3C..0x40]
+            .try_into()
+            .map_err(|_| "bad e_lfanew slice".to_string())?,
+    ) as usize;
+    if data.len() < e_lfanew + 0x18 {
+        return Err("file too small for NT header".into());
+    }
+    if &data[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+        return Err("not a PE image (missing PE signature)".into());
+    }
+    let coff_start = e_lfanew + 4;
+    let opt_header_start = coff_start + 20;
+    if data.len() < opt_header_start + 2 {
+        return Err("file too small for optional header magic".into());
+    }
+    let magic = u16::from_le_bytes(
+        data[opt_header_start..opt_header_start + 2]
+            .try_into()
+            .map_err(|_| "bad optional-header magic slice".to_string())?,
+    );
+    // Offset within the optional header to DataDirectory[0].
+    let data_dir_offset = match magic {
+        0x10b => 96,  // PE32
+        0x20b => 112, // PE32+
+        _ => return Err(format!("unknown PE optional-header magic 0x{magic:x}")),
+    };
+    // Each DataDirectory is 8 bytes; SECURITY is index 4.
+    let security_dir = opt_header_start + data_dir_offset + 4 * 8;
+    if data.len() < security_dir + 8 {
+        return Err("file too small for data directory table".into());
+    }
+    let size = u32::from_le_bytes(
+        data[security_dir + 4..security_dir + 8]
+            .try_into()
+            .map_err(|_| "bad security dir size slice".to_string())?,
+    );
+    Ok(size > 0)
+}
+
 struct BridgeSession {
     child: std::process::Child,
     reader: LineReaderWithTimeout,
@@ -96,6 +217,7 @@ struct BridgeSession {
 
 impl BridgeSession {
     fn spawn(bridge_path: &Path) -> Result<Self> {
+        require_bridge_is_authenticode_signed(bridge_path)?;
         let mut child = Command::new(bridge_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -221,8 +343,42 @@ fn finish_session<T>(session: BridgeSession, result: Result<T>) -> Result<T> {
     }
 }
 
+/// Process-wide serialization around bridge sessions.
+///
+/// The WSL→Windows bridge is a JSON-RPC child process. Two threads in
+/// the same client process that simultaneously spawn independent
+/// sessions would: (a) race Windows Hello prompts against each other
+/// so the user sees two back-to-back biometric dialogs, (b) contend
+/// for the same TPM key slot on the server side, and (c) produce
+/// indistinguishable interleaved stderr if anything goes wrong. The
+/// bridge server itself serializes per-session, but each session
+/// costs a child-process spawn and a biometric prompt — we'd rather
+/// just not do two at once.
+///
+/// This mutex is held for the full lifetime of a single session
+/// (spawn → request(s) → shutdown). It's deliberately unconditional:
+/// the overhead is a single uncontended lock acquisition per call,
+/// and bridge operations are already in the tens-of-ms / TPM-op
+/// range where lock overhead is noise.
+///
+/// A `PoisonError` from a prior panicked session is recovered with
+/// `into_inner()` — the next session starts fresh, and panics in
+/// one session's child/pipe handling should not wedge the whole
+/// client for the process's lifetime.
+static BRIDGE_SESSION_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the process-wide bridge-session lock, transparently
+/// recovering from poisoning.
+fn bridge_session_lock() -> std::sync::MutexGuard<'static, ()> {
+    match BRIDGE_SESSION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
 /// Call the bridge with a request and return the response.
 pub fn call_bridge(bridge_path: &Path, request: &BridgeRequest) -> Result<BridgeResponse> {
+    let _guard = bridge_session_lock();
     let mut session = BridgeSession::spawn(bridge_path)?;
     let response = session.request(request);
     finish_session(session, response)
@@ -247,6 +403,7 @@ fn call_bridge_after_init(
     access_policy: AccessPolicy,
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
+    let _guard = bridge_session_lock();
     let mut session = BridgeSession::spawn(bridge_path)?;
     let response = (|| -> Result<BridgeResponse> {
         session
@@ -363,6 +520,7 @@ fn call_bridge_after_signing_init(
     access_policy: AccessPolicy,
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
+    let _guard = bridge_session_lock();
     let mut session = BridgeSession::spawn(bridge_path)?;
     let response = (|| -> Result<BridgeResponse> {
         session
@@ -543,6 +701,165 @@ mod tests {
     fn find_bridge_returns_none_when_not_found() {
         let result = find_bridge("enclaveapp-nonexistent-test-app");
         assert!(result.is_none());
+    }
+
+    // ---- Authenticode / PE signature check -----------------------------
+
+    #[cfg(unix)]
+    fn make_pe_bytes(security_size: u32, magic: u16) -> Vec<u8> {
+        // DOS header (64 bytes) + NT sig (4) + COFF (20) + optional header
+        // + data directories.
+        //
+        // Optional header size varies by magic (PE32 vs PE32+).
+        let opt_header_size: usize = if magic == 0x10b {
+            96 + 16 * 8
+        } else {
+            112 + 16 * 8
+        };
+        let total = 0x40 + 4 + 20 + opt_header_size;
+        let mut buf = vec![0_u8; total];
+        // "MZ"
+        buf[0] = b'M';
+        buf[1] = b'Z';
+        // e_lfanew → NT headers start at offset 0x40.
+        buf[0x3C..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
+        // "PE\0\0"
+        buf[0x40] = b'P';
+        buf[0x41] = b'E';
+        // COFF at 0x44 is all zeros (acceptable for the check).
+        // Optional header starts at 0x40 + 4 + 20 = 0x58.
+        let opt_header_start = 0x58;
+        buf[opt_header_start..opt_header_start + 2].copy_from_slice(&magic.to_le_bytes());
+        // Data directory offset within the optional header.
+        let data_dir_offset = if magic == 0x10b { 96 } else { 112 };
+        // Security directory is index 4: 8 bytes per entry, skip 4.
+        let security_dir = opt_header_start + data_dir_offset + 4 * 8;
+        // VirtualAddress (unused by the check).
+        buf[security_dir..security_dir + 4].copy_from_slice(&0_u32.to_le_bytes());
+        // Size — this is what we check.
+        buf[security_dir + 4..security_dir + 8].copy_from_slice(&security_size.to_le_bytes());
+        buf
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pe_has_authenticode_table_detects_signed_pe32() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let bytes = make_pe_bytes(1024, 0x10b);
+        let path = std::env::temp_dir().join(format!(
+            "enclaveapp-pe-signed-{}-{}.exe",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::write(&path, &bytes).unwrap();
+        assert!(pe_has_authenticode_table(&path).unwrap());
+        drop(fs::remove_file(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pe_has_authenticode_table_detects_signed_pe32plus() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let bytes = make_pe_bytes(4096, 0x20b);
+        let path = std::env::temp_dir().join(format!(
+            "enclaveapp-pe-signed64-{}-{}.exe",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::write(&path, &bytes).unwrap();
+        assert!(pe_has_authenticode_table(&path).unwrap());
+        drop(fs::remove_file(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pe_has_authenticode_table_detects_unsigned() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let bytes = make_pe_bytes(0, 0x10b);
+        let path = std::env::temp_dir().join(format!(
+            "enclaveapp-pe-unsigned-{}-{}.exe",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::write(&path, &bytes).unwrap();
+        assert!(!pe_has_authenticode_table(&path).unwrap());
+        drop(fs::remove_file(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pe_has_authenticode_table_rejects_non_pe() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "enclaveapp-pe-notpe-{}-{}.exe",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        // Write > 64 bytes of arbitrary non-PE content so we clear the
+        // "too small for DOS header" check and actually hit the
+        // "missing MZ magic" branch.
+        let content: Vec<u8> = b"#!/bin/sh\n# not a PE image\nexit 0\n"
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(b'x').take(128))
+            .collect();
+        fs::write(&path, &content).unwrap();
+        let err = pe_has_authenticode_table(&path).unwrap_err();
+        assert!(err.contains("MZ"), "expected MZ-missing error, got: {err}");
+        drop(fs::remove_file(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_signed_skips_non_exe_paths() {
+        // Shell scripts (our test-bridge pattern) must pass the gate
+        // unconditionally so existing integration tests keep working.
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let script = temp_script("unsigned-script.sh", "#!/bin/sh\nexit 0\n");
+        require_bridge_is_authenticode_signed(&script).unwrap();
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_signed_rejects_unsigned_exe() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        // Ensure the opt-out env var isn't set from a previous test.
+        std::env::remove_var(ALLOW_UNSIGNED_ENV);
+        let bytes = make_pe_bytes(0, 0x10b);
+        let path = std::env::temp_dir().join(format!(
+            "enclaveapp-pe-rejected-{}-{}.exe",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::write(&path, &bytes).unwrap();
+        let err = require_bridge_is_authenticode_signed(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("no Authenticode signature"),
+            "got: {err}"
+        );
+        drop(fs::remove_file(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_signed_honors_allow_unsigned_env() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        let bytes = make_pe_bytes(0, 0x10b);
+        let path = std::env::temp_dir().join(format!(
+            "enclaveapp-pe-allowed-{}-{}.exe",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::write(&path, &bytes).unwrap();
+        std::env::set_var(ALLOW_UNSIGNED_ENV, "1");
+        let result = require_bridge_is_authenticode_signed(&path);
+        std::env::remove_var(ALLOW_UNSIGNED_ENV);
+        assert!(
+            result.is_ok(),
+            "opt-out env must skip the check: {result:?}"
+        );
+        drop(fs::remove_file(&path));
     }
 
     #[cfg(unix)]
@@ -783,6 +1100,118 @@ printf '{"result":"","error":null}\n'
 
     #[cfg(unix)]
     #[test]
+    fn concurrent_call_bridge_serializes_via_session_lock() {
+        // Two threads calling `call_bridge` against a script that
+        // records the time it took the request to arrive and holds
+        // open stdin for ~150 ms. If the client-side lock actually
+        // serializes, the second call's "arrival" happens AFTER the
+        // first call's "exit". We assert that by checking the
+        // timestamps written to two disjoint sentinel files — their
+        // non-overlapping `started`/`finished` intervals prove
+        // serialization even though both threads raced to start.
+        let _outer = SCRIPT_TEST_MUTEX.lock().unwrap();
+
+        let marker_dir = std::env::temp_dir().join(format!(
+            "enclaveapp-bridge-concurrent-{}-{}",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir_all(&marker_dir).unwrap();
+        let marker_arg = marker_dir.display().to_string();
+
+        let script_body = r#"#!/bin/sh
+marker_dir="$1"
+pid=$$
+started="$marker_dir/started.$pid"
+finished="$marker_dir/finished.$pid"
+date +%s%N > "$started"
+read request_line
+sleep 0.15
+printf '{"result":"","error":null}\n'
+date +%s%N > "$finished"
+"#;
+        let script = temp_script("concurrent-session.sh", script_body);
+        // Wrap the script so each invocation receives the marker_dir as $1.
+        let wrapper_path = std::env::temp_dir().join(format!(
+            "enclaveapp-bridge-concurrent-wrapper-{}-{}.sh",
+            std::process::id(),
+            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::write(
+            &wrapper_path,
+            format!("#!/bin/sh\nexec {} {}\n", script.display(), marker_arg),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&wrapper_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&wrapper_path, perms).unwrap();
+
+        let wrapper_a = wrapper_path.clone();
+        let wrapper_b = wrapper_path.clone();
+        let handle_a = std::thread::spawn(move || {
+            let req = BridgeRequest {
+                method: "encrypt".to_string(),
+                params: BridgeParams::new(
+                    "aGVsbG8=".into(),
+                    AccessPolicy::None,
+                    "t".into(),
+                    "k".into(),
+                ),
+            };
+            call_bridge(&wrapper_a, &req).unwrap();
+        });
+        let handle_b = std::thread::spawn(move || {
+            // Tiny jitter so the two threads don't both lose to the
+            // fastest-scheduled one before the first spawn.
+            std::thread::sleep(Duration::from_millis(10));
+            let req = BridgeRequest {
+                method: "encrypt".to_string(),
+                params: BridgeParams::new(
+                    "Y2lwaGVy".into(),
+                    AccessPolicy::None,
+                    "t".into(),
+                    "k".into(),
+                ),
+            };
+            call_bridge(&wrapper_b, &req).unwrap();
+        });
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+
+        // Read all started/finished timestamps and confirm the two
+        // sessions' intervals do not overlap.
+        let mut started: Vec<u128> = Vec::new();
+        let mut finished: Vec<u128> = Vec::new();
+        for entry in fs::read_dir(&marker_dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let content = fs::read_to_string(entry.path()).unwrap();
+            let ts: u128 = content.trim().parse().unwrap();
+            if name.starts_with("started.") {
+                started.push(ts);
+            } else if name.starts_with("finished.") {
+                finished.push(ts);
+            }
+        }
+        assert_eq!(started.len(), 2, "expected two sessions to have started");
+        assert_eq!(finished.len(), 2, "expected two sessions to have finished");
+        started.sort_unstable();
+        finished.sort_unstable();
+        // First session fully finishes before the second session starts.
+        assert!(
+            finished[0] <= started[1],
+            "sessions overlapped: finished[0]={} started[1]={} — client-side lock did not serialize",
+            finished[0],
+            started[1]
+        );
+
+        drop(fs::remove_dir_all(&marker_dir));
+        cleanup_script(&script);
+        drop(fs::remove_file(&wrapper_path));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bridge_session_drop_kills_child() {
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         let script = temp_script("drop-kill.sh", "#!/bin/sh\nwhile true; do sleep 1; done\n");
@@ -810,16 +1239,20 @@ printf '{"result":"","error":null}\n'
 
     #[cfg(unix)]
     #[test]
-    fn bridge_init_sends_biometric_compat_field() {
+    fn bridge_init_encodes_access_policy_only() {
+        // The legacy `biometric: bool` compat field has been removed.
+        // Accept the init when `access_policy` is present and reject
+        // if a legacy `biometric` field is observed on the wire — we
+        // must not regress to encoding it.
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         let script = temp_script(
-            "biometric-compat.sh",
+            "access-policy-only.sh",
             r#"#!/bin/sh
 read request_line
 case "$request_line" in
-  *'"biometric":true'*'"access_policy":"biometric_only"'*) printf '{"result":"","error":null}\n' ;;
-  *'"access_policy":"biometric_only"'*'"biometric":true'*) printf '{"result":"","error":null}\n' ;;
-  *) printf '{"result":null,"error":"missing biometric compat field"}\n' ;;
+  *'"biometric"'*) printf '{"result":null,"error":"legacy biometric field leaked onto wire"}\n' ;;
+  *'"access_policy":"biometric_only"'*) printf '{"result":"","error":null}\n' ;;
+  *) printf '{"result":null,"error":"missing access_policy"}\n' ;;
 esac
 "#,
         );

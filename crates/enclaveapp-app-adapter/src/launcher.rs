@@ -10,6 +10,106 @@ pub struct LaunchRequest {
     pub args: Vec<String>,
     pub env_overrides: BTreeMap<String, String>,
     pub env_removals: Vec<String>,
+    /// Inherited env vars to scrub from the child process's environment
+    /// before spawn.
+    ///
+    /// Each entry is either an exact variable name (e.g. `"NPM_TOKEN"`)
+    /// or a prefix pattern ending in `*` (e.g. `"NPM_TOKEN_*"`,
+    /// `"AWS_*"`). The launcher removes the matching variable from the
+    /// child command via `env_remove`, zeroizes our own process's copy
+    /// via `std::env::remove_var` (best-effort — the libc environ block
+    /// may still hold stale bytes until libc compacts), and never
+    /// forwards the value.
+    ///
+    /// This is opt-in. The threat model addressed: inherited parent-env
+    /// secrets (e.g. a developer with `NPM_TOKEN` already exported at
+    /// login) would otherwise be propagated to the wrapped child
+    /// unchanged, bypassing the `env_overrides` zeroize-on-drop. Type 2
+    /// consumers (`npmenc`, etc.) that know which variable families
+    /// could carry secrets should list them here.
+    pub env_scrub_patterns: Vec<String>,
+}
+
+impl LaunchRequest {
+    /// Add env-scrub patterns to this request. Chains with other
+    /// builder-style usage; patterns are appended to any already set.
+    #[must_use]
+    pub fn with_env_scrub<I, S>(mut self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.env_scrub_patterns
+            .extend(patterns.into_iter().map(Into::into));
+        self
+    }
+}
+
+/// Return `true` if `key` matches any pattern in `patterns`.
+///
+/// A pattern ending in `*` is a prefix match; everything else is an
+/// exact name match. Empty patterns never match. Case-sensitive on
+/// Unix; case-insensitive on Windows because Windows env names are
+/// case-insensitive.
+fn matches_scrub_pattern(key: &str, patterns: &[String]) -> bool {
+    for pat in patterns {
+        if pat.is_empty() {
+            continue;
+        }
+        let matched = if let Some(prefix) = pat.strip_suffix('*') {
+            env_key_starts_with(key, prefix)
+        } else {
+            env_key_eq(key, pat)
+        };
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn env_key_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+#[cfg(not(windows))]
+fn env_key_eq(a: &str, b: &str) -> bool {
+    a == b
+}
+
+#[cfg(windows)]
+fn env_key_starts_with(key: &str, prefix: &str) -> bool {
+    key.len() >= prefix.len() && key[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+#[cfg(not(windows))]
+fn env_key_starts_with(key: &str, prefix: &str) -> bool {
+    key.starts_with(prefix)
+}
+
+/// Apply `env_scrub_patterns` to the child `command` and to our own
+/// process environment: remove matching variables from both, zeroizing
+/// the owned `String` copies we pull out of `std::env::vars()`.
+fn apply_env_scrub(command: &mut Command, patterns: &[String]) {
+    if patterns.is_empty() {
+        return;
+    }
+    let matching_keys: Vec<String> = std::env::vars()
+        .map(|(k, mut v)| {
+            // Zeroize the value string's bytes in place before it
+            // drops. These are our process's own copies.
+            zeroize_str(&mut v);
+            k
+        })
+        .filter(|k| matches_scrub_pattern(k, patterns))
+        .collect();
+    for key in matching_keys {
+        command.env_remove(&key);
+        // Best-effort scrub of our own process env so any later
+        // subprocess spawned without `env_clear` does not re-inherit.
+        std::env::remove_var(&key);
+    }
 }
 
 /// Execute a launch request, spawning the target process.
@@ -17,6 +117,15 @@ pub struct LaunchRequest {
 /// Secret env var values are locked in RAM (`mlock`) before spawn to prevent
 /// them from being paged to swap. After the child exits, the values are
 /// zeroized in-place and then unlocked.
+///
+/// On Unix, the spawned child has `RLIMIT_CORE` clamped to 0 via a `pre_exec`
+/// hook so that a crash of the target process cannot dump its environment
+/// (which holds the secrets interpolated for Type 2 delivery). The parent
+/// process's own core-dump policy is independent.
+///
+/// Inherited env vars matching any `env_scrub_patterns` entry are removed
+/// from both the child's command and the parent's own process environment
+/// before spawn.
 ///
 /// Takes ownership of the `LaunchRequest` so that `env_overrides` values
 /// (which may contain secrets) can be overwritten with zeros after the
@@ -36,9 +145,15 @@ pub fn run(mut request: LaunchRequest) -> Result<ExitStatus> {
         command.env_remove(key);
     }
 
+    // Scrub inherited secret env vars before applying overrides so an
+    // accidentally-overlapping override still wins over the scrub.
+    apply_env_scrub(&mut command, &request.env_scrub_patterns);
+
     for (key, value) in &request.env_overrides {
         command.env(key, value);
     }
+
+    disable_core_dumps_in_child(&mut command);
 
     let status = command.status()?;
 
@@ -49,6 +164,32 @@ pub fn run(mut request: LaunchRequest) -> Result<ExitStatus> {
     }
 
     Ok(status)
+}
+
+#[cfg(unix)]
+fn disable_core_dumps_in_child(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    #[allow(unsafe_code)]
+    unsafe {
+        command.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // Errors from setrlimit here are non-fatal — the spawn still proceeds
+            // and the OS-level core_pattern may already block dumps. We don't
+            // propagate errors to avoid refusing to launch on unusual systems.
+            let _ = libc::setrlimit(libc::RLIMIT_CORE, &limit);
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn disable_core_dumps_in_child(_command: &mut Command) {
+    // Windows does not have RLIMIT_CORE. WER crash-dump collection is a
+    // system-wide policy; child-process-local opt-out is not available.
 }
 
 /// Overwrite the contents of a string with zeros without deallocating.
@@ -72,5 +213,113 @@ mod tests {
         zeroize_str(&mut s);
         assert!(s.bytes().all(|b| b == 0));
         assert_eq!(s.len(), 12);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_inherits_zero_core_limit() {
+        use std::process::Command;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "ulimit -c"]);
+        disable_core_dumps_in_child(&mut cmd);
+        let output = cmd.output().expect("spawn sh");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "0", "child should inherit core limit of 0");
+    }
+
+    #[test]
+    fn matches_scrub_pattern_exact() {
+        let pats = vec!["NPM_TOKEN".into()];
+        assert!(matches_scrub_pattern("NPM_TOKEN", &pats));
+        assert!(!matches_scrub_pattern("NPM_TOKEN_2", &pats));
+        assert!(!matches_scrub_pattern("OTHER", &pats));
+    }
+
+    #[test]
+    fn matches_scrub_pattern_prefix() {
+        let pats = vec!["NPM_TOKEN_*".into(), "AWS_*".into()];
+        assert!(matches_scrub_pattern("NPM_TOKEN_", &pats));
+        assert!(matches_scrub_pattern("NPM_TOKEN_REGISTRY", &pats));
+        assert!(matches_scrub_pattern("AWS_ACCESS_KEY_ID", &pats));
+        assert!(!matches_scrub_pattern("NPM_OTHER", &pats));
+        assert!(!matches_scrub_pattern("GITHUB_TOKEN", &pats));
+    }
+
+    #[test]
+    fn matches_scrub_pattern_empty_never_matches() {
+        let pats = vec![String::new(), "*".into()];
+        // Empty pattern doesn't match. A bare `*` is a prefix-match
+        // with empty prefix, which matches EVERYTHING — that's by design
+        // (callers who want to scrub the whole env can use it).
+        assert!(!matches_scrub_pattern("FOO", &[String::new()]));
+        assert!(matches_scrub_pattern("FOO", &pats));
+    }
+
+    #[test]
+    fn with_env_scrub_appends_patterns() {
+        use crate::types::ResolutionStrategy;
+        let req = LaunchRequest {
+            program: ResolvedProgram {
+                path: "/bin/true".into(),
+                fixed_args: vec![],
+                strategy: ResolutionStrategy::ExplicitPath,
+                shell_hint: None,
+            },
+            args: vec![],
+            env_overrides: BTreeMap::new(),
+            env_removals: vec![],
+            env_scrub_patterns: vec!["EXISTING".into()],
+        };
+        let req = req.with_env_scrub(["NEW_*", "ANOTHER"]);
+        assert_eq!(req.env_scrub_patterns, vec!["EXISTING", "NEW_*", "ANOTHER"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scrub_removes_inherited_env_from_child_and_own_process() {
+        // Set a "secret-looking" env var + a non-matching keeper, scrub
+        // the secret via a prefix pattern, verify the child sees only
+        // the keeper and our own process no longer has the secret.
+        let marker = format!("ENCLAVEAPP_SCRUB_TEST_{}_", std::process::id());
+        let scrub_key = format!("{marker}TOKEN");
+        let keep_key = format!("{marker}KEEP");
+        std::env::set_var(&scrub_key, "matched-by-test");
+        std::env::set_var(&keep_key, "KEPT");
+
+        // Only the TOKEN suffix matches the pattern; KEEP should survive.
+        let prefix_pattern = format!("{marker}T*");
+
+        // Child prints both vars so we can confirm delivery / absence.
+        let script = format!(
+            "echo scrub=[${scrub_key}] keep=[${keep_key}]",
+            scrub_key = scrub_key,
+            keep_key = keep_key,
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", &script]);
+
+        apply_env_scrub(&mut cmd, &[prefix_pattern]);
+
+        let output = cmd.output().expect("spawn sh");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("scrub=[]"),
+            "scrubbed var leaked to child: {stdout}"
+        );
+        assert!(
+            stdout.contains("keep=[KEPT]"),
+            "kept var did not reach child: {stdout}"
+        );
+        assert!(
+            std::env::var(&scrub_key).is_err(),
+            "scrubbed var still present in our own env"
+        );
+        assert_eq!(
+            std::env::var(&keep_key).as_deref().ok(),
+            Some("KEPT"),
+            "kept var disappeared from our own env"
+        );
+
+        std::env::remove_var(&keep_key);
     }
 }

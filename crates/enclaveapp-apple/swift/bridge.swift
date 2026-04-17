@@ -25,6 +25,13 @@ let SE_OK: Int32 = 0
 let SE_ERR_GENERATE: Int32 = 1
 let SE_ERR_LOAD: Int32 = 2
 let SE_ERR_SIGN: Int32 = 3
+/// Returned **only** when a caller-supplied out-buffer is too small to
+/// hold the result. The caller is expected to resize per the
+/// `*_len.pointee` out-value and retry. It is a **contract error** to
+/// use this code for any other failure mode — the Rust side loops on
+/// it (expanding the buffer) and a misuse would turn a real error into
+/// a retry storm. See `keychain.rs::generate_signing_with_retry` for
+/// the retry discipline on the consumer side.
 let SE_ERR_BUFFER_TOO_SMALL: Int32 = 4
 let SE_ERR_NOT_AVAILABLE: Int32 = 5
 let SE_ERR_ENCRYPT: Int32 = 6
@@ -413,6 +420,51 @@ public func enclaveapp_se_decrypt(
 // the device must be unlocked to read them, and they do NOT sync via
 // iCloud / migrate across devices.
 
+/// Open the invoking user's login keychain by explicit path.
+///
+/// Security.framework's default-keychain lookup goes through
+/// `CFPreferences`, which is keyed off the process's `$HOME`. A
+/// caller that overrides `$HOME` (integration tests via `assert_cmd`,
+/// `awsenc serve` invoked by the AWS CLI under a launchd sandbox,
+/// cron, etc.) gets `errSecNoDefaultKeychain` back, at which point
+/// `SecItemAdd` falls into a system-modal
+/// "A keychain cannot be found to store '<account>'" alert.
+///
+/// We bypass that entirely: `getpwuid(getuid())` returns the real
+/// user's home directory from the password database regardless of
+/// `$HOME`, and `SecKeychainOpen` on
+/// `~/Library/Keychains/login.keychain-db` produces a handle that
+/// subsequent `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete`
+/// calls use via `kSecUseKeychain` / `kSecMatchSearchList`. The
+/// first-run "Always Allow" ACL prompt (a SecTrust decision driven
+/// by the item op itself, not by default-keychain lookup) still
+/// fires normally — unsigned-build UX is preserved.
+///
+/// `SecKeychainOpen` is deprecated alongside `SecKeychain` but is
+/// still the only API that reaches the legacy file-based keychain;
+/// the modern Data Protection keychain is unavailable on unsigned
+/// builds (see the top-of-module comment).
+private func openLoginKeychain() -> SecKeychain? {
+    guard let pw = getpwuid(getuid()) else {
+        return nil
+    }
+    let home = String(cString: pw.pointee.pw_dir)
+    // Modern macOS stores the login keychain as `.keychain-db`; older
+    // installs may still have `.keychain`. Try both so migrated
+    // systems aren't broken.
+    let candidates = [
+        "\(home)/Library/Keychains/login.keychain-db",
+        "\(home)/Library/Keychains/login.keychain",
+    ]
+    for path in candidates {
+        var kc: SecKeychain?
+        if SecKeychainOpen(path, &kc) == errSecSuccess, kc != nil {
+            return kc
+        }
+    }
+    return nil
+}
+
 private func makeServiceData(_ service: UnsafePointer<UInt8>, _ len: Int32) -> Data {
     return Data(bytes: service, count: Int(len))
 }
@@ -436,6 +488,9 @@ public func enclaveapp_keychain_store(
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
     _ secret: UnsafePointer<UInt8>, _ secret_len: Int32
 ) -> Int32 {
+    guard let kc = openLoginKeychain() else {
+        return SE_ERR_KEYCHAIN_NOT_FOUND
+    }
     guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_STORE
     }
@@ -444,11 +499,14 @@ public func enclaveapp_keychain_store(
     }
     let secretData = Data(bytes: secret, count: Int(secret_len))
 
-    // Delete any existing entry first.
+    // Delete any existing entry first. Constrain the search to the
+    // explicitly-opened login keychain so `HOME` overrides don't
+    // leak into default-keychain lookup.
     let deleteQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
+        kSecMatchSearchList as String: [kc],
     ]
     _ = SecItemDelete(deleteQuery as CFDictionary)
 
@@ -458,6 +516,7 @@ public func enclaveapp_keychain_store(
         kSecAttrAccount as String: accountStr,
         kSecValueData as String: secretData,
         kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        kSecUseKeychain as String: kc,
     ]
     let status = SecItemAdd(addQuery as CFDictionary, nil)
     return status == errSecSuccess ? SE_OK : SE_ERR_KEYCHAIN_STORE
@@ -471,6 +530,9 @@ public func enclaveapp_keychain_load(
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
     _ secret_out: UnsafeMutablePointer<UInt8>, _ secret_len: UnsafeMutablePointer<Int32>
 ) -> Int32 {
+    guard let kc = openLoginKeychain() else {
+        return SE_ERR_KEYCHAIN_NOT_FOUND
+    }
     guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_LOAD
     }
@@ -484,6 +546,7 @@ public func enclaveapp_keychain_load(
         kSecAttrAccount as String: accountStr,
         kSecReturnData as String: true,
         kSecMatchLimit as String: kSecMatchLimitOne,
+        kSecMatchSearchList as String: [kc],
     ]
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -515,6 +578,12 @@ public func enclaveapp_keychain_delete(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
     _ account: UnsafePointer<UInt8>, _ account_len: Int32
 ) -> Int32 {
+    guard let kc = openLoginKeychain() else {
+        // Delete is idempotent — report not-found so the Rust
+        // caller treats the entry as already-gone rather than
+        // erroring out.
+        return SE_ERR_KEYCHAIN_NOT_FOUND
+    }
     guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_DELETE
     }
@@ -525,6 +594,7 @@ public func enclaveapp_keychain_delete(
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
+        kSecMatchSearchList as String: [kc],
     ]
     let status = SecItemDelete(query as CFDictionary)
     if status == errSecSuccess || status == errSecItemNotFound {

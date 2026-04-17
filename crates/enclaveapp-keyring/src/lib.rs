@@ -29,4 +29,4 @@ pub use sign::SoftwareSigner;
 #[cfg(feature = "encryption")]
 pub use encrypt::SoftwareEncryptor;
 
-pub use key_storage::{has_keyring_feature, is_available};
+pub use key_storage::{has_keyring_feature, is_available, meta_hmac_key};

@@ -9,6 +9,8 @@ description = "Shared binary cache format for enclave apps"
 
 [dependencies]
 enclaveapp-core = { workspace = true }
+fs4 = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -13,6 +13,10 @@
 ///   to non-root peers.
 /// - On Linux, sets `PR_SET_NO_NEW_PRIVS=1` so any `exec*()` after this
 ///   point cannot gain privileges via setuid / file capabilities.
+/// - On Windows, enables a safe subset of process mitigation policies:
+///   strict handle checks, extension-point DLL disable, and image-load
+///   restrictions (no remote or low-mandatory-label images). See
+///   [`apply_windows_mitigations`] for the per-policy rationale.
 ///
 /// Should be called early in main() before any secrets are loaded.
 /// Errors are logged but not fatal — hardening is best-effort.
@@ -22,6 +26,10 @@ pub fn harden_process() {
     {
         set_dumpable_zero();
         set_no_new_privs();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        apply_windows_mitigations();
     }
 }
 
@@ -84,6 +92,102 @@ fn set_no_new_privs() {
             "failed to set PR_SET_NO_NEW_PRIVS=1: {}",
             std::io::Error::last_os_error()
         );
+    }
+}
+
+/// Apply the safe subset of Windows process mitigation policies at
+/// startup.
+///
+/// Each call is best-effort — the policies are non-fatal on failure
+/// (unsupported Windows build, already-set, etc.) and simply trace a
+/// warning. The policies applied:
+///
+/// - `PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY
+///   .RaiseExceptionOnInvalidHandleReference`: any syscall that
+///   receives an invalid handle raises `STATUS_INVALID_HANDLE`
+///   immediately. Catches handle-confusion bugs that would otherwise
+///   silently operate on the wrong object. Safe for standard apps.
+/// - `PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY
+///   .DisableExtensionPoints`: blocks legacy DLL-injection extension
+///   points (AppInit_DLLs, AppCertDlls, shim engine, IMEs, winevent
+///   hooks) from loading into this process. Kills the most common
+///   unsigned-DLL-injection vector.
+/// - `PROCESS_MITIGATION_IMAGE_LOAD_POLICY
+///   .NoRemoteImages` + `.NoLowMandatoryLabelImages`: refuses to
+///   load DLLs from UNC paths and from files with the low-mandatory
+///   integrity label. Blocks the "drop a DLL onto a writable share
+///   and hijack our load search" pattern.
+///
+/// Deliberately **not** applied:
+/// - `PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY.MicrosoftSignedOnly` —
+///   breaks cargo-built unsigned apps.
+/// - `PROCESS_MITIGATION_DYNAMIC_CODE_POLICY` (ACG) — breaks JIT
+///   frameworks and some crypto providers.
+/// - `PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY.DisallowWin32kSystemCalls` —
+///   UI-less-only, risky for apps that surface any GUI.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn apply_windows_mitigations() {
+    // Structs live in SystemServices; function + PROCESS_MITIGATION_POLICY
+    // discriminants live in Threading. windows-rs split them across modules.
+    use windows::Win32::System::SystemServices::{
+        PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY, PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
+        PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY,
+    };
+    use windows::Win32::System::Threading::{
+        ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy, ProcessStrictHandleCheckPolicy,
+        SetProcessMitigationPolicy,
+    };
+
+    // All PROCESS_MITIGATION_* policy structs are a union of a `Flags: u32`
+    // and a bitfield struct. windows-rs 0.58 exposes the structs but not
+    // the generated bitfield setters, so write the Flags word directly.
+    // Bit layout matches the Win32 headers.
+
+    // Strict handle check:
+    //   bit 0 = RaiseExceptionOnInvalidHandleReference
+    //   bit 1 = HandleExceptionsPermanentlyEnabled
+    let mut strict = PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY::default();
+    unsafe {
+        strict.Anonymous.Flags = 0b11;
+        if let Err(e) = SetProcessMitigationPolicy(
+            ProcessStrictHandleCheckPolicy,
+            std::ptr::addr_of!(strict).cast(),
+            size_of::<PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY>(),
+        ) {
+            tracing::warn!("SetProcessMitigationPolicy(StrictHandleCheck) failed: {e}");
+        }
+    }
+
+    // Extension-point disable:
+    //   bit 0 = DisableExtensionPoints
+    let mut extpt = PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY::default();
+    unsafe {
+        extpt.Anonymous.Flags = 0b1;
+        if let Err(e) = SetProcessMitigationPolicy(
+            ProcessExtensionPointDisablePolicy,
+            std::ptr::addr_of!(extpt).cast(),
+            size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
+        ) {
+            tracing::warn!("SetProcessMitigationPolicy(ExtensionPointDisable) failed: {e}");
+        }
+    }
+
+    // Image-load — block remote and low-mandatory-label images. Do
+    // NOT set `PreferSystem32Images` here; cargo-built apps ship
+    // their own DLLs alongside the exe and need local-dir loading.
+    //   bit 0 = NoRemoteImages
+    //   bit 1 = NoLowMandatoryLabelImages
+    let mut imgload = PROCESS_MITIGATION_IMAGE_LOAD_POLICY::default();
+    unsafe {
+        imgload.Anonymous.Flags = 0b11;
+        if let Err(e) = SetProcessMitigationPolicy(
+            ProcessImageLoadPolicy,
+            std::ptr::addr_of!(imgload).cast(),
+            size_of::<PROCESS_MITIGATION_IMAGE_LOAD_POLICY>(),
+        ) {
+            tracing::warn!("SetProcessMitigationPolicy(ImageLoad) failed: {e}");
+        }
     }
 }
 
