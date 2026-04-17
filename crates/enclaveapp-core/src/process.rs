@@ -139,34 +139,35 @@ fn apply_windows_mitigations() {
         SetProcessMitigationPolicy,
     };
 
-    // Strict handle check — raise on any invalid-handle reference.
+    // All PROCESS_MITIGATION_* policy structs are a union of a `Flags: u32`
+    // and a bitfield struct. windows-rs 0.58 exposes the structs but not
+    // the generated bitfield setters, so write the Flags word directly.
+    // Bit layout matches the Win32 headers.
+
+    // Strict handle check:
+    //   bit 0 = RaiseExceptionOnInvalidHandleReference
+    //   bit 1 = HandleExceptionsPermanentlyEnabled
     let mut strict = PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY::default();
     unsafe {
-        strict
-            .Anonymous
-            .Anonymous
-            .set_RaiseExceptionOnInvalidHandleReference(1);
-        strict
-            .Anonymous
-            .Anonymous
-            .set_HandleExceptionsPermanentlyEnabled(1);
+        strict.Anonymous.Flags = 0b11;
         if let Err(e) = SetProcessMitigationPolicy(
             ProcessStrictHandleCheckPolicy,
             std::ptr::from_ref(&strict).cast(),
-            std::mem::size_of::<PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY>(),
+            size_of::<PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY>(),
         ) {
             tracing::warn!("SetProcessMitigationPolicy(StrictHandleCheck) failed: {e}");
         }
     }
 
-    // Extension-point disable — block AppInit DLLs, shim engines, etc.
+    // Extension-point disable:
+    //   bit 0 = DisableExtensionPoints
     let mut extpt = PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY::default();
     unsafe {
-        extpt.Anonymous.Anonymous.set_DisableExtensionPoints(1);
+        extpt.Anonymous.Flags = 0b1;
         if let Err(e) = SetProcessMitigationPolicy(
             ProcessExtensionPointDisablePolicy,
             std::ptr::from_ref(&extpt).cast(),
-            std::mem::size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
+            size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
         ) {
             tracing::warn!("SetProcessMitigationPolicy(ExtensionPointDisable) failed: {e}");
         }
@@ -175,14 +176,15 @@ fn apply_windows_mitigations() {
     // Image-load — block remote and low-mandatory-label images. Do
     // NOT set `PreferSystem32Images` here; cargo-built apps ship
     // their own DLLs alongside the exe and need local-dir loading.
+    //   bit 0 = NoRemoteImages
+    //   bit 1 = NoLowMandatoryLabelImages
     let mut imgload = PROCESS_MITIGATION_IMAGE_LOAD_POLICY::default();
     unsafe {
-        imgload.Anonymous.Anonymous.set_NoRemoteImages(1);
-        imgload.Anonymous.Anonymous.set_NoLowMandatoryLabelImages(1);
+        imgload.Anonymous.Flags = 0b11;
         if let Err(e) = SetProcessMitigationPolicy(
             ProcessImageLoadPolicy,
             std::ptr::from_ref(&imgload).cast(),
-            std::mem::size_of::<PROCESS_MITIGATION_IMAGE_LOAD_POLICY>(),
+            size_of::<PROCESS_MITIGATION_IMAGE_LOAD_POLICY>(),
         ) {
             tracing::warn!("SetProcessMitigationPolicy(ImageLoad) failed: {e}");
         }
