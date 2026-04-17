@@ -23,11 +23,14 @@ impl TempConfig {
         set_dir_permissions(dir.path())?;
 
         let path = dir.path().join(file_name);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        set_file_permissions(&path)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
         file.write_all(contents)?;
         file.flush()?;
 
@@ -72,19 +75,6 @@ fn set_dir_permissions(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn set_dir_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_file_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
