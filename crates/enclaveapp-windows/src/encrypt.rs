@@ -202,6 +202,18 @@ impl EnclaveEncryptor for TpmEncryptor {
         let provider = provider::open_provider()?;
         let key_handle = key::open_key(&provider, &self.app_name, label)?;
 
+        // Re-verify the key's NCRYPT_UI_POLICY matches metadata's
+        // AccessPolicy before decrypt. See the same check in
+        // TpmSigner::sign for the rationale — closes the
+        // pre-planted-key bypass on the encryption path too.
+        let dir = self.keys_dir();
+        let expected_policy = match metadata::load_meta(&dir, label) {
+            Ok(meta) => meta.access_policy,
+            Err(Error::KeyNotFound { .. }) => AccessPolicy::None,
+            Err(err) => return Err(err),
+        };
+        crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
+
         unsafe { ecies_decrypt(&key_handle, ephemeral_pub, nonce, ct, tag) }
     }
 }

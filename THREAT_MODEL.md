@@ -79,7 +79,7 @@ Unsafe FFI surfaces are trusted by design but fragile.
 
 - **Swift ↔ Rust bridge** (`crates/enclaveapp-apple/src/ffi.rs` + `crates/enclaveapp-apple/swift/bridge.swift`). Out-buffer convention relies on the caller sizing buffers correctly; `SE_ERR_BUFFER_TOO_SMALL` return codes can mask unrelated errors if the Rust side assumes buffer sizing is the only failure mode. Any change to Swift bridge signatures requires a coordinated Rust FFI update.
 - **Windows CNG raw-pointer casts** (`crates/enclaveapp-windows/src/ui_policy.rs`). `NCRYPT_UI_POLICY` is passed to `NCryptSetProperty` via `&ui_policy as *const _ as *const u8` with a computed `size_of::<NCRYPT_UI_POLICY>()`. This is correct today but fragile to future struct layout changes.
-- **NCRYPT UI policy is set at key creation only.** The library does not re-read `NCRYPT_UI_PROTECT_KEY_FLAG` before signing. An attacker-planted TPM key with the expected name would sign without triggering Windows Hello. Integration testing on real Windows TPM hardware is a tracked follow-up.
+- **NCRYPT UI policy is re-verified before every sign/decrypt.** `ui_policy::verify_ui_policy_matches` reads the CNG key's actual `NCRYPT_UI_POLICY` via `NCryptGetProperty` and rejects the operation if the `UI_PROTECT_KEY_FLAG` does not match the metadata's `AccessPolicy`. Closes the attacker-planted-TPM-key bypass: an attacker who writes a TPM key with the expected CNG name but no UI protect flag no longer gets signatures without Windows Hello. Integration testing on real Windows TPM hardware is still a tracked follow-up.
 
 ### Keychain and key-backend-specific risks
 

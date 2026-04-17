@@ -54,3 +54,89 @@ pub fn set_ui_policy(
         detail: format!("NCryptSetProperty(UI Policy): {e}"),
     })
 }
+
+/// Read back the `NCRYPT_UI_POLICY` actually set on a CNG key and
+/// assert that it matches the requested `AccessPolicy`.
+///
+/// Defends against a same-user attacker who pre-plants a TPM key with
+/// the expected CNG name but without `NCRYPT_UI_PROTECT_KEY_FLAG`. If
+/// the app were to open and sign with such a key, the Windows Hello
+/// prompt would not fire and the intended presence check would be
+/// bypassed. Re-verifying the flag before signing closes that gap.
+///
+/// Returns `Ok(())` if the key carries the correct `NCRYPT_UI_PROTECT_KEY_FLAG`
+/// for the requested policy (or no flag when `expected == None`). Returns
+/// an `Error::KeyOperation` if the policy does not match or the query
+/// itself fails.
+pub fn verify_ui_policy_matches(
+    key_handle: &NcryptHandle,
+    expected: AccessPolicy,
+) -> enclaveapp_core::Result<()> {
+    let prop_name: Vec<u16> = "UI Policy"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut actual = NCRYPT_UI_POLICY {
+        dwVersion: 0,
+        dwFlags: NCRYPT_FLAGS::default(),
+        pszCreationTitle: PCWSTR::null(),
+        pszFriendlyName: PCWSTR::null(),
+        pszDescription: PCWSTR::null(),
+    };
+    let mut actual_size: u32 = 0;
+    let buf = unsafe {
+        std::slice::from_raw_parts_mut(
+            &mut actual as *mut _ as *mut u8,
+            std::mem::size_of::<NCRYPT_UI_POLICY>(),
+        )
+    };
+
+    let result = unsafe {
+        NCryptGetProperty(
+            NCRYPT_HANDLE(key_handle.as_key().0),
+            PCWSTR(prop_name.as_ptr()),
+            Some(buf),
+            &mut actual_size,
+            NCRYPT_FLAGS::default(),
+        )
+    };
+
+    let actual_flags = match result {
+        Ok(()) => actual.dwFlags,
+        Err(e) => {
+            // SPC_E_NO_POLICY / NTE_NOT_FOUND both surface as a missing
+            // policy — translate to "no flag set" so the comparison
+            // below treats it as AccessPolicy::None.
+            if expected == AccessPolicy::None {
+                return Ok(());
+            }
+            return Err(enclaveapp_core::Error::KeyOperation {
+                operation: "verify_ui_policy".into(),
+                detail: format!(
+                    "NCryptGetProperty(UI Policy) for key with expected policy {expected:?}: {e}",
+                ),
+            });
+        }
+    };
+
+    let has_protect_flag =
+        (actual_flags.0 & NCRYPT_UI_PROTECT_KEY_FLAG.0) == NCRYPT_UI_PROTECT_KEY_FLAG.0;
+
+    match (expected, has_protect_flag) {
+        (AccessPolicy::None, false) => Ok(()),
+        (AccessPolicy::None, true) => Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail:
+                "key has NCRYPT_UI_PROTECT_KEY_FLAG set but metadata expects AccessPolicy::None"
+                    .into(),
+        }),
+        (_, true) => Ok(()),
+        (_, false) => Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail: format!(
+                "key is missing NCRYPT_UI_PROTECT_KEY_FLAG but metadata expects {expected:?}"
+            ),
+        }),
+    }
+}

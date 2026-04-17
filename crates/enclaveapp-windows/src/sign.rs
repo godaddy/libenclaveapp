@@ -124,6 +124,21 @@ impl EnclaveSigner for TpmSigner {
         let provider = provider::open_provider()?;
         let key_handle = key::open_key(&provider, &self.app_name, label)?;
 
+        // Re-verify the key's NCRYPT_UI_POLICY matches the metadata's
+        // AccessPolicy before signing. Without this check, a same-user
+        // attacker who pre-planted a TPM key with the expected CNG
+        // name (but without UI_PROTECT_KEY_FLAG) could get sshenc to
+        // sign without triggering Windows Hello — the hardware enforces
+        // the policy that's actually set on the key, not what the app
+        // thinks was set.
+        let dir = self.keys_dir();
+        let expected_policy = match metadata::load_meta(&dir, label) {
+            Ok(meta) => meta.access_policy,
+            Err(Error::KeyNotFound { .. }) => AccessPolicy::None,
+            Err(err) => return Err(err),
+        };
+        crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
+
         // Pre-hash with SHA-256.
         let digest = Sha256::digest(data);
 
