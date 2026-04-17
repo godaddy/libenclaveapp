@@ -53,10 +53,11 @@ fn bridge_request_timeout() -> Duration {
 /// build) must set `ENCLAVEAPP_BRIDGE_PATH` explicitly.
 ///
 /// The resolved executable is additionally gated by
-/// [`require_bridge_is_authenticode_signed`] at spawn time — a replaced
-/// binary with no Authenticode signature is refused even if it landed at
-/// a trusted path. That check can be opted out of for dev / CI builds via
-/// `ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED=1`.
+/// [`require_bridge_is_authenticode_signed`] at spawn time — but only if
+/// this build was compiled with `ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED=1`.
+/// Builds without that flag (including the current default release
+/// pipeline) skip the signature check. See [`BUILD_REQUIRES_SIGNED`]
+/// and THREAT_MODEL.md for the rationale.
 #[allow(clippy::print_stderr)] // user-facing warning for misconfigured env var
 pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
     // 1. Explicit env var override (app-specific, then generic).
@@ -93,13 +94,25 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
         .map(|(path, _)| path)
 }
 
-/// Env var to opt out of the Authenticode-signature check on the bridge
-/// binary. Intended for dev / CI builds; production installs ship signed
-/// bridges and should leave this unset.
-const ALLOW_UNSIGNED_ENV: &str = "ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED";
+/// Whether this build claims to be distributed as Authenticode-signed.
+///
+/// Set by the release workflow *at build time* via
+/// `ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED=1` when the signing pipeline is
+/// actually configured. Default (unset) is **off** — matching the
+/// current distribution reality where releases ship unsigned. When on,
+/// [`require_bridge_is_authenticode_signed`] refuses unsigned bridges.
+///
+/// There is deliberately **no runtime opt-out**. Security is not a
+/// runtime toggle — if the build enforces signing, it enforces it.
+/// Operators who need to run with an unsigned bridge (local dev, a
+/// custom fork) must compile without `ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED`
+/// set. This prevents a compromised WSL-side attacker from flipping
+/// the security posture with a single env var.
+const BUILD_REQUIRES_SIGNED: bool = option_env!("ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED").is_some();
 
 /// Refuse to spawn a bridge binary that lacks an Authenticode signature
-/// block.
+/// block — but only if this build was compiled with
+/// `ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED=1`.
 ///
 /// Parses the PE header's Certificate Table data directory
 /// (`IMAGE_DIRECTORY_ENTRY_SECURITY`, index 4) and rejects the binary if
@@ -113,9 +126,21 @@ const ALLOW_UNSIGNED_ENV: &str = "ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED";
 /// with a validly-signed-but-malicious binary is out of scope and
 /// acknowledged as such in the threat model.
 ///
-/// Opt-out: set `ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED=1`.
+/// Builds that are **not** compiled with `ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED`
+/// skip the check entirely (see [`BUILD_REQUIRES_SIGNED`]). This is
+/// because the library is consumed by apps whose release pipeline does
+/// not currently sign binaries; requiring signatures there would make
+/// apps unable to spawn their own just-installed bridges. The trade-off
+/// is documented in THREAT_MODEL.md.
 pub fn require_bridge_is_authenticode_signed(bridge_path: &Path) -> Result<()> {
-    if std::env::var_os(ALLOW_UNSIGNED_ENV).is_some() {
+    check_bridge_signature(bridge_path, BUILD_REQUIRES_SIGNED)
+}
+
+/// Testable inner function — `require` is the compile-time default
+/// [`BUILD_REQUIRES_SIGNED`] in production, but tests pass it explicitly
+/// so they can exercise both branches without recompiling.
+fn check_bridge_signature(bridge_path: &Path, require: bool) -> Result<()> {
+    if !require {
         return Ok(());
     }
     // Only PE binaries have Authenticode. Anything that's not `.exe`
@@ -134,7 +159,8 @@ pub fn require_bridge_is_authenticode_signed(bridge_path: &Path) -> Result<()> {
             operation: "bridge_verify".into(),
             detail: format!(
                 "bridge binary at {} has no Authenticode signature; refusing to spawn. \
-                 Reinstall from a signed release or set {ALLOW_UNSIGNED_ENV}=1 to bypass.",
+                 This build was compiled with ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED=1; \
+                 reinstall from a signed release or recompile without that flag.",
                 bridge_path.display()
             ),
         }),
@@ -811,21 +837,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn require_signed_skips_non_exe_paths() {
+    fn check_bridge_signature_skips_non_exe_paths_when_required() {
         // Shell scripts (our test-bridge pattern) must pass the gate
-        // unconditionally so existing integration tests keep working.
+        // unconditionally so existing integration tests keep working,
+        // even when signing is required.
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         let script = temp_script("unsigned-script.sh", "#!/bin/sh\nexit 0\n");
-        require_bridge_is_authenticode_signed(&script).unwrap();
+        check_bridge_signature(&script, true).unwrap();
         cleanup_script(&script);
     }
 
     #[cfg(unix)]
     #[test]
-    fn require_signed_rejects_unsigned_exe() {
+    fn check_bridge_signature_rejects_unsigned_exe_when_required() {
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
-        // Ensure the opt-out env var isn't set from a previous test.
-        std::env::remove_var(ALLOW_UNSIGNED_ENV);
         let bytes = make_pe_bytes(0, 0x10b);
         let path = std::env::temp_dir().join(format!(
             "enclaveapp-pe-rejected-{}-{}.exe",
@@ -833,7 +858,7 @@ mod tests {
             SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
         fs::write(&path, &bytes).unwrap();
-        let err = require_bridge_is_authenticode_signed(&path).unwrap_err();
+        let err = check_bridge_signature(&path, true).unwrap_err();
         assert!(
             err.to_string().contains("no Authenticode signature"),
             "got: {err}"
@@ -843,22 +868,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn require_signed_honors_allow_unsigned_env() {
+    fn check_bridge_signature_accepts_unsigned_exe_when_not_required() {
+        // When the build is not compiled with
+        // ENCLAVEAPP_BRIDGE_REQUIRE_SIGNED, unsigned binaries are accepted.
+        // This is the default posture for the current release pipeline.
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         let bytes = make_pe_bytes(0, 0x10b);
         let path = std::env::temp_dir().join(format!(
-            "enclaveapp-pe-allowed-{}-{}.exe",
+            "enclaveapp-pe-default-{}-{}.exe",
             std::process::id(),
             SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
         fs::write(&path, &bytes).unwrap();
-        std::env::set_var(ALLOW_UNSIGNED_ENV, "1");
-        let result = require_bridge_is_authenticode_signed(&path);
-        std::env::remove_var(ALLOW_UNSIGNED_ENV);
-        assert!(
-            result.is_ok(),
-            "opt-out env must skip the check: {result:?}"
-        );
+        check_bridge_signature(&path, false).unwrap();
         drop(fs::remove_file(&path));
     }
 
