@@ -212,7 +212,7 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
             label: label.to_string(),
         });
     }
-    Ok(std::fs::read(&path)?)
+    metadata::read_no_follow(&path)
 }
 
 /// Load the cached public key for a label. Falls back to extracting from data rep.
@@ -340,7 +340,7 @@ fn prepare_label_for_save(dir: &std::path::Path, label: &str) -> Result<()> {
         return metadata::delete_key_files(dir, label);
     }
 
-    let data_rep = std::fs::read(&handle_path).map_err(|error| Error::KeyOperation {
+    let data_rep = metadata::read_no_follow(&handle_path).map_err(|error| Error::KeyOperation {
         operation: "prepare_label_for_save".into(),
         detail: format!("failed to read existing Secure Enclave handle: {error}"),
     })?;

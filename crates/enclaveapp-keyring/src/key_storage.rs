@@ -216,7 +216,7 @@ fn load_private_key_bytes(
     key_path: &std::path::Path,
     label: &str,
 ) -> Result<Vec<u8>> {
-    let bytes = std::fs::read(key_path)?;
+    let bytes = metadata::read_no_follow(key_path)?;
 
     // Backward compatibility: raw 32-byte key (unencrypted)
     if bytes.len() == RAW_KEY_SIZE {
