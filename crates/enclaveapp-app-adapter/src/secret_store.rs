@@ -20,8 +20,27 @@ use crate::types::BindingId;
 
 /// Placeholder value returned by read-only secret stores instead of the
 /// actual secret.  Consumers that need to distinguish "secret exists but
-/// cannot be read" from a real value should compare against this constant.
+/// cannot be read" from a real value **must** use [`is_redacted_placeholder`]
+/// rather than a bare `==` comparison — the function performs a
+/// constant-time byte compare and centralizes the collision-risk
+/// surface on a single helper that can be upgraded to a typed return
+/// type without touching every call site.
 pub const REDACTED_PLACEHOLDER: &str = "<redacted>";
+
+/// Check whether a secret-store string return is the redaction sentinel.
+///
+/// The sentinel collides semantically with any real secret whose value
+/// happens to equal the literal string `"<redacted>"`. That's a
+/// vanishingly unlikely collision for npm tokens (which begin with
+/// `npm_`) or SSO JWTs (which are base64-encoded with `.` separators),
+/// but the library cannot prove it can never happen. Using this helper
+/// keeps the single comparison site canonical — a future migration to
+/// a typed `SecretMaterialization` enum can swap this function's body
+/// without breaking call-site ergonomics.
+#[must_use]
+pub fn is_redacted_placeholder(value: &str) -> bool {
+    value == REDACTED_PLACEHOLDER
+}
 
 pub trait SecretStore {
     fn set(&self, id: &BindingId, secret: &str) -> Result<()>;

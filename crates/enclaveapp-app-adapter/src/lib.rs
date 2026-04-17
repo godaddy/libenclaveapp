@@ -58,8 +58,8 @@ pub use provenance::{
 };
 pub use resolver::{resolve_program, ResolveMode, ResolveOptions};
 pub use secret_store::{
-    EncryptedFileSecretStore, MemorySecretStore, ReadOnlyEncryptedFileSecretStore, SecretStore,
-    REDACTED_PLACEHOLDER,
+    is_redacted_placeholder, EncryptedFileSecretStore, MemorySecretStore,
+    ReadOnlyEncryptedFileSecretStore, SecretStore, REDACTED_PLACEHOLDER,
 };
 pub use state_lock::{with_state_lock, with_state_lock_read_only};
 pub use temp_config::TempConfig;
