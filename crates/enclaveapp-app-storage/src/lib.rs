@@ -113,7 +113,7 @@ pub fn create_encryption_storage(config: StorageConfig) -> Result<Box<dyn Encryp
                 app = %config.app_name,
                 "{MOCK_STORAGE_ENV} is set — returning MockEncryptionStorage (no hardware backing)"
             );
-            return Ok(Box::new(MockEncryptionStorage::new()));
+            return Ok(Box::new(MockEncryptionStorage::for_app(&config.app_name)));
         }
     }
     let storage = AppEncryptionStorage::init(config)?;
