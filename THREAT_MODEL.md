@@ -162,7 +162,25 @@ The cache header (version, magic, timestamps, risk level) in `crates/enclaveapp-
 
 ## Platform-specific notes
 
-**macOS Keychain prompts:** On unsigned builds, the Keychain prompts once per binary hash change (e.g., after `brew upgrade`). Signed builds avoid this. This is the Keychain enforcing its ACL, not a vulnerability.
+**macOS Keychain prompts.** The Keychain scopes access to `kSecClassGenericPassword` items by the calling binary's code-signing identity. The prompt behavior is load-bearing for the wrapping-key threat model (items above): it is exactly what blocks a different binary from reading the wrapping key.
+
+Observed behavior by signing scenario:
+
+| Scenario | First run | Rebuild at same path | Different path |
+|----------|-----------|----------------------|----------------|
+| Ad-hoc signed (`swiftc` / `rustc` default, Homebrew source builds) | no prompt | **prompt** (code hash changed) | **prompt** |
+| Untrusted self-signed cert | no prompt | **prompt** (code hash changed) | **prompt** |
+| Trusted signing identity (Apple Development / Developer ID) | no prompt | no prompt (identity unchanged) | **prompt** |
+
+Additional behavior:
+- "Deny" is not permanent: operations fail with `errSecUserCanceled` (`-128`), but the next invocation prompts again. The user is never locked out.
+- "Always Allow" persists until the binary is replaced. After `brew upgrade`, one new prompt appears on first use of the upgraded binary.
+- Ad-hoc → trusted-cert transition: one prompt on the first signed run; after "Always Allow," subsequent runs with the same identity are silent.
+- Trusting a self-signed cert requires a `security add-trusted-cert` system password dialog and cannot be automated silently in a Homebrew formula.
+
+**Data Protection Keychain not used.** `kSecUseDataProtectionKeychain: true` fails with `errSecMissingEntitlement` (`-34018`) on unsigned / ad-hoc-signed builds. The implementation uses the legacy (file-based) login keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
+
+**Entitled Secure Enclave path not enabled.** Storing SE keys directly as Keychain items via `SecKeyCreateRandomKey` + `kSecAttrTokenIDSecureEnclave` + `kSecAttrIsPermanent: true` would remove the `.handle` file entirely. It requires `keychain-access-groups`, which is an AMFI-restricted entitlement that needs a provisioning profile — even a valid Apple Development cert without a matching profile causes AMFI to kill the binary with error `-413`. This path is only viable for App Store / Enterprise / Xcode-provisioned distribution and is not available for Homebrew or `cargo install` builds. The current Path-2 implementation (AES-GCM-wrapped `.handle` + Keychain-held wrapping key) is the hardening target for unsigned distribution.
 
 **WSL bridge:** Communicates over stdin/stdout of a child process. The client (`crates/enclaveapp-bridge/src/client.rs`) discovers the bridge only from a fixed-path list under `/mnt/c/Program Files/<app>/` and `/mnt/c/ProgramData/<app>/`. Replacing the binary at those paths requires Windows admin rights. The previous `which`-based PATH fallback was removed — a user-writable `$PATH` entry on the WSL side could otherwise substitute a malicious bridge binary. Request/response size is capped at 64 KB, the child is reaped via `BridgeSession::Drop`, and reads are bounded. There is still no Authenticode / `WinVerifyTrust` check on the resolved bridge binary; adding one is a tracked hardening gap for environments where the Windows host itself is semi-trusted.
 
