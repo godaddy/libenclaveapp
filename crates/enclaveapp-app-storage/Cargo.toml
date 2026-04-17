@@ -22,6 +22,7 @@ tracing = "0.1"
 # swap it in at runtime without any feature flag gymnastics.
 aes-gcm = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 enclaveapp-test-support = { workspace = true }

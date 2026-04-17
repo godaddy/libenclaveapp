@@ -14,6 +14,7 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 
 use crate::encryption::EncryptionStorage;
 use crate::error::{Result, StorageError};
@@ -44,6 +45,34 @@ impl MockEncryptionStorage {
     pub fn new() -> Self {
         let mut key_bytes = [0_u8; 32];
         rand::thread_rng().fill_bytes(&mut key_bytes);
+        Self::from_key_bytes(key_bytes)
+    }
+
+    /// Create a mock storage with a key deterministically derived from
+    /// the application name.
+    ///
+    /// This is how [`create_encryption_storage`](crate::create_encryption_storage)
+    /// instantiates the mock when [`MOCK_STORAGE_ENV`](crate::MOCK_STORAGE_ENV)
+    /// is set. The deterministic key makes the mock viable across
+    /// process boundaries — parent and child `cargo test` processes
+    /// that both construct storage for the same app will land on the
+    /// same AES key and can decrypt each other's ciphertexts. A
+    /// random-keyed [`new`] would fail cross-process tests with
+    /// `aead::Error` because each process would have its own key.
+    ///
+    /// The derivation is `SHA-256("enclaveapp-app-storage mock v1\0" || app_name)`.
+    /// It is explicitly *not* cryptographically secret — anyone with
+    /// the app name can recompute it. That is the point: this is a
+    /// test-only backend.
+    pub fn for_app(app_name: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"enclaveapp-app-storage mock v1\0");
+        hasher.update(app_name.as_bytes());
+        let key_bytes: [u8; 32] = hasher.finalize().into();
+        Self::from_key_bytes(key_bytes)
+    }
+
+    fn from_key_bytes(key_bytes: [u8; 32]) -> Self {
         let cipher = Aes256Gcm::new_from_slice(&key_bytes)
             .expect("32-byte key is always valid for AES-256-GCM");
         Self { cipher }
