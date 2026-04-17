@@ -156,7 +156,7 @@ Signing keys are long-lived identity keys (e.g., SSH keys). At Levels 1-3, the h
 
 | Level | Backend | Who signs? | Private key exportable? | User presence | Key storage |
 |:-----:|---------|-----------|:----------------------:|---------------|-------------|
-| **1** | macOS Secure Enclave | **The SE hardware.** `sshenc` sends data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. Works for both signed and unsigned binaries on Apple Silicon. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` on disk is an opaque SE handle (not key material), AES-256-GCM encrypted with a Keychain-stored wrapping key to prevent same-user handle theft. | Touch ID / biometric enforced by SE hardware per-signature (when access policy is set). | Secure Enclave coprocessor + AES-256-GCM wrapped handle on disk + Keychain wrapping key. |
+| **1** | macOS Secure Enclave | **The SE hardware.** `sshenc` sends data to the SE via CryptoKit; the SE performs ECDSA P-256 internally and returns the signature. The private key never exists outside the chip. Works for both signed and unsigned binaries on Apple Silicon. | **No** — impossible. Even root cannot extract it. The `dataRepresentation` on disk is an opaque SE handle (not key material); it is written with 0600 permissions today. AES-GCM wrapping under a Keychain-stored key is planned (see `fix-macos.md`) and not yet implemented. | Touch ID / biometric enforced by SE hardware per-signature (when access policy is set). | Secure Enclave coprocessor + handle file on disk (0600). Keychain-wrapped handle is a planned hardening. |
 | **2** | Windows TPM 2.0 | **The TPM hardware.** CNG sends signing requests to the TPM via NCrypt. | **No** — key is a non-exportable TPM object. | Windows Hello (biometric/PIN) enforced per-signature via `NCRYPT_UI_POLICY`. | TPM 2.0 chip. |
 | **3** | Linux TPM 2.0 | **The TPM hardware.** Signing performed by the TPM via `tss-esapi`. | **No** — key is TPM-resident. | Not enforced (no standard Linux biometric API). | TPM 2.0 device (`/dev/tpmrm0`). glibc only. |
 | **4** | Software (Linux glibc) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing via the `p256` crate. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
@@ -170,7 +170,7 @@ The blast radius of encryption key compromise is further bounded by the expirati
 
 | Level | Backend | Who decrypts? | Private key exportable? | User presence | Cached data protection |
 |:-----:|---------|--------------|:----------------------:|---------------|----------------------|
-| **1** | macOS Secure Enclave | **The SE hardware.** ECDH key agreement happens inside the SE. The shared secret is derived internally; only the AES-GCM decryption of the ciphertext body happens in software. Handle blob AES-256-GCM encrypted via Keychain. | **No** — impossible. | Touch ID / biometric can be required per-decrypt. | Ciphertext on disk can only be decrypted by the SE that created the key. Full disk access is insufficient without the SE. |
+| **1** | macOS Secure Enclave | **The SE hardware.** ECDH key agreement happens inside the SE. The shared secret is derived internally; only the AES-GCM decryption of the ciphertext body happens in software. Handle blob stored 0600 on disk; Keychain-wrapped handle is a planned hardening (see `fix-macos.md`). | **No** — impossible. | Touch ID / biometric can be required per-decrypt. | Ciphertext on disk can only be decrypted by the SE that created the key. Full disk access is insufficient without the SE. |
 | **2** | Windows TPM 2.0 | **The TPM hardware** performs ECDH. | **No** — TPM-bound. | Windows Hello can be required per-decrypt. | Only decryptable on the same machine's TPM. |
 | **3** | Linux TPM 2.0 | **The TPM hardware** via `tss-esapi`. | **No** — TPM-bound. | Not enforced. | Same machine-binding as Windows TPM. |
 | **4** | Software (Linux glibc) | **Software.** P-256 key decrypted from keyring. | **Yes (encrypted at rest)** — keyring-protected. | Not enforced. | Keyring-encrypted key protects cache at rest. |
@@ -182,7 +182,11 @@ All supported macOS hardware (Apple Silicon) has a Secure Enclave, and **CryptoK
 
 The `com.apple.developer.secure-enclave` entitlement is a **Security.framework** concept for Keychain-stored SE keys (`SecItemAdd` with `kSecAttrTokenIDSecureEnclave`). Since libenclaveapp uses CryptoKit's `dataRepresentation` for key persistence (not Security.framework), the entitlement is not required.
 
-**Handle protection for unsigned apps:** The SE's `dataRepresentation` is an opaque handle blob that allows the same device's SE to reconstruct the key reference. While the private key itself cannot be extracted from this blob, the blob is stored as a file on disk — and another process running as the same user could copy it and use it to request SE operations. To mitigate this same-user attack, we wrap the `dataRepresentation` with **AES-256-GCM** encryption before writing to disk. The AES wrapping key is stored in the **macOS Keychain**, which provides per-application access control.
+**Handle protection for unsigned apps — planned, not yet implemented.** The SE's `dataRepresentation` is an opaque handle blob that allows the same device's SE to reconstruct the key reference. While the private key itself cannot be extracted from this blob, the blob is stored as a file on disk — and another process running as the same user could copy it and use it to request SE operations.
+
+**Current state.** `.handle` is written with 0600 permissions and no further wrapping (see `crates/enclaveapp-apple/src/keychain.rs`). A same-UID attacker can read the handle and replay it against the SE from another process.
+
+**Planned state** (see `fix-macos.md`). Wrap the `dataRepresentation` with **AES-256-GCM** using a Keychain-stored wrapping key. The Keychain's per-application access control then gates same-user handle theft:
 
 - **Signed app (code-signed with Developer ID):** The Keychain ACL is bound to the app's code signature. Other apps cannot access the wrapping key. Handle files are protected against same-user attacks.
 
@@ -196,7 +200,7 @@ On macOS, the `enclaveapp-apple` backend auto-detects which path to use at runti
 
 - **Signed/entitled (Level 1):** The app is code-signed with a Developer ID certificate and has the Secure Enclave entitlement. Keys are created inside SE hardware via `SecureEnclave.P256.Signing.PrivateKey` / `SecureEnclave.P256.KeyAgreement.PrivateKey`. The key material physically cannot be extracted. This is the production path for distributed binaries.
 
-- **Unsigned/development (Level 4):** The app is not code-signed or lacks entitlements (typical during local development with `cargo build`). Keys are created via regular `CryptoKit.P256` (not SE-bound). The private key's `dataRepresentation` is encrypted with AES-256-GCM using a wrapping key stored in the macOS Keychain, then written to disk as a `.handle` file. This provides encryption at rest but the keys are not hardware-bound.
+- **Unsigned/development (Level 4):** The app is not code-signed or lacks entitlements (typical during local development with `cargo build`). Keys are created via regular `CryptoKit.P256` (not SE-bound). The private key's `dataRepresentation` is currently written to disk as a 0600 `.handle` file without additional wrapping; Keychain-backed AES-GCM wrapping is planned (see `fix-macos.md`). Even today the keys are not hardware-bound in this mode.
 
 #### Linux glibc vs. musl
 

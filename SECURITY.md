@@ -62,7 +62,7 @@ libenclaveapp uses a conservative set of dependencies. Key external crates:
 - `aes-gcm`: Authenticated encryption (keyring backend ECIES)
 - `sha2`: Hash functions
 - `serde`, `toml`: Configuration serialization
-- `zeroize`: Secure memory wiping
+- `zeroize`: Secure memory wiping. Applied selectively — see the zeroize-coverage note in [THREAT_MODEL.md](THREAT_MODEL.md)
 
 All dependencies are published on crates.io and are widely used in the
 Rust ecosystem.
