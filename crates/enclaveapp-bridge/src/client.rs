@@ -5,9 +5,7 @@
 //! communicates via JSON-RPC over stdin/stdout.
 
 use crate::protocol::*;
-use enclaveapp_core::timeout::{
-    run_with_timeout, wait_with_timeout, LineReaderWithTimeout, TimeoutResult,
-};
+use enclaveapp_core::timeout::{wait_with_timeout, LineReaderWithTimeout, TimeoutResult};
 use enclaveapp_core::{AccessPolicy, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,9 +20,6 @@ const MAX_BRIDGE_RESPONSE_BYTES: usize = 64 * 1024;
 /// up to ~60s in practice). Override via `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS`.
 const DEFAULT_BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Timeout for `which` bridge discovery. Should be sub-second in practice.
-const BRIDGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Timeout for bridge shutdown (after we close stdin, it should exit promptly).
 const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -38,8 +33,14 @@ fn bridge_request_timeout() -> Duration {
 
 /// Find the bridge executable on the Windows filesystem (from WSL).
 ///
-/// Searches well-known install locations under `/mnt/c/` and falls back
-/// to `which` for PATH-based discovery.
+/// Only fixed install locations under `/mnt/c/Program Files/` and
+/// `/mnt/c/ProgramData/` are searched — those paths require Windows
+/// admin rights to write. PATH-based lookup via `which` was removed
+/// intentionally: a user-writable `$PATH` entry on the WSL side could
+/// otherwise substitute a malicious bridge binary, and the library
+/// performs no Authenticode verification on the resolved executable.
+/// Operators who install the bridge outside these locations must adjust
+/// the candidate list here or symlink into one of them.
 pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
     let candidates = [
         format!("/mnt/c/Program Files/{app_name}/{app_name}-tpm-bridge.exe"),
@@ -47,30 +48,10 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
         format!("/mnt/c/Program Files/{app_name}/{app_name}-bridge.exe"),
         format!("/mnt/c/ProgramData/{app_name}/{app_name}-bridge.exe"),
     ];
-    for path in &candidates {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    for name in [
-        format!("{app_name}-tpm-bridge.exe"),
-        format!("{app_name}-bridge.exe"),
-    ] {
-        let mut cmd = Command::new("which");
-        cmd.arg(&name);
-        if let Ok(TimeoutResult::Completed(output)) =
-            run_with_timeout(cmd, BRIDGE_DISCOVERY_TIMEOUT)
-        {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(PathBuf::from(path));
-                }
-            }
-        }
-    }
-    None
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
 }
 
 struct BridgeSession {
