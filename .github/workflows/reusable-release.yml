@@ -199,6 +199,16 @@ jobs:
 
       - name: Test
         if: "!contains(matrix.target, 'aarch64-pc-windows') && !contains(matrix.target, 'musl')"
+        env:
+          # GitHub Actions macOS runners block indefinitely when an
+          # unsigned test binary calls SecItemAdd against the login
+          # keychain (ACL confirmation prompt can't be answered
+          # headlessly). Consumers whose dev-dependencies enable
+          # enclaveapp-app-storage's `mock` feature route through
+          # MockEncryptionStorage when this var is set. Consumers
+          # that don't enable the feature see no effect — the
+          # env-var check is #[cfg(feature = "mock")]-gated.
+          ENCLAVEAPP_MOCK_STORAGE: ${{ runner.os == 'macOS' && '1' || '' }}
         run: cargo test --workspace ${{ inputs.cargo_build_args }} ${{ inputs.test_args && format('-- {0}', inputs.test_args) || '' }}
 
       - name: Package (Unix)
