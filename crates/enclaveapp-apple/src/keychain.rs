@@ -89,11 +89,25 @@ fn generate_key_with_retry<F>(mut generate_ffi: F) -> Result<(Vec<u8>, Vec<u8>)>
 where
     F: FnMut(*mut u8, *mut i32, *mut u8, *mut i32) -> i32,
 {
+    /// Hard cap on resize retries. `SE_ERR_BUFFER_TOO_SMALL` is only
+    /// ever legitimately raised by a genuine buffer-sizing shortfall,
+    /// which converges in one retry with the Swift-reported length.
+    /// Capping at 4 keeps a Swift-side contract bug (e.g. the FFI
+    /// starts returning `SE_ERR_BUFFER_TOO_SMALL` for some other
+    /// condition) from spinning forever; we surface it as a hard
+    /// error the developer can see.
+    const MAX_RESIZE_RETRIES: usize = 4;
+    /// Uncompressed P-256 public key is always 65 bytes. We allocate
+    /// exactly that size and never grow it. If the FFI reports
+    /// `pub_key_len > 65`, something violated the contract — surface
+    /// it explicitly rather than blindly resizing.
+    const UNCOMPRESSED_P256_PUBKEY_LEN: usize = 65;
+
     let mut data_rep_capacity = 1024_usize;
 
-    loop {
-        let mut pub_key = vec![0_u8; 65];
-        let mut pub_key_len: i32 = 65;
+    for _ in 0..MAX_RESIZE_RETRIES {
+        let mut pub_key = vec![0_u8; UNCOMPRESSED_P256_PUBKEY_LEN];
+        let mut pub_key_len: i32 = UNCOMPRESSED_P256_PUBKEY_LEN as i32;
         let mut data_rep = vec![0_u8; data_rep_capacity];
         let mut data_rep_len: i32 = data_rep_capacity as i32;
 
@@ -104,11 +118,25 @@ where
             &mut data_rep_len,
         );
 
-        if rc == SE_ERR_BUFFER_TOO_SMALL
-            && usize::try_from(data_rep_len).ok() > Some(data_rep_capacity)
-        {
-            data_rep_capacity = data_rep_len as usize;
-            continue;
+        if rc == SE_ERR_BUFFER_TOO_SMALL {
+            // Swift's contract for this code: `*_len.pointee` now
+            // holds the required size. Honor it only if it's
+            // strictly greater than what we sent — otherwise the
+            // return code is being used for something other than
+            // "need more buffer space," which is a contract
+            // violation we refuse to paper over with a retry.
+            let returned = usize::try_from(data_rep_len).unwrap_or(0);
+            if returned > data_rep_capacity {
+                data_rep_capacity = returned;
+                continue;
+            }
+            return Err(Error::GenerateFailed {
+                detail: format!(
+                    "FFI reported SE_ERR_BUFFER_TOO_SMALL but did not grow data_rep_len \
+                     (sent {data_rep_capacity} bytes, got back {returned}) — \
+                     Swift bridge contract violation"
+                ),
+            });
         }
 
         if rc != 0 {
@@ -117,10 +145,29 @@ where
             });
         }
 
-        pub_key.truncate(pub_key_len as usize);
-        data_rep.truncate(data_rep_len as usize);
+        // Contract sanity: pub_key buffer is fixed at 65 bytes.
+        let pub_key_len_usize = usize::try_from(pub_key_len).unwrap_or(0);
+        if pub_key_len_usize > UNCOMPRESSED_P256_PUBKEY_LEN {
+            return Err(Error::GenerateFailed {
+                detail: format!(
+                    "FFI reported pub_key_len = {pub_key_len_usize} but the buffer is \
+                     fixed at {UNCOMPRESSED_P256_PUBKEY_LEN} bytes — Swift bridge contract violation"
+                ),
+            });
+        }
+
+        pub_key.truncate(pub_key_len_usize);
+        let data_rep_len_usize = usize::try_from(data_rep_len).unwrap_or(0);
+        data_rep.truncate(data_rep_len_usize);
         return Ok((pub_key, data_rep));
     }
+
+    Err(Error::GenerateFailed {
+        detail: format!(
+            "Swift bridge repeatedly returned SE_ERR_BUFFER_TOO_SMALL after {MAX_RESIZE_RETRIES} \
+             retries — contract violation"
+        ),
+    })
 }
 
 /// Generate a Secure Enclave key and persist its local metadata atomically.
