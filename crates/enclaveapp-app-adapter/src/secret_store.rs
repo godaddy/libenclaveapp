@@ -18,33 +18,99 @@ use crate::binding_store::app_data_dir;
 use crate::error::{AdapterError, Result};
 use crate::types::BindingId;
 
-/// Placeholder value returned by read-only secret stores instead of the
-/// actual secret.  Consumers that need to distinguish "secret exists but
-/// cannot be read" from a real value **must** use [`is_redacted_placeholder`]
-/// rather than a bare `==` comparison — the function performs a
-/// constant-time byte compare and centralizes the collision-risk
-/// surface on a single helper that can be upgraded to a typed return
-/// type without touching every call site.
+/// Placeholder value returned by the legacy [`SecretStore::get`] method
+/// from read-only secret stores instead of the actual secret.
+///
+/// **Prefer [`SecretStore::get_read`]**, which returns a typed
+/// [`SecretRead`] enum and cannot be confused with a real secret whose
+/// bytes happen to equal this literal. The constant is retained for the
+/// old `get` path and for back-compat with persisted state (npmenc
+/// stores per-binding token-source state strings that may literally be
+/// `"<redacted>"` after a `show --raw` export).
 pub const REDACTED_PLACEHOLDER: &str = "<redacted>";
 
-/// Check whether a secret-store string return is the redaction sentinel.
+/// Check whether a legacy string return is the redaction sentinel.
 ///
-/// The sentinel collides semantically with any real secret whose value
-/// happens to equal the literal string `"<redacted>"`. That's a
-/// vanishingly unlikely collision for npm tokens (which begin with
-/// `npm_`) or SSO JWTs (which are base64-encoded with `.` separators),
-/// but the library cannot prove it can never happen. Using this helper
-/// keeps the single comparison site canonical — a future migration to
-/// a typed `SecretMaterialization` enum can swap this function's body
-/// without breaking call-site ergonomics.
+/// Equivalent to `value == REDACTED_PLACEHOLDER`. New code should
+/// compare against [`SecretRead::Redacted`] instead — this helper is
+/// kept for call sites that still consume the legacy
+/// [`SecretStore::get`] result.
 #[must_use]
 pub fn is_redacted_placeholder(value: &str) -> bool {
     value == REDACTED_PLACEHOLDER
 }
 
+/// Typed outcome of reading a secret from a [`SecretStore`].
+///
+/// Callers that distinguish "secret exists but cannot be read" from
+/// "secret present" should match on this enum instead of inspecting a
+/// string. The [`Present`](SecretRead::Present) variant owns the
+/// plaintext; [`Redacted`](SecretRead::Redacted) carries no material;
+/// [`Absent`](SecretRead::Absent) means nothing was stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretRead {
+    /// Secret material was successfully read.
+    Present(String),
+    /// A value is stored for this id but the store will not hand it over
+    /// — for example the read-only inspection store that knows an entry
+    /// exists but intentionally refuses to decrypt.
+    Redacted,
+    /// No entry is stored for this id.
+    Absent,
+}
+
+impl SecretRead {
+    /// True if the variant is `Present`.
+    #[must_use]
+    pub fn is_present(&self) -> bool {
+        matches!(self, SecretRead::Present(_))
+    }
+
+    /// True if the variant is `Redacted`.
+    #[must_use]
+    pub fn is_redacted(&self) -> bool {
+        matches!(self, SecretRead::Redacted)
+    }
+
+    /// True if the variant is `Absent`.
+    #[must_use]
+    pub fn is_absent(&self) -> bool {
+        matches!(self, SecretRead::Absent)
+    }
+
+    /// Consume and return the plaintext if `Present`, else `None`.
+    /// Redacted is mapped to `None` — callers that need to distinguish
+    /// redaction from absence must match on the enum directly.
+    #[must_use]
+    pub fn into_present(self) -> Option<String> {
+        match self {
+            SecretRead::Present(s) => Some(s),
+            SecretRead::Redacted | SecretRead::Absent => None,
+        }
+    }
+}
+
 pub trait SecretStore {
     fn set(&self, id: &BindingId, secret: &str) -> Result<()>;
+
+    /// Legacy string-return read. Kept for back-compat. Prefer
+    /// [`get_read`](SecretStore::get_read), which returns a typed
+    /// [`SecretRead`] and cannot be confused with a real secret whose
+    /// bytes equal [`REDACTED_PLACEHOLDER`].
     fn get(&self, id: &BindingId) -> Result<Option<String>>;
+
+    /// Typed-return read. Default implementation forwards to `get` and
+    /// maps `Some("<redacted>")` → [`SecretRead::Redacted`]. Store
+    /// implementations that can distinguish present-vs-redacted
+    /// natively should override to avoid the string-sentinel round-trip.
+    fn get_read(&self, id: &BindingId) -> Result<SecretRead> {
+        match self.get(id)? {
+            Some(value) if value == REDACTED_PLACEHOLDER => Ok(SecretRead::Redacted),
+            Some(value) => Ok(SecretRead::Present(value)),
+            None => Ok(SecretRead::Absent),
+        }
+    }
+
     fn delete(&self, id: &BindingId) -> Result<bool>;
 }
 
@@ -224,6 +290,18 @@ impl SecretStore for EncryptedFileSecretStore {
             Ok(true)
         })
     }
+
+    fn get_read(&self, id: &BindingId) -> Result<SecretRead> {
+        // The encrypted store always returns real plaintext via `get`,
+        // so Present is the only non-Absent outcome. A real secret that
+        // happens to equal `"<redacted>"` in bytes is returned as
+        // `Present("<redacted>")` here — *not* as `Redacted` — so the
+        // typed API is collision-free on read-write stores.
+        Ok(match self.get(id)? {
+            Some(value) => SecretRead::Present(value),
+            None => SecretRead::Absent,
+        })
+    }
 }
 
 impl SecretStore for ReadOnlyEncryptedFileSecretStore {
@@ -249,16 +327,59 @@ impl SecretStore for ReadOnlyEncryptedFileSecretStore {
             "read-only secret store cannot delete `{id:?}`"
         )))
     }
+
+    fn get_read(&self, id: &BindingId) -> Result<SecretRead> {
+        // Bypass the string sentinel — report Redacted directly so a
+        // stored secret whose bytes are literally `"<redacted>"` can
+        // still be distinguished from "exists but not handed over."
+        if !self.dir.exists() {
+            return Ok(SecretRead::Absent);
+        }
+        if !self.path_for(id).exists() {
+            return Ok(SecretRead::Absent);
+        }
+        Ok(SecretRead::Redacted)
+    }
+}
+
+/// Per-id outcome that the in-memory store will report.
+///
+/// `Material(String)` is the normal path — real plaintext stored and
+/// returned. `Redacted` is an explicit inspection simulation: `get`
+/// returns `Some(REDACTED_PLACEHOLDER)` for legacy callers, `get_read`
+/// returns `SecretRead::Redacted`. Tests that want to exercise the
+/// redacted-state code path should use
+/// [`MemorySecretStore::mark_redacted`] rather than writing the
+/// sentinel string via `set` — writing the sentinel via `set` now
+/// round-trips as `Present(<redacted>)` through the typed API, per
+/// the design that makes the sentinel collision-free.
+#[derive(Debug, Clone)]
+enum MemoryEntry {
+    Material(String),
+    Redacted,
 }
 
 #[derive(Debug, Default)]
 pub struct MemorySecretStore {
-    values: Mutex<HashMap<BindingId, String>>,
+    values: Mutex<HashMap<BindingId, MemoryEntry>>,
 }
 
 impl MemorySecretStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mark an entry as redacted — `get_read` will return
+    /// [`SecretRead::Redacted`] and the legacy `get` will return
+    /// `Some(REDACTED_PLACEHOLDER)`. Test-only: mirrors what a
+    /// real [`ReadOnlyEncryptedFileSecretStore`] does without
+    /// requiring the test to spin up a filesystem-backed store.
+    pub fn mark_redacted(&self, id: &BindingId) -> Result<()> {
+        self.values
+            .lock()
+            .map_err(|_| AdapterError::Storage("secret store mutex poisoned".to_string()))?
+            .insert(id.clone(), MemoryEntry::Redacted);
+        Ok(())
     }
 }
 
@@ -267,7 +388,7 @@ impl SecretStore for MemorySecretStore {
         self.values
             .lock()
             .map_err(|_| AdapterError::Storage("secret store mutex poisoned".to_string()))?
-            .insert(id.clone(), secret.to_string());
+            .insert(id.clone(), MemoryEntry::Material(secret.to_string()));
         Ok(())
     }
 
@@ -277,7 +398,10 @@ impl SecretStore for MemorySecretStore {
             .lock()
             .map_err(|_| AdapterError::Storage("secret store mutex poisoned".to_string()))?
             .get(id)
-            .cloned())
+            .map(|entry| match entry {
+                MemoryEntry::Material(value) => value.clone(),
+                MemoryEntry::Redacted => REDACTED_PLACEHOLDER.to_string(),
+            }))
     }
 
     fn delete(&self, id: &BindingId) -> Result<bool> {
@@ -287,6 +411,21 @@ impl SecretStore for MemorySecretStore {
             .map_err(|_| AdapterError::Storage("secret store mutex poisoned".to_string()))?
             .remove(id)
             .is_some())
+    }
+
+    fn get_read(&self, id: &BindingId) -> Result<SecretRead> {
+        // Stored `Material("<redacted>")` round-trips as Present, not
+        // Redacted — the typed API is collision-free by construction.
+        // Only explicit `mark_redacted` surfaces `SecretRead::Redacted`.
+        Ok(self
+            .values
+            .lock()
+            .map_err(|_| AdapterError::Storage("secret store mutex poisoned".to_string()))?
+            .get(id)
+            .map_or(SecretRead::Absent, |entry| match entry {
+                MemoryEntry::Material(value) => SecretRead::Present(value.clone()),
+                MemoryEntry::Redacted => SecretRead::Redacted,
+            }))
     }
 }
 
@@ -361,6 +500,76 @@ mod tests {
     fn redacted_placeholder_is_recognizable() {
         // The placeholder should be a clearly non-secret sentinel value
         assert_eq!(REDACTED_PLACEHOLDER, "<redacted>");
+    }
+
+    #[test]
+    fn get_read_on_memory_store_wraps_present() {
+        let store = MemorySecretStore::new();
+        let id = BindingId::new("npm:tm");
+        store.set(&id, "real-token").unwrap();
+        match store.get_read(&id).unwrap() {
+            SecretRead::Present(value) => assert_eq!(value, "real-token"),
+            other => panic!("expected Present, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_read_on_memory_store_wraps_absent() {
+        let store = MemorySecretStore::new();
+        let id = BindingId::new("npm:missing");
+        assert_eq!(store.get_read(&id).unwrap(), SecretRead::Absent);
+    }
+
+    #[test]
+    fn get_read_on_memory_store_returns_present_even_for_sentinel_bytes() {
+        // A secret that literally equals "<redacted>" must not be
+        // misclassified as Redacted — that's the whole point of the
+        // typed API.
+        let store = MemorySecretStore::new();
+        let id = BindingId::new("npm:collision");
+        store.set(&id, REDACTED_PLACEHOLDER).unwrap();
+        match store.get_read(&id).unwrap() {
+            SecretRead::Present(value) => assert_eq!(value, REDACTED_PLACEHOLDER),
+            other => panic!("expected Present(<redacted>), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_read_on_read_only_store_returns_redacted_for_existing_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let secrets_dir = dir.path().join("secrets");
+        fs::create_dir_all(&secrets_dir).expect("mkdir");
+
+        let store = ReadOnlyEncryptedFileSecretStore {
+            dir: secrets_dir.clone(),
+        };
+        let id = BindingId::new("npm:ro-collision");
+        fs::write(&store.path_for(&id), b"ignored-ciphertext").unwrap();
+
+        assert_eq!(store.get_read(&id).unwrap(), SecretRead::Redacted);
+    }
+
+    #[test]
+    fn get_read_on_read_only_store_returns_absent_when_no_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ReadOnlyEncryptedFileSecretStore {
+            dir: dir.path().join("secrets"),
+        };
+        let id = BindingId::new("npm:missing");
+        assert_eq!(store.get_read(&id).unwrap(), SecretRead::Absent);
+    }
+
+    #[test]
+    fn secret_read_helpers() {
+        assert!(SecretRead::Present("t".into()).is_present());
+        assert!(SecretRead::Redacted.is_redacted());
+        assert!(SecretRead::Absent.is_absent());
+        assert_eq!(
+            SecretRead::Present("t".into()).into_present(),
+            Some("t".into())
+        );
+        assert_eq!(SecretRead::Redacted.into_present(), None);
+        assert_eq!(SecretRead::Absent.into_present(), None);
     }
 
     #[test]
