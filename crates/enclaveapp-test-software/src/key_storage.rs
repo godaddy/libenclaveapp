@@ -100,7 +100,7 @@ pub fn load_secret_key(config: &SoftwareConfig, label: &str) -> Result<SecretKey
             label: label.to_string(),
         });
     }
-    let bytes = std::fs::read(&key_path)?;
+    let bytes = metadata::read_no_follow(&key_path)?;
     SecretKey::from_slice(&bytes).map_err(|e| Error::KeyOperation {
         operation: "load_secret_key".into(),
         detail: e.to_string(),

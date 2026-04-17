@@ -310,8 +310,8 @@ pub fn load_key_blobs(dir: &Path, label: &str) -> Result<(Vec<u8>, Vec<u8>)> {
             label: label.to_string(),
         });
     }
-    let public_blob = std::fs::read(&pub_path)?;
-    let private_blob = std::fs::read(&priv_path)?;
+    let public_blob = metadata::read_no_follow(&pub_path)?;
+    let private_blob = metadata::read_no_follow(&priv_path)?;
     Ok((public_blob, private_blob))
 }
 

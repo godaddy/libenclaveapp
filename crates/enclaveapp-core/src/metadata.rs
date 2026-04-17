@@ -89,6 +89,54 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     atomic_write_with_sync(path, data, sync_parent_dir)
 }
 
+/// Read a file, refusing to follow symlinks at the target path.
+///
+/// On Unix uses `open(..., O_NOFOLLOW)` which returns `ELOOP` if `path`
+/// is a symlink, closing the TOCTOU window that a pre-stat / post-read
+/// symlink swap would open.  On Windows symlinks in the keys directory
+/// are uncommon; we use a `symlink_metadata()` pre-check that is racy
+/// relative to a simultaneous attacker rename, but good enough given
+/// the threat model (same-UID attacker with user-profile write access).
+///
+/// Intended for loading key material (handle blobs, pub keys, `.meta`
+/// files) whose paths are constructed from user-controlled labels.
+pub fn read_no_follow(path: &Path) -> Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+    #[cfg(not(unix))]
+    {
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to read symlink at {}", path.display()),
+            )));
+        }
+        std::fs::read(path).map_err(Error::Io)
+    }
+}
+
+/// Read-to-string variant of [`read_no_follow`].
+pub fn read_to_string_no_follow(path: &Path) -> Result<String> {
+    let bytes = read_no_follow(path)?;
+    String::from_utf8(bytes).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not valid UTF-8: {e}", path.display()),
+        ))
+    })
+}
+
 fn atomic_write_with_sync<F>(path: &Path, data: &[u8], sync_parent: F) -> Result<()>
 where
     F: Fn(&Path) -> Result<()>,
@@ -206,7 +254,7 @@ pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
             app_specific: serde_json::Value::Null,
         });
     }
-    let content = std::fs::read_to_string(&meta_path)?;
+    let content = read_to_string_no_follow(&meta_path)?;
     serde_json::from_str(&content).map_err(|e| Error::Serialization(e.to_string()))
 }
 
@@ -226,7 +274,7 @@ pub fn load_pub_key(dir: &Path, label: &str) -> Result<Vec<u8>> {
             label: label.to_string(),
         });
     }
-    Ok(std::fs::read(&path)?)
+    read_no_follow(&path)
 }
 
 /// Refresh the cached public key from authoritative source bytes.
@@ -344,7 +392,7 @@ where
     // Update the label in the metadata file
     let new_meta_path = dir.join(format!("{new_label}.meta"));
     if new_meta_path.exists() {
-        let content = std::fs::read_to_string(&new_meta_path)?;
+        let content = read_to_string_no_follow(&new_meta_path)?;
         let mut meta: KeyMeta =
             serde_json::from_str(&content).map_err(|e| Error::Serialization(e.to_string()))?;
         meta.label = new_label.to_string();
