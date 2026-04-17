@@ -10,6 +10,7 @@ use crate::provider::NcryptHandle;
 use enclaveapp_core::AccessPolicy;
 use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::*;
+use windows::Win32::Security::OBJECT_SECURITY_INFORMATION;
 
 /// Set a Windows Hello UI policy on a key handle.
 ///
@@ -79,7 +80,7 @@ pub fn verify_ui_policy_matches(
 
     let mut actual = NCRYPT_UI_POLICY {
         dwVersion: 0,
-        dwFlags: NCRYPT_FLAGS::default(),
+        dwFlags: 0,
         pszCreationTitle: PCWSTR::null(),
         pszFriendlyName: PCWSTR::null(),
         pszDescription: PCWSTR::null(),
@@ -98,11 +99,11 @@ pub fn verify_ui_policy_matches(
             PCWSTR(prop_name.as_ptr()),
             Some(buf),
             &mut actual_size,
-            NCRYPT_FLAGS::default(),
+            OBJECT_SECURITY_INFORMATION(0),
         )
     };
 
-    let actual_flags = match result {
+    let actual_flags: u32 = match result {
         Ok(()) => actual.dwFlags,
         Err(e) => {
             // SPC_E_NO_POLICY / NTE_NOT_FOUND both surface as a missing
@@ -121,7 +122,7 @@ pub fn verify_ui_policy_matches(
     };
 
     let has_protect_flag =
-        (actual_flags.0 & NCRYPT_UI_PROTECT_KEY_FLAG.0) == NCRYPT_UI_PROTECT_KEY_FLAG.0;
+        (actual_flags & NCRYPT_UI_PROTECT_KEY_FLAG) == NCRYPT_UI_PROTECT_KEY_FLAG;
 
     match (expected, has_protect_flag) {
         (AccessPolicy::None, false) => Ok(()),
