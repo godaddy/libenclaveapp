@@ -131,7 +131,15 @@ Consumer crates that care about tighter memory hygiene should wrap their own sen
 
 ### Credential cache header tamper
 
-The cache header (version, magic, timestamps, risk level) in `crates/enclaveapp-app-adapter/src/credential_cache.rs` is unauthenticated. A same-UID attacker with file-write access can edit the header's risk level downward, which extends the `CredentialState` policy windows. The AES-GCM-protected body remains intact, so the attacker cannot decrypt the cached credential, but they can make the library treat a soon-to-expire credential as fresh for longer. Mitigation: consumers should validate the decrypted payload's own timestamps (which most already do for server-side reasons). A future hardening would be to authenticate the header bytes via AAD.
+The cache header (version, magic, timestamps, risk level) in `crates/enclaveapp-app-adapter/src/credential_cache.rs` is unauthenticated. A same-UID attacker with file-write access can edit the header's risk level downward, which nominally extends the client-side `CredentialState` policy windows. The AES-GCM-protected body remains intact, so the attacker cannot decrypt the cached credential.
+
+**Mitigations actually in place today:**
+
+- **Consumer-side `max(header, config)`.** sso-jwt's `effective_cached_risk_level` (`sso-jwt-lib/src/cache.rs:57-59`) and awsenc's equivalent always take the greater of the header-written risk level and the configured minimum. Header downgrade alone cannot reduce the effective risk level below the config.
+- **Server-side expiration is authoritative.** AWS STS credentials and SSO JWTs carry their own `Expiration` / `exp`; a rolled-back-header cache still expires at the real server-side time, not the header's.
+- **Payload-embedded timestamps.** sso-jwt embeds `token_iat` and `session_start` inside the encrypted payload; awsenc embeds credential `expiration` inside the encrypted `AwsCredentials` JSON. Both consumers recheck these after decrypt, ignoring the unencrypted header's version.
+
+**Not implemented (noted but deferred):** AES-GCM AAD binding of the header to the ciphertext. The cleanest construction would be to thread the full serialized header bytes into the `EncryptionStorage::encrypt` / `decrypt` path as additional authenticated data — any header edit would then fail decryption. Implementing it requires a trait signature change across all four backends (SE, CNG, keyring, software) and every consumer, plus an on-disk format break for the pre-AAD ciphertexts. Given the mitigations above already neutralize the practical risk level downgrade, this is tracked as future work rather than an active gap.
 
 ### Build-time trust
 
