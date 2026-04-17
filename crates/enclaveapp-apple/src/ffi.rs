@@ -72,4 +72,38 @@ extern "C" {
         plaintext_out: *mut u8,
         plaintext_len: *mut i32,
     ) -> i32;
+
+    // Keychain generic-password helpers (wrapping-key storage).
+    //
+    // Return codes:
+    //   0   SE_OK
+    //   4   SE_ERR_BUFFER_TOO_SMALL
+    //   9   SE_ERR_KEYCHAIN_STORE
+    //   10  SE_ERR_KEYCHAIN_LOAD
+    //   11  SE_ERR_KEYCHAIN_DELETE
+    //   12  SE_ERR_KEYCHAIN_NOT_FOUND
+    pub fn enclaveapp_keychain_store(
+        service: *const u8,
+        service_len: i32,
+        account: *const u8,
+        account_len: i32,
+        secret: *const u8,
+        secret_len: i32,
+    ) -> i32;
+
+    pub fn enclaveapp_keychain_load(
+        service: *const u8,
+        service_len: i32,
+        account: *const u8,
+        account_len: i32,
+        secret_out: *mut u8,
+        secret_len: *mut i32,
+    ) -> i32;
+
+    pub fn enclaveapp_keychain_delete(
+        service: *const u8,
+        service_len: i32,
+        account: *const u8,
+        account_len: i32,
+    ) -> i32;
 }

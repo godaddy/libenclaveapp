@@ -30,6 +30,10 @@ let SE_ERR_NOT_AVAILABLE: Int32 = 5
 let SE_ERR_ENCRYPT: Int32 = 6
 let SE_ERR_DECRYPT: Int32 = 7
 let SE_ERR_DELETE: Int32 = 8
+let SE_ERR_KEYCHAIN_STORE: Int32 = 9
+let SE_ERR_KEYCHAIN_LOAD: Int32 = 10
+let SE_ERR_KEYCHAIN_DELETE: Int32 = 11
+let SE_ERR_KEYCHAIN_NOT_FOUND: Int32 = 12
 
 // MARK: - ECIES format constants
 
@@ -391,4 +395,140 @@ public func enclaveapp_se_decrypt(
     } catch {
         return SE_ERR_DECRYPT
     }
+}
+
+// MARK: - Keychain helpers (generic-password wrapping keys)
+//
+// These helpers wrap the legacy (file-based) keychain's
+// kSecClassGenericPassword items. Rust calls them to store, load, and
+// delete the 32-byte AES wrapping key used to encrypt the SE
+// dataRepresentation before it's written to `.handle` on disk.
+//
+// DO NOT set `kSecUseDataProtectionKeychain: true` — on unsigned builds
+// (Homebrew, cargo build) the modern Data Protection keychain returns
+// errSecMissingEntitlement (-34018). The legacy keychain accepts
+// unsigned callers.
+//
+// Items are created with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`:
+// the device must be unlocked to read them, and they do NOT sync via
+// iCloud / migrate across devices.
+
+private func makeServiceData(_ service: UnsafePointer<UInt8>, _ len: Int32) -> Data {
+    return Data(bytes: service, count: Int(len))
+}
+
+private func makeAccountString(_ account: UnsafePointer<UInt8>, _ len: Int32) -> String? {
+    let bytes = Data(bytes: account, count: Int(len))
+    return String(data: bytes, encoding: .utf8)
+}
+
+private func makeServiceString(_ service: UnsafePointer<UInt8>, _ len: Int32) -> String? {
+    let bytes = Data(bytes: service, count: Int(len))
+    return String(data: bytes, encoding: .utf8)
+}
+
+/// Store (or replace) an opaque secret in the keychain as a generic
+/// password. Any existing entry with the same service+account pair is
+/// removed first, so the call is effectively an upsert.
+@_cdecl("enclaveapp_keychain_store")
+public func enclaveapp_keychain_store(
+    _ service: UnsafePointer<UInt8>, _ service_len: Int32,
+    _ account: UnsafePointer<UInt8>, _ account_len: Int32,
+    _ secret: UnsafePointer<UInt8>, _ secret_len: Int32
+) -> Int32 {
+    guard let serviceStr = makeServiceString(service, service_len) else {
+        return SE_ERR_KEYCHAIN_STORE
+    }
+    guard let accountStr = makeAccountString(account, account_len) else {
+        return SE_ERR_KEYCHAIN_STORE
+    }
+    let secretData = Data(bytes: secret, count: Int(secret_len))
+
+    // Delete any existing entry first.
+    let deleteQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: serviceStr,
+        kSecAttrAccount as String: accountStr,
+    ]
+    _ = SecItemDelete(deleteQuery as CFDictionary)
+
+    let addQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: serviceStr,
+        kSecAttrAccount as String: accountStr,
+        kSecValueData as String: secretData,
+        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+    ]
+    let status = SecItemAdd(addQuery as CFDictionary, nil)
+    return status == errSecSuccess ? SE_OK : SE_ERR_KEYCHAIN_STORE
+}
+
+/// Load a previously-stored secret by service+account. Returns
+/// `SE_ERR_KEYCHAIN_NOT_FOUND` if no entry exists.
+@_cdecl("enclaveapp_keychain_load")
+public func enclaveapp_keychain_load(
+    _ service: UnsafePointer<UInt8>, _ service_len: Int32,
+    _ account: UnsafePointer<UInt8>, _ account_len: Int32,
+    _ secret_out: UnsafeMutablePointer<UInt8>, _ secret_len: UnsafeMutablePointer<Int32>
+) -> Int32 {
+    guard let serviceStr = makeServiceString(service, service_len) else {
+        return SE_ERR_KEYCHAIN_LOAD
+    }
+    guard let accountStr = makeAccountString(account, account_len) else {
+        return SE_ERR_KEYCHAIN_LOAD
+    }
+
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: serviceStr,
+        kSecAttrAccount as String: accountStr,
+        kSecReturnData as String: true,
+        kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    if status == errSecItemNotFound {
+        return SE_ERR_KEYCHAIN_NOT_FOUND
+    }
+    if status != errSecSuccess {
+        return SE_ERR_KEYCHAIN_LOAD
+    }
+    guard let data = item as? Data else {
+        return SE_ERR_KEYCHAIN_LOAD
+    }
+
+    let count = Int32(data.count)
+    if secret_len.pointee < count {
+        secret_len.pointee = count
+        return SE_ERR_BUFFER_TOO_SMALL
+    }
+    data.copyBytes(to: secret_out, count: data.count)
+    secret_len.pointee = count
+    return SE_OK
+}
+
+/// Delete the generic-password entry for a service+account pair. It is
+/// not an error if the entry does not exist — the caller treats that as
+/// idempotent cleanup.
+@_cdecl("enclaveapp_keychain_delete")
+public func enclaveapp_keychain_delete(
+    _ service: UnsafePointer<UInt8>, _ service_len: Int32,
+    _ account: UnsafePointer<UInt8>, _ account_len: Int32
+) -> Int32 {
+    guard let serviceStr = makeServiceString(service, service_len) else {
+        return SE_ERR_KEYCHAIN_DELETE
+    }
+    guard let accountStr = makeAccountString(account, account_len) else {
+        return SE_ERR_KEYCHAIN_DELETE
+    }
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: serviceStr,
+        kSecAttrAccount as String: accountStr,
+    ]
+    let status = SecItemDelete(query as CFDictionary)
+    if status == errSecSuccess || status == errSecItemNotFound {
+        return SE_OK
+    }
+    return SE_ERR_KEYCHAIN_DELETE
 }
