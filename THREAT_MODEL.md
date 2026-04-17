@@ -65,6 +65,67 @@ Hardware access policies (Touch ID, Windows Hello) are the only defense against 
 - **ECIES replay:** An old encrypted cache file decrypts successfully as long as the key exists. Applications must check timestamps in the decrypted payload. The library provides cache lifecycle management (`CredentialState`) but not replay prevention at the ECIES layer.
 - **Credential replay:** Credentials returned by Type 1 apps (e.g., AWS STS tokens) are replayable within their validity window. SSH signatures include server nonces and cannot be replayed. Credential expiration is the protocol's responsibility.
 
+### Bridge protocol surface
+
+The WSL→Windows bridge is a JSON-RPC channel over a child process's stdin/stdout. Beyond binary replacement (above), the following protocol-level threats are worth naming.
+
+- **Access-policy downgrade via legacy `biometric` field.** `BridgeRequest::params` (`crates/enclaveapp-bridge/src/protocol.rs`) accepts both the new `access_policy` enum and a legacy `biometric: bool` for backward compatibility. `effective_access_policy` reconciles them client-side. If a downgrade-attacker-controlled bridge server ignores `access_policy` and only reads `biometric`, a client that sends `BiometricOnly` could be silently served as `None`. Mitigation: ensure every deployed server honors `access_policy` when present.
+- **Method-name confusion (`delete` vs `destroy`).** `bridge_destroy` sends the wire method name `"delete"` for backward compatibility. An older bridge server that only implements `"destroy"` will return an unknown-method error, leaving stale key state. Mitigation: documented in-code; bridge servers should accept both aliases.
+- **Accepted guarantees** now explicit in the model: 64 KB response cap (`MAX_BRIDGE_RESPONSE_BYTES`), connection-scoped child kill-on-drop (`BridgeSession::Drop`), and a configurable `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS` read-line timeout.
+
+### FFI trust boundaries
+
+Unsafe FFI surfaces are trusted by design but fragile.
+
+- **Swift ↔ Rust bridge** (`crates/enclaveapp-apple/src/ffi.rs` + `crates/enclaveapp-apple/swift/bridge.swift`). Out-buffer convention relies on the caller sizing buffers correctly; `SE_ERR_BUFFER_TOO_SMALL` return codes can mask unrelated errors if the Rust side assumes buffer sizing is the only failure mode. Any change to Swift bridge signatures requires a coordinated Rust FFI update.
+- **Windows CNG raw-pointer casts** (`crates/enclaveapp-windows/src/ui_policy.rs`). `NCRYPT_UI_POLICY` is passed to `NCryptSetProperty` via `&ui_policy as *const _ as *const u8` with a computed `size_of::<NCRYPT_UI_POLICY>()`. This is correct today but fragile to future struct layout changes.
+- **NCRYPT UI policy is set at key creation only.** The library does not re-read `NCRYPT_UI_PROTECT_KEY_FLAG` before signing. An attacker-planted TPM key with the expected name would sign without triggering Windows Hello. Integration testing on real Windows TPM hardware is a tracked follow-up.
+
+### Keychain and key-backend-specific risks
+
+- **macOS `.handle` storage is currently plaintext (0600).** DESIGN.md describes AES-GCM wrapping under a Keychain-stored key as the handle-theft defense. That code is not yet merged (see `fix-macos.md`). Until it lands, a same-UID attacker can copy a `.handle` file and replay it against the SE from another process. The SE still refuses to export the private key itself.
+- **Cross-binary Keychain access on macOS** for ad-hoc signed builds (Homebrew, `cargo build`) is controlled by binary hash; every rebuild invalidates the ACL and reprompts the user. This is the Keychain enforcing its ACL, not a vulnerability, but it becomes load-bearing once Keychain wrapping lands (see above).
+- **Keyring D-Bus peer trust.** The keyring backend talks to the session D-Bus Secret Service. A hostile session bus (another process running as the user that took over the bus) could intercept unlock / decrypt requests. Same-user already-compromised session; out of scope for the library.
+
+### Filesystem races and metadata tamper
+
+- **No `O_NOFOLLOW` on metadata and handle reads.** Reads in `crates/enclaveapp-core/src/metadata.rs` and `crates/enclaveapp-apple/src/keychain.rs` use `std::fs::read`, which follows symlinks. A pre-planted symlink in the keys directory (same-UID attacker) can redirect a read or cause the library to parse an arbitrary file as key material. `atomic_write` uses `create_new` for the temp file (blocking symlink preemption of the temp), but the final `rename` target is not probed with `O_NOFOLLOW`.
+- **Unauthenticated `.meta` files.** `KeyMeta.access_policy` is stored as plain JSON (`crates/enclaveapp-core/src/metadata.rs`). A same-UID attacker who edits `<label>.meta` to flip `BiometricOnly` → `None` changes what library-level policy checks see, even though the hardware key's policy was fixed at creation. Effect is: misleading UI / app-level checks on SE/TPM, full bypass on software / keyring backends. This is the backend of the sshenc and awsenc notes on the same subject.
+- **Binding-store permission window.** `JsonFileBindingStore::write_all_unlocked` (`crates/enclaveapp-app-adapter/src/binding_store.rs`) writes the temp file at the process umask before tightening permissions via `set_file_permissions`. A brief world-readable window exists between `write` and `chmod`. Same-UID reader is the only threat model; still a hardening candidate (create with `OpenOptions::mode(0o600)` or equivalent where supported).
+- **`TempConfig::write`** has the same pattern: `create_new` + post-open mode tightening in `crates/enclaveapp-app-adapter/src/temp_config.rs`. The 0700 parent directory limits exposure but the file itself has a micro-window at the default umask.
+
+### Concurrent access
+
+- **Per-process flocks, not cross-process coordination for key creation.** `DirLock` (`crates/enclaveapp-core/src/metadata.rs`) guards metadata mutations, and `secret_store.rs` uses per-id shared/exclusive flocks for the adapter. But initial key creation in `crates/enclaveapp-apple/src/keychain.rs` is not wrapped in `DirLock::acquire` before calling the SE. Two concurrent first-run invocations can each generate SE keys; one "wins" the metadata write, the other's SE slot is orphaned. Same pattern can exist on other backends.
+- **Bridge serialization.** Two WSL-side clients hitting the Windows bridge concurrently depend on the server serializing requests. Clients do not hold a mutex across bridge sessions.
+
+### Process hardening scope
+
+`enclaveapp_core::process::harden_process()` (`crates/enclaveapp-core/src/process.rs`) currently only calls `disable_core_dumps` (`setrlimit(RLIMIT_CORE, 0)` on Unix; no-op on Windows). It does **not** apply `PR_SET_DUMPABLE=0`, `NO_NEW_PRIVS`, ptrace-blocking, `RLIMIT_AS`, or Windows `SetProcessMitigationPolicy`. A same-UID attacker can still `ptrace` into a running process and read decrypted plaintext in the window between hardware-decrypt and consumer handoff. Applications that want stricter memory protection must add their own mitigations on top.
+
+### Zeroize coverage
+
+`zeroize` is applied to secret-bearing structures in the launcher (`crates/enclaveapp-app-adapter/src/launcher.rs`) and credential cache (`crates/enclaveapp-app-adapter/src/credential_cache.rs`). It is **not** applied to:
+
+- in-memory P-256 private-key bytes loaded from the keyring / software backend
+- intermediate signature / ECIES buffers
+- `mlock`ed handle bytes on macOS
+
+Consumer crates that care about tighter memory hygiene should wrap their own sensitive buffers. The SECURITY.md summary has been updated to reflect this.
+
+### App-adapter surface
+
+- **`<redacted>` sentinel.** `crates/enclaveapp-app-adapter/src/secret_store.rs` returns the literal string `"<redacted>"` from read-only stores to stand in for "we know a secret exists but won't hand it over." Consumers that propagate any non-empty return value as a secret will end up using the literal `"<redacted>"` as a password. Callers must compare against the `REDACTED_PLACEHOLDER` constant or adopt a typed return.
+- **Launcher env inheritance.** `Launcher::launch` forwards the parent process's full environment plus `env_overrides` to the child, then zeroizes only the env vars it added. Secrets already present in the parent env are propagated unchanged and are not wiped. Documented as an accepted constraint — env-bearing secrets inherited from callers are the caller's responsibility.
+
+### Credential cache header tamper
+
+The cache header (version, magic, timestamps, risk level) in `crates/enclaveapp-app-adapter/src/credential_cache.rs` is unauthenticated. A same-UID attacker with file-write access can edit the header's risk level downward, which extends the `CredentialState` policy windows. The AES-GCM-protected body remains intact, so the attacker cannot decrypt the cached credential, but they can make the library treat a soon-to-expire credential as fresh for longer. Mitigation: consumers should validate the decrypted payload's own timestamps (which most already do for server-side reasons). A future hardening would be to authenticate the header bytes via AAD.
+
+### Build-time trust
+
+`crates/enclaveapp-apple/build.rs` invokes `xcrun`, `swiftc`, and `ar` from the developer's `$PATH` with no pinning or signature verification. Build-environment PATH compromise substitutes the Swift object that ends up statically linked into the binary. This is a developer-machine concern, not a user-runtime concern, but worth an explicit note so release tooling can pin to fixed toolchain paths in CI.
+
 ## What we explicitly don't protect against
 
 - Physical attacks on hardware security modules (chip decapping, side-channel emanation)
@@ -78,6 +139,6 @@ Hardware access policies (Touch ID, Windows Hello) are the only defense against 
 
 **macOS Keychain prompts:** On unsigned builds, the Keychain prompts once per binary hash change (e.g., after `brew upgrade`). Signed builds avoid this. This is the Keychain enforcing its ACL, not a vulnerability.
 
-**WSL bridge:** Communicates over stdin/stdout of a child process. Replacing the bridge binary requires Windows admin rights — which already grants direct TPM access.
+**WSL bridge:** Communicates over stdin/stdout of a child process. The client (`crates/enclaveapp-bridge/src/client.rs`) discovers the bridge via a fixed-path list under `/mnt/c/Program Files/<app>/` and `/mnt/c/ProgramData/<app>/`, then falls back to a `which` lookup. Replacing the binary at the fixed path requires Windows admin rights; the `which` fallback, however, accepts any user-writable directory earlier on `$PATH`, so a WSL-side PATH manipulation can substitute a malicious bridge. Request/response size is capped at 64 KB, the child is reaped via `BridgeSession::Drop`, and reads are bounded — but there is no Authenticode / `WinVerifyTrust` check on the resolved bridge binary. PE signature validation is a tracked hardening gap.
 
 **Keyring backend:** Exists for Linux without TPM. Strictly weaker than hardware backends. Any same-user process can access the keyring. No biometric enforcement. The keyring must be running; if not, the app errors rather than falling back to plaintext.
