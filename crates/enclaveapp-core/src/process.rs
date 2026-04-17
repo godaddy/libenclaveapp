@@ -152,7 +152,7 @@ fn apply_windows_mitigations() {
         strict.Anonymous.Flags = 0b11;
         if let Err(e) = SetProcessMitigationPolicy(
             ProcessStrictHandleCheckPolicy,
-            std::ptr::from_ref(&strict).cast(),
+            std::ptr::addr_of!(strict).cast(),
             size_of::<PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY>(),
         ) {
             tracing::warn!("SetProcessMitigationPolicy(StrictHandleCheck) failed: {e}");
@@ -166,7 +166,7 @@ fn apply_windows_mitigations() {
         extpt.Anonymous.Flags = 0b1;
         if let Err(e) = SetProcessMitigationPolicy(
             ProcessExtensionPointDisablePolicy,
-            std::ptr::from_ref(&extpt).cast(),
+            std::ptr::addr_of!(extpt).cast(),
             size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
         ) {
             tracing::warn!("SetProcessMitigationPolicy(ExtensionPointDisable) failed: {e}");
@@ -183,7 +183,7 @@ fn apply_windows_mitigations() {
         imgload.Anonymous.Flags = 0b11;
         if let Err(e) = SetProcessMitigationPolicy(
             ProcessImageLoadPolicy,
-            std::ptr::from_ref(&imgload).cast(),
+            std::ptr::addr_of!(imgload).cast(),
             size_of::<PROCESS_MITIGATION_IMAGE_LOAD_POLICY>(),
         ) {
             tracing::warn!("SetProcessMitigationPolicy(ImageLoad) failed: {e}");
