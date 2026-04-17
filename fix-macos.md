@@ -1,5 +1,15 @@
 # macOS Secure Enclave: Implementation Plan
 
+> **Status (2026-04-17):** Steps 1-6 (the unsigned / Path-2 keychain-
+> wrapping pipeline) are **implemented and tested**. Steps 7-8 (the
+> entitled / Path-1 flow) are **deferred** — they require a
+> provisioning profile which cannot be tested from an unsigned or
+> ad-hoc-signed binary. The unsigned path is sufficient for Homebrew
+> and cargo-install distribution and closes the original
+> `.handle` same-UID theft threat.
+
+
+
 ## Background
 
 Read `CLAUDE.md` section "macOS Secure Enclave: Design & Findings" for full context. This plan implements the two-tier SE backend described there.

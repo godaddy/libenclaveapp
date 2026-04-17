@@ -124,6 +124,15 @@ where
 }
 
 /// Generate a Secure Enclave key and persist its local metadata atomically.
+///
+/// The SE `dataRepresentation` handle is wrapped with AES-256-GCM under a
+/// fresh 32-byte key stored in the macOS login keychain before being
+/// written to `.handle` on disk. See [`crate::keychain_wrap`] for the
+/// rationale and ciphertext format.
+///
+/// If any step after the SE key was created fails, the SE key is deleted
+/// and the keychain wrapping-key entry is cleaned up so the label is
+/// free to reuse.
 pub fn generate_and_save_key(
     config: &KeychainConfig,
     label: &str,
@@ -137,9 +146,46 @@ pub fn generate_and_save_key(
     prepare_label_for_save(&dir, label)?;
 
     let (pub_key, data_rep) = generate_key(key_type, policy.as_ffi_value())?;
-    persist_saved_key_material(&dir, label, key_type, policy, &data_rep, &pub_key, || {
+
+    // Generate a fresh wrapping key and store it in the keychain BEFORE
+    // encrypting, so a failure on either side leaves a consistent state.
+    let wrapping_key = crate::keychain_wrap::generate_wrapping_key();
+    let app_name = config.app_name.clone();
+    let app_name_for_cleanup = app_name.clone();
+    let label_owned = label.to_string();
+    if let Err(error) = crate::keychain_wrap::keychain_store(&app_name, label, &wrapping_key) {
+        // The SE key was created but we can't store its wrapping key —
+        // roll back the SE key so we don't leave an orphaned key that
+        // we can never reload.
+        drop(delete_key_from_data_rep(&data_rep));
+        return Err(error);
+    }
+
+    let wrapped_blob = match crate::keychain_wrap::encrypt_blob(&wrapping_key, &data_rep) {
+        Ok(blob) => blob,
+        Err(error) => {
+            drop(crate::keychain_wrap::keychain_delete(&app_name, label));
+            drop(delete_key_from_data_rep(&data_rep));
+            return Err(error);
+        }
+    };
+
+    let cleanup = move || {
+        drop(crate::keychain_wrap::keychain_delete(
+            &app_name_for_cleanup,
+            &label_owned,
+        ));
         delete_key_from_data_rep(&data_rep)
-    })?;
+    };
+    persist_saved_key_material(
+        &dir,
+        label,
+        key_type,
+        policy,
+        &wrapped_blob,
+        &pub_key,
+        cleanup,
+    )?;
 
     Ok(pub_key)
 }
@@ -204,6 +250,13 @@ fn save_key(
 }
 
 /// Load a key's data representation from the keys directory.
+///
+/// The `.handle` file may be either a wrapped blob (magic prefix `EHW1`)
+/// or a legacy plaintext CryptoKit `dataRepresentation`. Wrapped blobs
+/// are decrypted with the wrapping key loaded from the login keychain;
+/// legacy plaintext blobs are returned unchanged for transparent
+/// migration — they'll be re-wrapped the next time `generate_and_save_key`
+/// replaces the label.
 pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
     validate_label(label)?;
     let path = config.keys_dir().join(format!("{label}.handle"));
@@ -212,7 +265,32 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
             label: label.to_string(),
         });
     }
-    metadata::read_no_follow(&path)
+    let contents = metadata::read_no_follow(&path)?;
+
+    if !crate::keychain_wrap::is_wrapped_handle(&contents) {
+        // Legacy plaintext handle (pre-EHW1). Return as-is; the caller
+        // can sign/decrypt directly, and the next rotation picks up
+        // the wrapping. Logged for visibility.
+        tracing::debug!(
+            label = label,
+            "loaded legacy plaintext SE handle; re-save to upgrade to wrapped format"
+        );
+        return Ok(contents);
+    }
+
+    let wrapping_key = match crate::keychain_wrap::keychain_load(&config.app_name, label)? {
+        Some(k) => k,
+        None => {
+            return Err(Error::KeyOperation {
+                operation: "load_handle".into(),
+                detail: format!(
+                    "wrapped handle for label `{label}` is missing its keychain wrapping key; \
+                    the keychain entry may have been deleted or the user denied access"
+                ),
+            });
+        }
+    };
+    crate::keychain_wrap::decrypt_blob(&wrapping_key, &contents)
 }
 
 /// Load the cached public key for a label. Falls back to extracting from data rep.
@@ -230,6 +308,12 @@ pub fn list_labels(config: &KeychainConfig) -> Result<Vec<String>> {
 }
 
 /// Delete a key and all associated files.
+///
+/// Also removes the key's wrapping-key entry from the login keychain.
+/// The keychain removal is best-effort — if it fails for any reason
+/// other than "not found" the overall delete still proceeds so the
+/// on-disk state isn't left half-cleaned. A leftover keychain entry
+/// is harmless if the `.handle` file is gone (no one can use it).
 pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
     validate_label(label)?;
     let dir = config.keys_dir();
@@ -242,7 +326,7 @@ pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
         });
     }
     let _lock = metadata::DirLock::acquire(&dir)?;
-    match load_handle(config, label) {
+    let result = match load_handle(config, label) {
         Ok(data_rep) => {
             delete_key_from_data_rep(&data_rep).map_err(|error| Error::KeyOperation {
                 operation: "delete_key".into(),
@@ -257,7 +341,20 @@ pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
                 "failed to read Secure Enclave handle; preserving local key material for retry: {error}"
             ),
         }),
+    };
+
+    // Clean up the keychain wrapping-key entry regardless of whether
+    // the local files were fully removed. If it fails here, log but
+    // don't propagate — a stale keychain entry without its handle is
+    // useless.
+    if let Err(error) = crate::keychain_wrap::keychain_delete(&config.app_name, label) {
+        tracing::warn!(
+            label = label,
+            "keychain_delete failed during delete_key (harmless if the handle is already gone): {error}"
+        );
     }
+
+    result
 }
 
 #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge

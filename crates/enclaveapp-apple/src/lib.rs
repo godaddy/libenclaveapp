@@ -13,6 +13,8 @@
 mod ffi;
 #[cfg(target_os = "macos")]
 mod keychain;
+#[cfg(target_os = "macos")]
+mod keychain_wrap;
 
 #[cfg(all(target_os = "macos", feature = "encryption"))]
 mod encrypt;
