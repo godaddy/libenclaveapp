@@ -725,7 +725,7 @@ printf '{"result":"","error":null}\n'
             // Session dropped here — Drop should kill + wait the child
         }
         // Give the OS a moment to reap
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
         // Verify the process is gone using `kill -0 <pid>` (signal 0 checks existence)
         let status = Command::new("kill")
             .args(["-0", &child_pid.to_string()])
@@ -956,7 +956,7 @@ esac
         std::env::remove_var("ENCLAVEAPP_BRIDGE_TIMEOUT_SECS");
         // Should fail well before the bridge's 120s sleep finishes.
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(10),
+            start.elapsed() < Duration::from_secs(10),
             "timeout should fire quickly, took {:?}",
             start.elapsed()
         );

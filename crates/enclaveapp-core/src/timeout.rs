@@ -193,7 +193,7 @@ impl LineReaderWithTimeout {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic, let_underscore_drop)]
 mod tests {
     use super::*;
     use std::process::Command;
@@ -241,14 +241,13 @@ mod tests {
     #[test]
     fn line_reader_delivers_line_within_timeout() {
         use std::io::Write;
-        let (r, mut w) = {
-            let mut cmd = Command::new("/bin/sh");
-            cmd.args(["-c", "cat"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped());
-            let mut child = cmd.spawn().unwrap();
-            (child.stdout.take().unwrap(), child.stdin.take().unwrap())
-        };
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let r = child.stdout.take().unwrap();
+        let mut w = child.stdin.take().unwrap();
         let reader = LineReaderWithTimeout::new(r);
         writeln!(w, "hello world").unwrap();
         w.flush().unwrap();
@@ -256,6 +255,9 @@ mod tests {
             TimeoutResult::Completed(Ok(line)) => assert_eq!(line.trim(), "hello world"),
             other => panic!("unexpected result: {:?}", other),
         }
+        // Close stdin so cat exits, then reap the child to avoid a zombie.
+        drop(w);
+        drop(child.wait());
     }
 
     #[cfg(unix)]
@@ -270,7 +272,7 @@ mod tests {
         let result = reader.recv_line(Duration::from_millis(200));
         assert!(result.is_timed_out());
         assert!(start.elapsed() < Duration::from_secs(1));
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(child.kill());
+        drop(child.wait());
     }
 }
