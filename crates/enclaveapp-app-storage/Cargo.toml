@@ -12,17 +12,23 @@ workspace = true
 
 [features]
 default = []
+# Mock backend. Opt-in at compile time ONLY — release binaries must
+# not include it (a runtime flag in a production build would let an
+# attacker swap the hardware-backed store for an AES-in-RAM mock).
+# Consumers enable this via a `[dev-dependencies]` entry so the mock
+# is unified in during `cargo test` but never during `cargo build`.
+mock = ["dep:aes-gcm", "dep:rand", "dep:sha2"]
 
 [dependencies]
 enclaveapp-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = "0.1"
 
-# Mock backend — always compiled so `ENCLAVEAPP_MOCK_STORAGE=1` can
-# swap it in at runtime without any feature flag gymnastics.
-aes-gcm = { workspace = true }
-rand = { workspace = true }
-sha2 = { workspace = true }
+# Test-only crypto for MockEncryptionStorage — feature-gated so
+# release builds do not pull them in via this crate.
+aes-gcm = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 enclaveapp-test-support = { workspace = true }
