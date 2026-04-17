@@ -321,6 +321,7 @@ mod tests {
         assert_eq!(params.key_label, "");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn find_bridge_returns_none_on_macos() {
         // On macOS there's no /mnt/c/ and no bridge binary
