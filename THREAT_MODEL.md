@@ -95,8 +95,20 @@ Unsafe FFI surfaces are trusted by design but fragile.
 
 ### Concurrent access
 
-- **Per-process flocks, not cross-process coordination for key creation.** `DirLock` (`crates/enclaveapp-core/src/metadata.rs`) guards metadata mutations, and `secret_store.rs` uses per-id shared/exclusive flocks for the adapter. But initial key creation in `crates/enclaveapp-apple/src/keychain.rs` is not wrapped in `DirLock::acquire` before calling the SE. Two concurrent first-run invocations can each generate SE keys; one "wins" the metadata write, the other's SE slot is orphaned. Same pattern can exist on other backends.
-- **Bridge serialization.** Two WSL-side clients hitting the Windows bridge concurrently depend on the server serializing requests. Clients do not hold a mutex across bridge sessions.
+- **Key creation is cross-process serialized.** `DirLock::acquire`
+  (`crates/enclaveapp-core/src/metadata.rs`) wraps every backend's
+  `generate` / `generate_and_save_key` path before the hardware call:
+  Apple (`crates/enclaveapp-apple/src/keychain.rs:136`), Windows CNG
+  (`crates/enclaveapp-windows/src/state.rs:25`), keyring
+  (`crates/enclaveapp-keyring/src/key_storage.rs:317`), Linux TPM
+  (`crates/enclaveapp-linux-tpm/src/{sign,encrypt}.rs`), and
+  test-software. Two concurrent first-run invocations block on the
+  `fs4` flock and execute sequentially — no SE/TPM slot orphaning.
+  `secret_store.rs` uses per-id shared/exclusive flocks for
+  adapter-layer secret mutations.
+- **Bridge serialization.** Two WSL-side clients hitting the Windows
+  bridge concurrently depend on the server serializing requests.
+  Clients do not hold a mutex across bridge sessions.
 
 ### Process hardening scope
 
