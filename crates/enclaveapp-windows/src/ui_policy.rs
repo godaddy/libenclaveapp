@@ -123,21 +123,18 @@ pub fn verify_ui_policy_matches(
 
     let has_protect_flag =
         (actual_flags & NCRYPT_UI_PROTECT_KEY_FLAG) == NCRYPT_UI_PROTECT_KEY_FLAG;
+    let expected_protect_flag = expected != AccessPolicy::None;
 
-    match (expected, has_protect_flag) {
-        (AccessPolicy::None, false) => Ok(()),
-        (AccessPolicy::None, true) => Err(enclaveapp_core::Error::KeyOperation {
-            operation: "verify_ui_policy".into(),
-            detail:
-                "key has NCRYPT_UI_PROTECT_KEY_FLAG set but metadata expects AccessPolicy::None"
-                    .into(),
-        }),
-        (_, true) => Ok(()),
-        (_, false) => Err(enclaveapp_core::Error::KeyOperation {
-            operation: "verify_ui_policy".into(),
-            detail: format!(
-                "key is missing NCRYPT_UI_PROTECT_KEY_FLAG but metadata expects {expected:?}"
-            ),
-        }),
+    if has_protect_flag == expected_protect_flag {
+        return Ok(());
     }
+    let detail = if expected_protect_flag {
+        format!("key is missing NCRYPT_UI_PROTECT_KEY_FLAG but metadata expects {expected:?}")
+    } else {
+        "key has NCRYPT_UI_PROTECT_KEY_FLAG set but metadata expects AccessPolicy::None".into()
+    };
+    Err(enclaveapp_core::Error::KeyOperation {
+        operation: "verify_ui_policy".into(),
+        detail,
+    })
 }
