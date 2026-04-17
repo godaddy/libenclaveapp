@@ -17,6 +17,40 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Absolute path to the system `xcrun` tool.
+///
+/// `xcrun` is part of Xcode Command Line Tools and lives at
+/// `/usr/bin/xcrun` on all macOS installations. Invoking it by
+/// absolute path (rather than bare `xcrun`, which walks `$PATH`)
+/// removes a PATH-hijack vector from the build-machine trust
+/// boundary — a shadowed `xcrun` earlier on `$PATH` can no longer
+/// substitute a poisoned swiftc / ar into the static bridge object
+/// that ends up linked into the binary. See
+/// libenclaveapp/THREAT_MODEL.md "Build-time trust".
+const XCRUN: &str = "/usr/bin/xcrun";
+
+/// Resolve a toolchain tool by asking `xcrun --find`. The returned
+/// absolute path bypasses `$PATH` and points at the tool inside the
+/// active Xcode developer directory (`xcode-select -p`), which is a
+/// system-managed path.
+fn xcrun_find(tool: &str) -> PathBuf {
+    let output = Command::new(XCRUN)
+        .args(["--find", tool])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {XCRUN} --find {tool}: {e}"));
+    if !output.status.success() {
+        panic!(
+            "xcrun --find {tool} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let path = String::from_utf8(output.stdout)
+        .unwrap_or_else(|e| panic!("invalid xcrun output for {tool}: {e}"))
+        .trim()
+        .to_string();
+    PathBuf::from(path)
+}
+
 fn main() {
     // Only build Swift bridge on macOS
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "macos" {
@@ -34,19 +68,24 @@ fn main() {
         _ => "arm64-apple-macos14.0",
     };
 
-    // Find the macOS SDK path
-    let sdk_output = Command::new("xcrun")
+    // Resolve all toolchain executables via the absolute `/usr/bin/xcrun`
+    // rather than walking `$PATH`. The resolved `swiftc` and `ar` land
+    // inside the active Xcode developer directory.
+    let sdk_output = Command::new(XCRUN)
         .args(["--show-sdk-path", "--sdk", "macosx"])
         .output()
-        .unwrap_or_else(|e| panic!("failed to run xcrun: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run {XCRUN} --show-sdk-path: {e}"));
     let sdk_path = String::from_utf8(sdk_output.stdout)
         .unwrap_or_else(|e| panic!("invalid xcrun output: {e}"))
         .trim()
         .to_string();
 
+    let swiftc = xcrun_find("swiftc");
+    let ar = xcrun_find("ar");
+
     // Compile Swift to object file
     let obj_path = out_dir.join("enclaveapp_se_bridge.o");
-    let status = Command::new("swiftc")
+    let status = Command::new(&swiftc)
         .args([
             "-emit-object",
             "-target",
@@ -60,19 +99,19 @@ fn main() {
         .arg(&obj_path)
         .arg(swift_src)
         .status()
-        .unwrap_or_else(|e| panic!("failed to run swiftc: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", swiftc.display()));
 
     if !status.success() {
         panic!("swiftc compilation failed");
     }
 
     // Create static library from object file
-    let status = Command::new("ar")
+    let status = Command::new(&ar)
         .args(["rcs"])
         .arg(&lib_path)
         .arg(&obj_path)
         .status()
-        .unwrap_or_else(|e| panic!("failed to run ar: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", ar.display()));
 
     if !status.success() {
         panic!("ar failed to create static library");
@@ -81,21 +120,16 @@ fn main() {
     // Find the Swift runtime library path for linking
     let swift_lib_dir = format!("{sdk_path}/usr/lib/swift");
 
-    // Also need the toolchain's swift lib dir for the runtime
-    let toolchain_output = Command::new("xcrun")
-        .args(["--find", "swiftc"])
-        .output()
-        .unwrap_or_else(|e| panic!("failed to find swiftc: {e}"));
-    let swiftc_path = String::from_utf8(toolchain_output.stdout)
-        .unwrap_or_else(|e| panic!("invalid xcrun output for swiftc path: {e}"))
-        .trim()
-        .to_string();
-    let swiftc_pb = PathBuf::from(&swiftc_path);
-    let toolchain_lib = swiftc_pb
+    // Toolchain's swift lib dir — derived from the resolved swiftc path,
+    // which is itself a sibling of the toolchain's `lib/swift/macosx`.
+    let toolchain_lib = swiftc
         .parent()
         .and_then(|p| p.parent())
         .unwrap_or_else(|| {
-            panic!("unexpected swiftc path structure (expected .../bin/swiftc): {swiftc_path}")
+            panic!(
+                "unexpected swiftc path structure (expected .../bin/swiftc): {}",
+                swiftc.display()
+            )
         })
         .join("lib")
         .join("swift")
