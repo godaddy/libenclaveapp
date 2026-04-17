@@ -33,15 +33,43 @@ fn bridge_request_timeout() -> Duration {
 
 /// Find the bridge executable on the Windows filesystem (from WSL).
 ///
-/// Only fixed install locations under `/mnt/c/Program Files/` and
-/// `/mnt/c/ProgramData/` are searched — those paths require Windows
-/// admin rights to write. PATH-based lookup via `which` was removed
-/// intentionally: a user-writable `$PATH` entry on the WSL side could
-/// otherwise substitute a malicious bridge binary, and the library
-/// performs no Authenticode verification on the resolved executable.
-/// Operators who install the bridge outside these locations must adjust
-/// the candidate list here or symlink into one of them.
+/// Discovery order:
+/// 1. The `ENCLAVEAPP_BRIDGE_PATH` environment variable (or the app-specific
+///    `{APP_NAME_UPPER}_BRIDGE_PATH`) — explicit opt-in by the user. Needed for
+///    non-admin installs like scoop where the bridge lives under
+///    `%USERPROFILE%\scoop\apps\...`, which is not one of the default
+///    candidate paths.
+/// 2. Among the fixed install locations under `/mnt/c/Program Files/` and
+///    `/mnt/c/ProgramData/` that actually exist, the one with the newest
+///    modification time. This avoids silently picking a stale binary left
+///    behind by a previous installer when the user has since installed a
+///    newer version to a different location.
+///
+/// Only fixed admin-path install locations are included in the auto-discovery
+/// fallback. PATH-based lookup via `which` was removed intentionally — a
+/// user-writable `$PATH` entry on the WSL side could substitute a malicious
+/// bridge binary, and this library performs no Authenticode verification
+/// on the resolved executable. Users who install to non-admin paths (scoop,
+/// a manual build) must set `ENCLAVEAPP_BRIDGE_PATH` explicitly.
+#[allow(clippy::print_stderr)] // user-facing warning for misconfigured env var
 pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
+    // 1. Explicit env var override (app-specific, then generic).
+    let app_specific = format!("{}_BRIDGE_PATH", app_name.to_uppercase().replace('-', "_"));
+    for var in [app_specific.as_str(), "ENCLAVEAPP_BRIDGE_PATH"] {
+        if let Ok(value) = std::env::var(var) {
+            let p = PathBuf::from(&value);
+            if p.exists() {
+                return Some(p);
+            }
+            // Env var was set but the path is missing — surface clearly
+            // rather than silently falling through to auto-discovery.
+            eprintln!(
+                "warning: {var}={value} is set but the file does not exist; falling back to auto-discovery"
+            );
+        }
+    }
+
+    // 2. Auto-discovery: newest-mtime wins among existing admin-path candidates.
     let candidates = [
         format!("/mnt/c/Program Files/{app_name}/{app_name}-tpm-bridge.exe"),
         format!("/mnt/c/ProgramData/{app_name}/{app_name}-tpm-bridge.exe"),
@@ -50,8 +78,13 @@ pub fn find_bridge(app_name: &str) -> Option<PathBuf> {
     ];
     candidates
         .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
+        .filter_map(|path| {
+            let p = PathBuf::from(path);
+            let mtime = std::fs::metadata(&p).ok()?.modified().ok()?;
+            Some((p, mtime))
+        })
+        .max_by_key(|(_, mtime)| *mtime)
+        .map(|(path, _)| path)
 }
 
 struct BridgeSession {
@@ -510,6 +543,30 @@ mod tests {
     fn find_bridge_returns_none_when_not_found() {
         let result = find_bridge("enclaveapp-nonexistent-test-app");
         assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_bridge_env_var_override_wins_when_path_exists() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        // Create a temp file and point the env var at it.
+        let script = temp_script("override-bridge", "#!/bin/sh\nexit 0\n");
+        std::env::set_var("ENCLAVEAPP_BRIDGE_PATH", &script);
+        let found = find_bridge("some-app-that-has-no-admin-install");
+        std::env::remove_var("ENCLAVEAPP_BRIDGE_PATH");
+        assert_eq!(found.as_deref(), Some(script.as_path()));
+        cleanup_script(&script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_bridge_env_var_override_ignored_when_path_missing() {
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        std::env::set_var("ENCLAVEAPP_BRIDGE_PATH", "/nonexistent/path/to/bridge.exe");
+        let found = find_bridge("another-nonexistent-app");
+        std::env::remove_var("ENCLAVEAPP_BRIDGE_PATH");
+        // Env var points at nothing and no admin-path candidate exists → None.
+        assert!(found.is_none());
     }
 
     #[cfg(unix)]
