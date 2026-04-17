@@ -64,11 +64,11 @@ impl EnclaveKeyManager for BridgeSignerWrapper {
         self.public_key(label)
     }
 
-    fn public_key(&self, _label: &str) -> enclaveapp_core::Result<Vec<u8>> {
+    fn public_key(&self, label: &str) -> enclaveapp_core::Result<Vec<u8>> {
         enclaveapp_bridge::bridge_public_key(
             &self.bridge_path,
             &self.app_name,
-            &self.key_label,
+            label,
             self.access_policy,
         )
     }
@@ -82,8 +82,8 @@ impl EnclaveKeyManager for BridgeSignerWrapper {
         )
     }
 
-    fn delete_key(&self, _label: &str) -> enclaveapp_core::Result<()> {
-        enclaveapp_bridge::bridge_delete_signing(&self.bridge_path, &self.app_name, &self.key_label)
+    fn delete_key(&self, label: &str) -> enclaveapp_core::Result<()> {
+        enclaveapp_bridge::bridge_delete_signing(&self.bridge_path, &self.app_name, label)
     }
 
     fn is_available(&self) -> bool {
@@ -93,11 +93,11 @@ impl EnclaveKeyManager for BridgeSignerWrapper {
 
 #[cfg(target_os = "linux")]
 impl EnclaveSigner for BridgeSignerWrapper {
-    fn sign(&self, _label: &str, data: &[u8]) -> enclaveapp_core::Result<Vec<u8>> {
+    fn sign(&self, label: &str, data: &[u8]) -> enclaveapp_core::Result<Vec<u8>> {
         enclaveapp_bridge::bridge_sign(
             &self.bridge_path,
             &self.app_name,
-            &self.key_label,
+            label,
             data,
             self.access_policy,
         )
