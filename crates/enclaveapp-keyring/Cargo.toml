@@ -26,6 +26,7 @@ rand = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+zeroize = { workspace = true }
 # keyring requires glibc (needs libdbus for D-Bus Secret Service).
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 keyring = { workspace = true, optional = true }

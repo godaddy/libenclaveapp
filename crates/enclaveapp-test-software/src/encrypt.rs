@@ -73,14 +73,17 @@ impl EnclaveKeyManager for SoftwareEncryptor {
 /// X9.63 KDF: SHA-256(shared_secret_x || counter_be32 || shared_info)
 /// where counter = 0x00000001 for the first (and only) block.
 /// shared_info = ephemeral public key bytes (65 bytes).
-fn derive_key(shared_secret: &p256::ecdh::SharedSecret, eph_pub_bytes: &[u8]) -> [u8; 32] {
+fn derive_key(
+    shared_secret: &p256::ecdh::SharedSecret,
+    eph_pub_bytes: &[u8],
+) -> zeroize::Zeroizing<[u8; 32]> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(shared_secret.raw_secret_bytes());
     hasher.update([0x00, 0x00, 0x00, 0x01]); // counter = 1 (big-endian)
     hasher.update(eph_pub_bytes);
     let result = hasher.finalize();
-    let mut key = [0_u8; 32];
+    let mut key = zeroize::Zeroizing::new([0_u8; 32]);
     key.copy_from_slice(&result);
     key
 }
@@ -117,8 +120,10 @@ impl EnclaveEncryptor for SoftwareEncryptor {
         let derived_key = derive_key(&shared_secret, &eph_pub_bytes);
 
         // AES-256-GCM encrypt
-        let cipher = Aes256Gcm::new_from_slice(&derived_key).map_err(|e| Error::EncryptFailed {
-            detail: format!("AES init: {e}"),
+        let cipher = Aes256Gcm::new_from_slice(derived_key.as_slice()).map_err(|e| {
+            Error::EncryptFailed {
+                detail: format!("AES init: {e}"),
+            }
         })?;
 
         let mut nonce_bytes = [0_u8; GCM_NONCE_SIZE];
@@ -184,8 +189,10 @@ impl EnclaveEncryptor for SoftwareEncryptor {
         let derived_key = derive_key(&shared_secret, eph_pub_bytes);
 
         // AES-256-GCM decrypt
-        let cipher = Aes256Gcm::new_from_slice(&derived_key).map_err(|e| Error::DecryptFailed {
-            detail: format!("AES init: {e}"),
+        let cipher = Aes256Gcm::new_from_slice(derived_key.as_slice()).map_err(|e| {
+            Error::DecryptFailed {
+                detail: format!("AES init: {e}"),
+            }
         })?;
         let nonce = Nonce::from_slice(nonce_bytes);
 
