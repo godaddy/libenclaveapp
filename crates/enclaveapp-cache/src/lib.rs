@@ -17,6 +17,8 @@ use std::path::Path;
 
 use enclaveapp_core::metadata;
 
+pub mod envelope;
+
 /// Error type for cache operations.
 #[derive(Debug)]
 pub enum CacheError {
