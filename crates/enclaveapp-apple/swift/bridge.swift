@@ -444,6 +444,16 @@ public func enclaveapp_se_decrypt(
 /// still the only API that reaches the legacy file-based keychain;
 /// the modern Data Protection keychain is unavailable on unsigned
 /// builds (see the top-of-module comment).
+/// Return `true` when Security.framework can locate a default
+/// keychain for this process. Query-only — it never prompts.
+private func hasDefaultKeychain() -> Bool {
+    var kc: SecKeychain?
+    let status = SecKeychainCopyDefault(&kc)
+    return status == errSecSuccess && kc != nil
+}
+
+/// Open the invoking user's login keychain by explicit absolute path
+/// and try a silent empty-password unlock.
 private func openLoginKeychain() -> SecKeychain? {
     guard let pw = getpwuid(getuid()) else {
         return nil
@@ -459,20 +469,11 @@ private func openLoginKeychain() -> SecKeychain? {
     for path in candidates {
         var kc: SecKeychain?
         if SecKeychainOpen(path, &kc) == errSecSuccess, let kc = kc {
-            // Best-effort silent unlock with an empty password.
-            //
-            // On interactive dev sessions the keychain is already
-            // unlocked and this is a no-op. On CI runners (GitHub
-            // Actions `macos-latest`) the login keychain is created
-            // at image-provision time with an empty password and
-            // re-locks between jobs, so without this call the next
-            // `SecItemAdd` blocks indefinitely waiting for a user
-            // to type the unlock password into a GUI prompt that
-            // never comes. `usePassword: true` + zero-length
-            // password avoids the prompt entirely; if the keychain
-            // has a real password the unlock fails here and the
-            // subsequent op surfaces the real error — we don't
-            // mask it with a fallback.
+            // Best-effort silent unlock with the empty password.
+            // Interactive dev sessions are already unlocked (no-op);
+            // headless contexts whose keychain is locked but has no
+            // password get unlocked here. Any real-password failure
+            // surfaces through the subsequent op.
             _ = SecKeychainUnlock(kc, 0, nil, true)
             return kc
         }
@@ -503,9 +504,6 @@ public func enclaveapp_keychain_store(
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
     _ secret: UnsafePointer<UInt8>, _ secret_len: Int32
 ) -> Int32 {
-    guard let kc = openLoginKeychain() else {
-        return SE_ERR_KEYCHAIN_NOT_FOUND
-    }
     guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_STORE
     }
@@ -514,25 +512,37 @@ public func enclaveapp_keychain_store(
     }
     let secretData = Data(bytes: secret, count: Int(secret_len))
 
-    // Delete any existing entry first. Constrain the search to the
-    // explicitly-opened login keychain so `HOME` overrides don't
-    // leak into default-keychain lookup.
-    let deleteQuery: [String: Any] = [
+    // Prefer Security.framework's implicit default-keychain routing
+    // when a default is available (standard interactive sessions, and
+    // GitHub Actions macOS runners). That path reaches the Data
+    // Protection keychain on unsigned builds and does NOT trigger the
+    // legacy-keychain ACL prompt that blocks headless CI. Only when
+    // no default is reachable (typical of `$HOME`-overridden test
+    // contexts and launchd sandboxes) do we fall back to opening the
+    // login keychain by explicit absolute path and pinning the op to
+    // it via `kSecUseKeychain` / `kSecMatchSearchList`.
+    let useExplicit = !hasDefaultKeychain()
+    let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
+    if useExplicit && kc == nil {
+        return SE_ERR_KEYCHAIN_NOT_FOUND
+    }
+
+    var deleteQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
-        kSecMatchSearchList as String: [kc],
     ]
+    if let kc = kc { deleteQuery[kSecMatchSearchList as String] = [kc] }
     _ = SecItemDelete(deleteQuery as CFDictionary)
 
-    let addQuery: [String: Any] = [
+    var addQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
         kSecValueData as String: secretData,
         kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-        kSecUseKeychain as String: kc,
     ]
+    if let kc = kc { addQuery[kSecUseKeychain as String] = kc }
     let status = SecItemAdd(addQuery as CFDictionary, nil)
     return status == errSecSuccess ? SE_OK : SE_ERR_KEYCHAIN_STORE
 }
@@ -545,9 +555,6 @@ public func enclaveapp_keychain_load(
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
     _ secret_out: UnsafeMutablePointer<UInt8>, _ secret_len: UnsafeMutablePointer<Int32>
 ) -> Int32 {
-    guard let kc = openLoginKeychain() else {
-        return SE_ERR_KEYCHAIN_NOT_FOUND
-    }
     guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_LOAD
     }
@@ -555,14 +562,20 @@ public func enclaveapp_keychain_load(
         return SE_ERR_KEYCHAIN_LOAD
     }
 
-    let query: [String: Any] = [
+    let useExplicit = !hasDefaultKeychain()
+    let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
+    if useExplicit && kc == nil {
+        return SE_ERR_KEYCHAIN_NOT_FOUND
+    }
+
+    var query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
         kSecReturnData as String: true,
         kSecMatchLimit as String: kSecMatchLimitOne,
-        kSecMatchSearchList as String: [kc],
     ]
+    if let kc = kc { query[kSecMatchSearchList as String] = [kc] }
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
     if status == errSecItemNotFound {
@@ -593,24 +606,28 @@ public func enclaveapp_keychain_delete(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
     _ account: UnsafePointer<UInt8>, _ account_len: Int32
 ) -> Int32 {
-    guard let kc = openLoginKeychain() else {
-        // Delete is idempotent — report not-found so the Rust
-        // caller treats the entry as already-gone rather than
-        // erroring out.
-        return SE_ERR_KEYCHAIN_NOT_FOUND
-    }
     guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_DELETE
     }
     guard let accountStr = makeAccountString(account, account_len) else {
         return SE_ERR_KEYCHAIN_DELETE
     }
-    let query: [String: Any] = [
+
+    let useExplicit = !hasDefaultKeychain()
+    let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
+    if useExplicit && kc == nil {
+        // Delete is idempotent — report not-found so the Rust
+        // caller treats the entry as already-gone rather than
+        // erroring out.
+        return SE_ERR_KEYCHAIN_NOT_FOUND
+    }
+
+    var query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
-        kSecMatchSearchList as String: [kc],
     ]
+    if let kc = kc { query[kSecMatchSearchList as String] = [kc] }
     let status = SecItemDelete(query as CFDictionary)
     if status == errSecSuccess || status == errSecItemNotFound {
         return SE_OK
