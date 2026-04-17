@@ -141,16 +141,11 @@ impl AppSigningBackend {
                 debug!("--keyring flag: forcing software keyring backend for signing");
                 return Self::init_linux_keyring(&config);
             }
-            // On WSL, try the bridge first for TPM signing, fall back to keyring.
+            // On WSL, use the bridge to the Windows TPM. No implicit
+            // keyring fallback — use --keyring to explicitly opt in.
             if enclaveapp_wsl::is_wsl() {
                 debug!("WSL detected, trying bridge for signing");
-                match Self::init_wsl(&config) {
-                    Ok(backend) => return Ok(backend),
-                    Err(_) => {
-                        debug!("WSL bridge not available, falling back to keyring for signing");
-                        return Self::init_linux_keyring(&config);
-                    }
-                }
+                return Self::init_wsl(&config);
             }
             return Self::init_linux(&config);
         }
