@@ -544,7 +544,7 @@ mod tests {
             dir: secrets_dir.clone(),
         };
         let id = BindingId::new("npm:ro-collision");
-        fs::write(&store.path_for(&id), b"ignored-ciphertext").unwrap();
+        fs::write(store.path_for(&id), b"ignored-ciphertext").unwrap();
 
         assert_eq!(store.get_read(&id).unwrap(), SecretRead::Redacted);
     }
