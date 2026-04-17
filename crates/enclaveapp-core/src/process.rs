@@ -128,10 +128,15 @@ fn set_no_new_privs() {
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 fn apply_windows_mitigations() {
+    // Structs live in SystemServices; function + PROCESS_MITIGATION_POLICY
+    // discriminants live in Threading. windows-rs split them across modules.
+    use windows::Win32::System::SystemServices::{
+        PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY, PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
+        PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY,
+    };
     use windows::Win32::System::Threading::{
         ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy, ProcessStrictHandleCheckPolicy,
-        SetProcessMitigationPolicy, PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY,
-        PROCESS_MITIGATION_IMAGE_LOAD_POLICY, PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY,
+        SetProcessMitigationPolicy,
     };
 
     // Strict handle check — raise on any invalid-handle reference.
