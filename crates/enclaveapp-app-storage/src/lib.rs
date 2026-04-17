@@ -49,6 +49,7 @@
 
 pub mod encryption;
 pub mod error;
+#[cfg(feature = "mock")]
 pub mod mock;
 pub mod platform;
 pub mod signing;
@@ -56,6 +57,7 @@ pub mod signing;
 // Re-export primary types for consumers.
 pub use encryption::{AppEncryptionStorage, EncryptionStorage};
 pub use error::{Result, StorageError};
+#[cfg(feature = "mock")]
 pub use mock::MockEncryptionStorage;
 pub use platform::BackendKind;
 pub use signing::AppSigningBackend;
@@ -88,32 +90,44 @@ pub struct StorageConfig {
     pub force_keyring: bool,
 }
 
-/// Environment variable that, when set to a non-empty value, forces
+/// Environment variable that, when the `mock` cargo feature is
+/// compiled in **and** this var is set to a non-empty value, forces
 /// [`create_encryption_storage`] to return a [`MockEncryptionStorage`]
 /// instead of the real platform backend.
 ///
-/// This is the sanctioned escape hatch for CI environments that
-/// cannot satisfy a real hardware-backed backend — typically GitHub
-/// Actions macOS runners, which would otherwise block indefinitely
-/// on a login-keychain ACL confirmation prompt. It is **not** a
-/// production-safe mode: the mock uses a random in-memory AES key
-/// and provides no hardware backing.
+/// **Security:** the env-var check below is feature-gated to `mock`.
+/// Release binaries built without the feature ignore the variable
+/// entirely — no runtime path leads to the mock backend, so setting
+/// the variable in production does nothing. Only `cargo test` builds
+/// (where downstream `[dev-dependencies]` turn the feature on) read
+/// this variable.
+///
+/// This exists for CI environments that cannot satisfy a real
+/// hardware-backed backend — typically GitHub Actions macOS runners,
+/// which would otherwise block on a login-keychain ACL confirmation
+/// prompt.
+#[cfg(feature = "mock")]
 pub const MOCK_STORAGE_ENV: &str = "ENCLAVEAPP_MOCK_STORAGE";
 
 /// Create encryption storage with automatic platform detection.
 ///
-/// Honours [`MOCK_STORAGE_ENV`]: when that env var is set to a
-/// non-empty value the returned box wraps a fresh
-/// [`MockEncryptionStorage`]. Callers get a uniform
-/// [`EncryptionStorage`] trait object either way.
+/// When built with the `mock` feature (test builds only), honours
+/// [`MOCK_STORAGE_ENV`]: a non-empty value routes through
+/// [`MockEncryptionStorage`]. Release builds have the feature off,
+/// so this function unconditionally returns the real backend —
+/// there is no runtime switch that could downgrade production
+/// security.
 pub fn create_encryption_storage(config: StorageConfig) -> Result<Box<dyn EncryptionStorage>> {
-    if let Ok(val) = std::env::var(MOCK_STORAGE_ENV) {
-        if !val.is_empty() {
-            tracing::warn!(
-                app = %config.app_name,
-                "{MOCK_STORAGE_ENV} is set — returning MockEncryptionStorage (no hardware backing)"
-            );
-            return Ok(Box::new(MockEncryptionStorage::for_app(&config.app_name)));
+    #[cfg(feature = "mock")]
+    {
+        if let Ok(val) = std::env::var(MOCK_STORAGE_ENV) {
+            if !val.is_empty() {
+                tracing::warn!(
+                    app = %config.app_name,
+                    "{MOCK_STORAGE_ENV} is set — returning MockEncryptionStorage (no hardware backing)"
+                );
+                return Ok(Box::new(MockEncryptionStorage::for_app(&config.app_name)));
+            }
         }
     }
     let storage = AppEncryptionStorage::init(config)?;
