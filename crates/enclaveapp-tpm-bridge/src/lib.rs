@@ -491,6 +491,41 @@ mod tests {
     }
 
     #[test]
+    fn destroy_and_delete_are_aliases() {
+        // Locks in the compat guarantee: the bridge server MUST honor
+        // both `destroy` and `delete` on the wire. `bridge_destroy`
+        // on the client side sends `"delete"` for backward
+        // compatibility with older servers, and newer clients may
+        // send either. Both names must produce identical semantics
+        // so neither version drifts into an "unknown method" error.
+        let destroy = make_request("destroy", "", AccessPolicy::None);
+        let delete = make_request("delete", "", AccessPolicy::None);
+
+        let mut storage_a = None;
+        let mut storage_b = None;
+        let resp_destroy = handle(&destroy, &mut storage_a);
+        let resp_delete = handle(&delete, &mut storage_b);
+
+        // Neither response should be the unknown-method sentinel —
+        // that error text is the regression guard.
+        for resp in [&resp_destroy, &resp_delete] {
+            if let Some(err) = &resp.error {
+                assert!(
+                    !err.contains("unknown method"),
+                    "bridge rejected a supported alias as unknown: {err}"
+                );
+            }
+        }
+        // Result shape must match: either both error (no TPM on this
+        // host) or both succeed.
+        assert_eq!(
+            resp_destroy.error.is_some(),
+            resp_delete.error.is_some(),
+            "destroy/delete disagreed: destroy={resp_destroy:?} delete={resp_delete:?}"
+        );
+    }
+
+    #[test]
     fn handle_unknown_method() {
         let req = make_request("bogus", "", AccessPolicy::None);
         let mut storage = None;

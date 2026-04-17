@@ -17,6 +17,12 @@ pub struct BridgeRequest {
 }
 
 /// Bridge request parameters.
+///
+/// The legacy `biometric: bool` field from earlier releases has been
+/// removed. `access_policy` is now the only accepted encoding of the
+/// key's access policy on the wire. See THREAT_MODEL.md T5 — the
+/// legacy field opened a silent-downgrade path for a malicious bridge
+/// peer that honored `biometric` and ignored `access_policy`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BridgeParams {
     /// Base64-encoded data (plaintext for encrypt, ciphertext for decrypt).
@@ -25,10 +31,6 @@ pub struct BridgeParams {
     /// Access policy to enforce on key use.
     #[serde(default)]
     pub access_policy: AccessPolicy,
-    /// Legacy field kept for backward compatibility with older bridge servers.
-    /// When deserializing, `access_policy` takes precedence over this field.
-    #[serde(default)]
-    biometric: bool,
     /// Application name (determines TPM key name).
     #[serde(default)]
     pub app_name: String,
@@ -38,18 +40,17 @@ pub struct BridgeParams {
 }
 
 impl BridgeParams {
-    /// Resolve the effective access policy considering both new and legacy fields.
+    /// Access policy requested by this message. Kept as a method for
+    /// source-compatibility with the legacy `effective_access_policy()`
+    /// call sites that used to reconcile `access_policy` vs a legacy
+    /// `biometric: bool` flag.
+    #[must_use]
     pub fn effective_access_policy(&self) -> AccessPolicy {
-        if self.access_policy != AccessPolicy::None {
-            self.access_policy
-        } else if self.biometric {
-            AccessPolicy::BiometricOnly
-        } else {
-            AccessPolicy::None
-        }
+        self.access_policy
     }
 
-    /// Create params with backward-compatible biometric field set automatically.
+    /// Build a new `BridgeParams`.
+    #[must_use]
     pub fn new(
         data: String,
         access_policy: AccessPolicy,
@@ -59,7 +60,6 @@ impl BridgeParams {
         Self {
             data,
             access_policy,
-            biometric: access_policy == AccessPolicy::BiometricOnly,
             app_name,
             key_label,
         }
@@ -161,7 +161,6 @@ mod tests {
         assert_eq!(parsed.method, "encrypt");
         assert_eq!(parsed.params.data, "aGVsbG8=");
         assert_eq!(parsed.params.access_policy, AccessPolicy::BiometricOnly);
-        assert!(parsed.params.biometric); // backward compat field
         assert_eq!(parsed.params.app_name, "test-app");
         assert_eq!(parsed.params.key_label, "cache-key");
     }
@@ -173,9 +172,20 @@ mod tests {
         assert_eq!(parsed.method, "init");
         assert_eq!(parsed.params.data, "");
         assert_eq!(parsed.params.access_policy, AccessPolicy::None);
-        assert!(!parsed.params.biometric);
         assert_eq!(parsed.params.app_name, "");
         assert_eq!(parsed.params.key_label, "");
+    }
+
+    #[test]
+    fn bridge_request_ignores_legacy_biometric_field() {
+        // Older callers may still include `biometric: true` on the wire.
+        // We must not silently honor it — access_policy is authoritative.
+        // Unknown fields are ignored by serde's default, so the legacy
+        // flag simply has no effect.
+        let json = r#"{"method":"encrypt","params":{"biometric":true,"access_policy":"none","app_name":"a","key_label":"k"}}"#;
+        let parsed: BridgeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.params.access_policy, AccessPolicy::None);
+        assert_eq!(parsed.params.effective_access_policy(), AccessPolicy::None);
     }
 
     #[test]
@@ -316,7 +326,6 @@ mod tests {
         let params: BridgeParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.data, "");
         assert_eq!(params.access_policy, AccessPolicy::None);
-        assert!(!params.biometric);
         assert_eq!(params.app_name, "");
         assert_eq!(params.key_label, "");
     }
@@ -330,8 +339,8 @@ mod tests {
     }
 
     #[test]
-    fn bridge_params_legacy_biometric_true_maps_to_biometric_only() {
-        let json = r#"{"data":"","biometric":true,"app_name":"test","key_label":"k"}"#;
+    fn bridge_params_biometric_only_access_policy() {
+        let json = r#"{"access_policy":"biometric_only","app_name":"t","key_label":"k"}"#;
         let params: BridgeParams = serde_json::from_str(json).unwrap();
         assert_eq!(
             params.effective_access_policy(),
@@ -340,27 +349,20 @@ mod tests {
     }
 
     #[test]
-    fn bridge_params_access_policy_takes_precedence_over_biometric() {
-        // When access_policy is explicitly set to a non-None value, it wins.
-        let json = r#"{"access_policy":"any","biometric":true,"app_name":"t","key_label":"k"}"#;
+    fn bridge_params_any_access_policy() {
+        let json = r#"{"access_policy":"any","app_name":"t","key_label":"k"}"#;
         let params: BridgeParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.effective_access_policy(), AccessPolicy::Any);
     }
 
     #[test]
-    fn bridge_params_legacy_biometric_true_with_none_policy() {
-        // When access_policy is the default None but biometric is true,
-        // biometric should still win.
-        let json = r#"{"access_policy":"none","biometric":true,"app_name":"t","key_label":"k"}"#;
-        let params: BridgeParams = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            params.effective_access_policy(),
-            AccessPolicy::BiometricOnly
-        );
-    }
-
-    #[test]
-    fn bridge_params_new_sets_biometric_compat() {
+    fn bridge_params_wire_format_omits_biometric_field() {
+        // We must not serialize a `biometric` field on the wire — old
+        // servers that preferred it over `access_policy` would observe
+        // a false value and silently downgrade. Note: the
+        // `biometric_only` access-policy enum variant string contains
+        // the substring `biometric`, so the assertion must check for
+        // the quoted JSON key specifically.
         let params = BridgeParams::new(
             String::new(),
             AccessPolicy::BiometricOnly,
@@ -368,7 +370,7 @@ mod tests {
             "key".into(),
         );
         let json = serde_json::to_string(&params).unwrap();
-        assert!(json.contains("\"biometric\":true"));
+        assert!(!json.contains("\"biometric\""));
         assert!(json.contains("\"access_policy\":\"biometric_only\""));
     }
 
@@ -435,11 +437,9 @@ mod tests {
 
     #[test]
     fn effective_access_policy_with_all_variants() {
-        // Explicit Any takes precedence
         let params = BridgeParams::new(String::new(), AccessPolicy::Any, "a".into(), "k".into());
         assert_eq!(params.effective_access_policy(), AccessPolicy::Any);
 
-        // Explicit PasswordOnly takes precedence
         let params = BridgeParams::new(
             String::new(),
             AccessPolicy::PasswordOnly,
@@ -448,29 +448,8 @@ mod tests {
         );
         assert_eq!(params.effective_access_policy(), AccessPolicy::PasswordOnly);
 
-        // None with no biometric
         let params = BridgeParams::new(String::new(), AccessPolicy::None, "a".into(), "k".into());
         assert_eq!(params.effective_access_policy(), AccessPolicy::None);
-    }
-
-    #[test]
-    fn bridge_params_new_biometric_only_for_biometric_only_policy() {
-        let p1 = BridgeParams::new(
-            String::new(),
-            AccessPolicy::BiometricOnly,
-            "a".into(),
-            "k".into(),
-        );
-        let j1 = serde_json::to_string(&p1).unwrap();
-        assert!(j1.contains("\"biometric\":true"));
-
-        let p2 = BridgeParams::new(String::new(), AccessPolicy::Any, "a".into(), "k".into());
-        let j2 = serde_json::to_string(&p2).unwrap();
-        assert!(j2.contains("\"biometric\":false"));
-
-        let p3 = BridgeParams::new(String::new(), AccessPolicy::None, "a".into(), "k".into());
-        let j3 = serde_json::to_string(&p3).unwrap();
-        assert!(j3.contains("\"biometric\":false"));
     }
 
     #[test]
