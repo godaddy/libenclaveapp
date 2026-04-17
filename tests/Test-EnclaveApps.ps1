@@ -61,9 +61,13 @@ function Record($Status, $Test, $Detail = "") {
 
 function Test-Command($Test, $Command, $Expect = $null) {
     try {
-        $out = Invoke-Expression $Command 2>&1 | Out-String
+        # cmd /c gives reliable stdout+stderr capture for native commands,
+        # avoiding PS stream-merging edge cases where output comes back empty.
+        $out = & cmd /c "$Command 2>&1" | Out-String
         if ($Expect -and $out -notmatch [regex]::Escape($Expect)) {
-            Record "F" $Test "expected '$Expect', got: $($out.Trim().Substring(0, [Math]::Min(80, $out.Trim().Length)))"
+            $trimmed = $out.Trim()
+            $preview = if ($trimmed.Length -gt 80) { $trimmed.Substring(0, 80) } else { $trimmed }
+            Record "F" $Test "expected '$Expect', got: $preview"
         } else {
             Record "P" $Test
         }
@@ -81,6 +85,19 @@ function Test-Exit($Test, $Command, [bool]$ExpectSuccess = $true) {
 
 function Section($Title) {
     Write-Host "`n  -- $Title --" -ForegroundColor White
+}
+
+# Force-delete a sshenc key so we start from clean state. Retries and
+# verifies via `sshenc list` that the label is gone.
+function Remove-SshencKey($Label) {
+    for ($i = 0; $i -lt 3; $i++) {
+        "y" | & sshenc delete $Label 2>&1 | Out-Null
+        Remove-Item "$env:USERPROFILE\.ssh\$Label.pub" -ErrorAction SilentlyContinue
+        $list = & sshenc list 2>&1 | Out-String
+        if ($list -notmatch "(?m)^$([regex]::Escape($Label))\b") { return $true }
+        Start-Sleep -Milliseconds 200
+    }
+    return $false
 }
 
 function Banner($Title) {
@@ -119,22 +136,24 @@ if (ShouldTest "sshenc") {
     Test-Command "sshenc completions bash" "sshenc completions bash" "_sshenc"
     Test-Command "sshenc completions powershell" "sshenc completions powershell" "Register-ArgumentCompleter"
 
-    # Key lifecycle — two keys, verify distinct fingerprints
-    $keyA = "test-key-a-$PID"
-    $keyB = "test-key-b-$PID"
-    "y" | sshenc delete $keyA 2>&1 | Out-Null
-    "y" | sshenc delete $keyB 2>&1 | Out-Null
-    Remove-Item "$env:USERPROFILE\.ssh\$keyA.pub" -ErrorAction SilentlyContinue
-    Remove-Item "$env:USERPROFILE\.ssh\$keyB.pub" -ErrorAction SilentlyContinue
+    # Key lifecycle — two keys, verify distinct fingerprints.
+    # Use timestamp+random for labels so reruns within 1s don't collide.
+    $tag = "$(Get-Date -Format 'HHmmss')-$(Get-Random -Maximum 9999)"
+    $keyA = "test-key-a-$tag"
+    $keyB = "test-key-b-$tag"
+    if (-not (Remove-SshencKey $keyA)) { Record "F" "pre-clean $keyA" "still present after 3 deletes" }
+    if (-not (Remove-SshencKey $keyB)) { Record "F" "pre-clean $keyB" "still present after 3 deletes" }
 
-    $genA = sshenc keygen -l $keyA -C "test-a" 2>&1 | Out-String
-    if ($genA -match "Generated") { Record "P" "sshenc keygen $keyA" } else { Record "F" "sshenc keygen $keyA" $genA.Trim() }
+    $genA = & sshenc keygen -l $keyA -C "test-a" 2>&1 | Out-String
+    $listA = & sshenc list 2>&1 | Out-String
+    if ($listA -match "(?m)^$([regex]::Escape($keyA))\b") { Record "P" "sshenc keygen $keyA" } else { Record "F" "sshenc keygen $keyA" $genA.Trim() }
 
-    $genB = sshenc keygen -l $keyB -C "test-b" 2>&1 | Out-String
-    if ($genB -match "Generated") { Record "P" "sshenc keygen $keyB" } else { Record "F" "sshenc keygen $keyB" $genB.Trim() }
+    $genB = & sshenc keygen -l $keyB -C "test-b" 2>&1 | Out-String
+    $listB = & sshenc list 2>&1 | Out-String
+    if ($listB -match "(?m)^$([regex]::Escape($keyB))\b") { Record "P" "sshenc keygen $keyB" } else { Record "F" "sshenc keygen $keyB" $genB.Trim() }
 
-    $fpA = (sshenc export-pub $keyA --fingerprint 2>&1 | Out-String).Trim()
-    $fpB = (sshenc export-pub $keyB --fingerprint 2>&1 | Out-String).Trim()
+    $fpA = (& sshenc export-pub $keyA --fingerprint 2>&1 | Out-String).Trim()
+    $fpB = (& sshenc export-pub $keyB --fingerprint 2>&1 | Out-String).Trim()
     if ($fpA -match "SHA256:" -and $fpB -match "SHA256:" -and $fpA -ne $fpB) {
         Record "P" "keys have distinct fingerprints"
     } else {
@@ -143,8 +162,8 @@ if (ShouldTest "sshenc") {
 
     Test-Command "sshenc inspect $keyA" "sshenc inspect $keyA" "ecdsa-p256"
     Test-Command "sshenc export-pub $keyA" "sshenc export-pub $keyA" "ecdsa-sha2-nistp256"
-    "y" | sshenc delete $keyA 2>&1 | Out-Null; Record "P" "sshenc delete $keyA"
-    "y" | sshenc delete $keyB 2>&1 | Out-Null; Record "P" "sshenc delete $keyB"
+    if (Remove-SshencKey $keyA) { Record "P" "sshenc delete $keyA" } else { Record "F" "sshenc delete $keyA" }
+    if (Remove-SshencKey $keyB) { Record "P" "sshenc delete $keyB" } else { Record "F" "sshenc delete $keyB" }
 }
 
 if (ShouldTest "npmenc") {
@@ -187,9 +206,12 @@ if (-not $SkipExtended) {
         Section "gitenc signing"
         $testDir = "$env:TEMP\gitenc-ps-test"
         Remove-Item $testDir -Recurse -Force -ErrorAction SilentlyContinue
-        $env:GIT_SSH_COMMAND = "$env:SystemRoot\System32\OpenSSH\ssh.exe"
-        git clone git@github.com:godaddy/sshenc.git $testDir 2>&1 | Out-Null
-        if (Test-Path "$testDir\.git") { Record "P" "git clone via SSH" } else { Record "F" "git clone via SSH" }
+        # Git for Windows parses GIT_SSH_COMMAND as a shell command; backslashes
+        # get interpreted as escapes, so pass the path with forward slashes.
+        $sshExe = ($env:SystemRoot + "\System32\OpenSSH\ssh.exe") -replace '\\','/'
+        $env:GIT_SSH_COMMAND = "`"$sshExe`""
+        $cloneOut = git clone git@github.com:godaddy/sshenc.git $testDir 2>&1 | Out-String
+        if (Test-Path "$testDir\.git") { Record "P" "git clone via SSH" } else { Record "F" "git clone via SSH" $cloneOut.Trim() }
 
         if (Test-Path "$testDir\.git") {
             Push-Location $testDir
@@ -285,12 +307,31 @@ if (-not $SkipWSL) {
         $wslVersionTests += 'sshenc --version 2>&1 | grep -q "sshenc" && record P "sshenc --version" || record F "sshenc --version"' + "`n"
         $wslVersionTests += 'sshenc config show 2>&1 | grep -q "socket_path\|prompt_policy" && record P "sshenc config show" || record F "sshenc config show"' + "`n"
         $wslKeyTests = @'
-KEY_A="wsl-test-a-$$"
-KEY_B="wsl-test-b-$$"
-echo y | sshenc delete "$KEY_A" >/dev/null 2>&1; rm -f "$HOME/.ssh/$KEY_A.pub"
-echo y | sshenc delete "$KEY_B" >/dev/null 2>&1; rm -f "$HOME/.ssh/$KEY_B.pub"
-sshenc keygen -l "$KEY_A" -C "test-a" >/dev/null 2>&1 && record P "sshenc keygen $KEY_A" || record F "sshenc keygen $KEY_A"
-sshenc keygen -l "$KEY_B" -C "test-b" >/dev/null 2>&1 && record P "sshenc keygen $KEY_B" || record F "sshenc keygen $KEY_B"
+# Force-delete key, retry + verify absence from `sshenc list`.
+wipe_key() {
+    local k=$1
+    for i in 1 2 3; do
+        echo y | sshenc delete "$k" >/dev/null 2>&1
+        rm -f "$HOME/.ssh/$k.pub"
+        if ! sshenc list 2>&1 | grep -qE "^$k\b"; then return 0; fi
+        sleep 0.3
+    done
+    return 1
+}
+
+# Check key actually exists in `sshenc list` (authoritative), since
+# `sshenc keygen` may print misleading errors even on success.
+TAG="$(date +%H%M%S)-$RANDOM"
+KEY_A="wsl-test-a-$TAG"
+KEY_B="wsl-test-b-$TAG"
+wipe_key "$KEY_A" || record F "pre-clean $KEY_A"
+wipe_key "$KEY_B" || record F "pre-clean $KEY_B"
+
+GEN_A=$(sshenc keygen -l "$KEY_A" -C "test-a" 2>&1)
+if sshenc list 2>&1 | grep -qE "^$KEY_A\b"; then record P "sshenc keygen $KEY_A"; else record F "sshenc keygen $KEY_A ($GEN_A)"; fi
+GEN_B=$(sshenc keygen -l "$KEY_B" -C "test-b" 2>&1)
+if sshenc list 2>&1 | grep -qE "^$KEY_B\b"; then record P "sshenc keygen $KEY_B"; else record F "sshenc keygen $KEY_B ($GEN_B)"; fi
+
 FP_A=$(sshenc export-pub "$KEY_A" --fingerprint 2>&1)
 FP_B=$(sshenc export-pub "$KEY_B" --fingerprint 2>&1)
 if [[ "$FP_A" == SHA256:* ]] && [[ "$FP_B" == SHA256:* ]] && [[ "$FP_A" != "$FP_B" ]]; then
@@ -300,8 +341,8 @@ else
 fi
 sshenc inspect "$KEY_A" 2>&1 | grep -q "ecdsa-p256" && record P "sshenc inspect" || record F "sshenc inspect"
 sshenc export-pub "$KEY_A" 2>&1 | grep -q "ecdsa-sha2-nistp256" && record P "sshenc export-pub" || record F "sshenc export-pub"
-echo y | sshenc delete "$KEY_A" >/dev/null 2>&1 && record P "sshenc delete $KEY_A" || record F "sshenc delete $KEY_A"
-echo y | sshenc delete "$KEY_B" >/dev/null 2>&1 && record P "sshenc delete $KEY_B" || record F "sshenc delete $KEY_B"
+wipe_key "$KEY_A" && record P "sshenc delete $KEY_A" || record F "sshenc delete $KEY_A"
+wipe_key "$KEY_B" && record P "sshenc delete $KEY_B" || record F "sshenc delete $KEY_B"
 '@
     }
     if (ShouldTest "sso-jwt") {
@@ -317,32 +358,48 @@ echo y | sshenc delete "$KEY_B" >/dev/null 2>&1 && record P "sshenc delete $KEY_
 #!/usr/bin/env bash
 set -uo pipefail
 PASS=0; FAIL=0; SKIP=0
-record() { local s=`$1 t=`$2; case `$s in P) ((PASS++));; F) ((FAIL++));; S) ((SKIP++));; esac; printf "  [%s] %s\n" "`$(echo `$s | sed 's/P/PASS/;s/F/FAIL/;s/S/SKIP/')" "`$t"; }
+record() { local s=`$1 t=`$2; local lbl; case `$s in P) ((PASS++)); lbl=PASS;; F) ((FAIL++)); lbl=FAIL;; S) ((SKIP++)); lbl=SKIP;; esac; printf "  [%s] %s\n" "`$lbl" "`$t"; }
 $wslVersionTests
 $wslKeyTests
 echo "  TOTAL: `$PASS pass, `$FAIL fail, `$SKIP skip"
 exit `$FAIL
 "@
 
+    # Write script with LF line endings so bash inside WSL can parse it.
+    # PowerShell here-strings inject CRLF which breaks bash (`set -uo pipefail\r`).
+    $wslScriptWin = Join-Path $env:TEMP "sshenc-wsl-tests-$PID.sh"
+    [System.IO.File]::WriteAllText($wslScriptWin, ($bashTests -replace "`r`n","`n"), [System.Text.UTF8Encoding]::new($false))
+    $wslScriptPath = "/mnt/c" + ($wslScriptWin.Substring(2) -replace '\\','/')
+
     foreach ($distro in $distros) {
         Banner "WSL2 $distro (bridge, no keyring)"
 
         $wslJob = Start-Job -ScriptBlock {
-            param($d, $s)
-            $result = $s | wsl -d $d -- bash 2>&1
+            param($d, $p)
+            $result = wsl -d $d -- bash $p 2>&1
             $result -join "`n"
-        } -ArgumentList $distro, $bashTests
+        } -ArgumentList $distro, $wslScriptPath
 
         $completed = Wait-Job $wslJob -Timeout $KeyringTimeout
         if ($completed) {
             $output = Receive-Job $wslJob
-            ($output -split "`n") | ForEach-Object { Write-Host $_ }
+            ($output -split "`n") | ForEach-Object {
+                Write-Host $_
+                # Roll per-distro pass/fail lines into the global tally so
+                # the SUMMARY reflects WSL results too.
+                if ($_ -match '^\s*\[PASS\]\s+(.+)$') { $script:Pass++; $script:Results += [PSCustomObject]@{ Status = "PASS"; Test = "[WSL $distro] $($Matches[1].Trim())"; Detail = "" } }
+                elseif ($_ -match '^\s*\[FAIL\]\s+(.+)$') { $script:Fail++; $script:Results += [PSCustomObject]@{ Status = "FAIL"; Test = "[WSL $distro] $($Matches[1].Trim())"; Detail = "" } }
+                elseif ($_ -match '^\s*\[SKIP\]\s+(.+)$') { $script:Skip++; $script:Results += [PSCustomObject]@{ Status = "SKIP"; Test = "[WSL $distro] $($Matches[1].Trim())"; Detail = "" } }
+            }
         } else {
             Write-Host "  [TIMEOUT] WSL test timed out after ${KeyringTimeout}s" -ForegroundColor Yellow
             Stop-Job $wslJob
+            $script:Fail++
+            $script:Results += [PSCustomObject]@{ Status = "FAIL"; Test = "[WSL $distro] timeout"; Detail = "${KeyringTimeout}s" }
         }
         Remove-Job $wslJob -Force
     }
+    Remove-Item $wslScriptWin -ErrorAction SilentlyContinue
 }
 
 # ============================================================
@@ -364,7 +421,7 @@ if ($Interactive -and -not $SkipWSL -and (ShouldTest "sshenc")) {
 #!/usr/bin/env bash
 set -uo pipefail
 PASS=0; FAIL=0; SKIP=0
-record() { local s=$1 t=$2; case $s in P) ((PASS++));; F) ((FAIL++));; S) ((SKIP++));; esac; printf "  [%s] %s\n" "$(echo $s | sed 's/P/PASS/;s/F/FAIL/;s/S/SKIP/')" "$t"; }
+record() { local s=$1 t=$2; local lbl; case $s in P) ((PASS++)); lbl=PASS;; F) ((FAIL++)); lbl=FAIL;; S) ((SKIP++)); lbl=SKIP;; esac; printf "  [%s] %s\n" "$lbl" "$t"; }
 
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 mkdir -p $XDG_RUNTIME_DIR && chmod 700 $XDG_RUNTIME_DIR
@@ -372,12 +429,28 @@ eval $(dbus-launch --sh-syntax 2>/dev/null)
 gnome-keyring-daemon --start --components=secrets 2>/dev/null
 echo "probe" | secret-tool store --label="setup" app enclaveapp key setup 2>/dev/null
 
-KR_A="kr-test-a-$$"
-KR_B="kr-test-b-$$"
-echo y | sshenc --keyring delete "$KR_A" >/dev/null 2>&1; rm -f "$HOME/.ssh/$KR_A.pub"
-echo y | sshenc --keyring delete "$KR_B" >/dev/null 2>&1; rm -f "$HOME/.ssh/$KR_B.pub"
-sshenc --keyring keygen -l "$KR_A" -C "kr-a" >/dev/null 2>&1 && record P "sshenc --keyring keygen $KR_A" || record F "sshenc --keyring keygen $KR_A"
-sshenc --keyring keygen -l "$KR_B" -C "kr-b" >/dev/null 2>&1 && record P "sshenc --keyring keygen $KR_B" || record F "sshenc --keyring keygen $KR_B"
+wipe_kr_key() {
+    local k=$1
+    for i in 1 2 3; do
+        echo y | sshenc --keyring delete "$k" >/dev/null 2>&1
+        rm -f "$HOME/.ssh/$k.pub"
+        if ! sshenc --keyring list 2>&1 | grep -qE "^$k\b"; then return 0; fi
+        sleep 0.3
+    done
+    return 1
+}
+
+TAG="$(date +%H%M%S)-$RANDOM"
+KR_A="kr-test-a-$TAG"
+KR_B="kr-test-b-$TAG"
+wipe_kr_key "$KR_A" || record F "pre-clean $KR_A"
+wipe_kr_key "$KR_B" || record F "pre-clean $KR_B"
+
+GEN_A=$(sshenc --keyring keygen -l "$KR_A" -C "kr-a" 2>&1)
+if sshenc --keyring list 2>&1 | grep -qE "^$KR_A\b"; then record P "sshenc --keyring keygen $KR_A"; else record F "sshenc --keyring keygen $KR_A ($GEN_A)"; fi
+GEN_B=$(sshenc --keyring keygen -l "$KR_B" -C "kr-b" 2>&1)
+if sshenc --keyring list 2>&1 | grep -qE "^$KR_B\b"; then record P "sshenc --keyring keygen $KR_B"; else record F "sshenc --keyring keygen $KR_B ($GEN_B)"; fi
+
 FP_A=$(sshenc --keyring export-pub "$KR_A" --fingerprint 2>&1)
 FP_B=$(sshenc --keyring export-pub "$KR_B" --fingerprint 2>&1)
 if [[ "$FP_A" == SHA256:* ]] && [[ "$FP_B" == SHA256:* ]] && [[ "$FP_A" != "$FP_B" ]]; then
@@ -387,32 +460,44 @@ else
 fi
 sshenc --keyring inspect "$KR_A" 2>&1 | grep -q "ecdsa-p256" && record P "sshenc --keyring inspect" || record F "sshenc --keyring inspect"
 sshenc --keyring export-pub "$KR_A" 2>&1 | grep -q "ecdsa-sha2-nistp256" && record P "sshenc --keyring export-pub" || record F "sshenc --keyring export-pub"
-echo y | sshenc --keyring delete "$KR_A" >/dev/null 2>&1 && record P "sshenc --keyring delete $KR_A" || record F "sshenc --keyring delete"
-echo y | sshenc --keyring delete "$KR_B" >/dev/null 2>&1 && record P "sshenc --keyring delete $KR_B" || record F "sshenc --keyring delete"
+wipe_kr_key "$KR_A" && record P "sshenc --keyring delete $KR_A" || record F "sshenc --keyring delete $KR_A"
+wipe_kr_key "$KR_B" && record P "sshenc --keyring delete $KR_B" || record F "sshenc --keyring delete $KR_B"
 echo "  TOTAL: $PASS pass, $FAIL fail, $SKIP skip"
 exit $FAIL
 '@
+
+    $krScriptWin = Join-Path $env:TEMP "sshenc-keyring-tests-$PID.sh"
+    [System.IO.File]::WriteAllText($krScriptWin, ($keyringTests -replace "`r`n","`n"), [System.Text.UTF8Encoding]::new($false))
+    $krScriptPath = "/mnt/c" + ($krScriptWin.Substring(2) -replace '\\','/')
 
     foreach ($distro in $distros) {
         Banner "WSL2 $distro (--keyring, interactive)"
         Write-Host "  Waiting for keyring unlock on $distro..." -ForegroundColor Yellow
 
         $wslJob = Start-Job -ScriptBlock {
-            param($d, $s)
-            $result = $s | wsl -d $d -- bash 2>&1
+            param($d, $p)
+            $result = wsl -d $d -- bash $p 2>&1
             $result -join "`n"
-        } -ArgumentList $distro, $keyringTests
+        } -ArgumentList $distro, $krScriptPath
 
         $completed = Wait-Job $wslJob -Timeout $KeyringTimeout
         if ($completed) {
             $output = Receive-Job $wslJob
-            ($output -split "`n") | ForEach-Object { Write-Host $_ }
+            ($output -split "`n") | ForEach-Object {
+                Write-Host $_
+                if ($_ -match '^\s*\[PASS\]\s+(.+)$') { $script:Pass++; $script:Results += [PSCustomObject]@{ Status = "PASS"; Test = "[keyring $distro] $($Matches[1].Trim())"; Detail = "" } }
+                elseif ($_ -match '^\s*\[FAIL\]\s+(.+)$') { $script:Fail++; $script:Results += [PSCustomObject]@{ Status = "FAIL"; Test = "[keyring $distro] $($Matches[1].Trim())"; Detail = "" } }
+                elseif ($_ -match '^\s*\[SKIP\]\s+(.+)$') { $script:Skip++; $script:Results += [PSCustomObject]@{ Status = "SKIP"; Test = "[keyring $distro] $($Matches[1].Trim())"; Detail = "" } }
+            }
         } else {
             Write-Host "  [TIMEOUT] Keyring not unlocked within ${KeyringTimeout}s" -ForegroundColor Yellow
             Stop-Job $wslJob
+            $script:Fail++
+            $script:Results += [PSCustomObject]@{ Status = "FAIL"; Test = "[keyring $distro] timeout"; Detail = "${KeyringTimeout}s" }
         }
         Remove-Job $wslJob -Force
     }
+    Remove-Item $krScriptWin -ErrorAction SilentlyContinue
 }
 
 # ============================================================
