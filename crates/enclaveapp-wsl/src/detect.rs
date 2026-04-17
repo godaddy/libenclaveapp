@@ -60,13 +60,14 @@ pub fn is_wsl() -> bool {
 pub fn detect_distros() -> Vec<WslDistro> {
     #[cfg(target_os = "windows")]
     {
-        // Run: wsl --list --quiet
-        // Parse output (handle BOM, null bytes in UTF-16 output)
-        let output = match std::process::Command::new("wsl")
-            .args(["--list", "--quiet"])
-            .output()
-        {
-            Ok(o) if o.status.success() => o,
+        use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
+        use std::time::Duration;
+        // Run: wsl --list --quiet — normally sub-second. Cap at 15s so a
+        // wedged WSL service can't freeze callers.
+        let mut cmd = std::process::Command::new("wsl");
+        cmd.args(["--list", "--quiet"]);
+        let output = match run_with_timeout(cmd, Duration::from_secs(15)) {
+            Ok(TimeoutResult::Completed(o)) if o.status.success() => o,
             _ => return Vec::new(),
         };
 
@@ -105,10 +106,14 @@ fn get_distro_home(distro: &str) -> Option<std::path::PathBuf> {
 /// Resolve a distro's `$HOME` by running a shell inside WSL.
 #[cfg(target_os = "windows")]
 pub(crate) fn linux_home(distro: &str) -> Option<String> {
-    let output = std::process::Command::new("wsl")
-        .args(["-d", distro, "--", "sh", "-lc", r#"printf '%s' "$HOME""#])
-        .output()
-        .ok()?;
+    use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
+    use std::time::Duration;
+    let mut cmd = std::process::Command::new("wsl");
+    cmd.args(["-d", distro, "--", "sh", "-lc", r#"printf '%s' "$HOME""#]);
+    let output = match run_with_timeout(cmd, Duration::from_secs(15)) {
+        Ok(TimeoutResult::Completed(o)) => o,
+        _ => return None,
+    };
     if !output.status.success() {
         return None;
     }

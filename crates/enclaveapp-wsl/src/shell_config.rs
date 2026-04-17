@@ -171,14 +171,21 @@ pub fn uninstall_block(path: &Path, config: &ShellBlockConfig) -> Result<Uninsta
 /// Returns `Ok(())` if valid or if the shell is not available.
 /// Returns `Err` with details if the syntax check fails.
 pub fn validate_shell_syntax(path: &Path, shell: &str) -> Result<()> {
-    let output = std::process::Command::new(shell)
-        .arg("-n")
-        .arg(path)
-        .output();
+    use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
+    use std::time::Duration;
+    let mut cmd = std::process::Command::new(shell);
+    cmd.arg("-n").arg(path);
+    // bash/zsh `-n` parses without executing — always fast. Cap at 10s
+    // so an unexpected hang (stuck interactive init, wedged shim) can't
+    // freeze install/uninstall.
+    let output = run_with_timeout(cmd, Duration::from_secs(10));
 
     match output {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => {
+        Ok(TimeoutResult::Completed(o)) if o.status.success() => Ok(()),
+        Ok(TimeoutResult::TimedOut) => Err(enclaveapp_core::Error::Config(format!(
+            "{shell} syntax check timed out after 10s"
+        ))),
+        Ok(TimeoutResult::Completed(o)) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             Err(enclaveapp_core::Error::Config(format!(
                 "{shell} syntax check failed: {stderr}"
