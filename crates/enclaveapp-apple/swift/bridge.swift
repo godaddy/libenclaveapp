@@ -458,7 +458,22 @@ private func openLoginKeychain() -> SecKeychain? {
     ]
     for path in candidates {
         var kc: SecKeychain?
-        if SecKeychainOpen(path, &kc) == errSecSuccess, kc != nil {
+        if SecKeychainOpen(path, &kc) == errSecSuccess, let kc = kc {
+            // Best-effort silent unlock with an empty password.
+            //
+            // On interactive dev sessions the keychain is already
+            // unlocked and this is a no-op. On CI runners (GitHub
+            // Actions `macos-latest`) the login keychain is created
+            // at image-provision time with an empty password and
+            // re-locks between jobs, so without this call the next
+            // `SecItemAdd` blocks indefinitely waiting for a user
+            // to type the unlock password into a GUI prompt that
+            // never comes. `usePassword: true` + zero-length
+            // password avoids the prompt entirely; if the keychain
+            // has a real password the unlock fails here and the
+            // subsequent op surfaces the real error — we don't
+            // mask it with a fallback.
+            _ = SecKeychainUnlock(kc, 0, nil, true)
             return kc
         }
     }
