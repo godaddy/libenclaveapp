@@ -112,7 +112,13 @@ Unsafe FFI surfaces are trusted by design but fragile.
 
 ### Process hardening scope
 
-`enclaveapp_core::process::harden_process()` (`crates/enclaveapp-core/src/process.rs`) currently only calls `disable_core_dumps` (`setrlimit(RLIMIT_CORE, 0)` on Unix; no-op on Windows). It does **not** apply `PR_SET_DUMPABLE=0`, `NO_NEW_PRIVS`, ptrace-blocking, `RLIMIT_AS`, or Windows `SetProcessMitigationPolicy`. A same-UID attacker can still `ptrace` into a running process and read decrypted plaintext in the window between hardware-decrypt and consumer handoff. Applications that want stricter memory protection must add their own mitigations on top.
+`enclaveapp_core::process::harden_process()` (`crates/enclaveapp-core/src/process.rs`) applies:
+
+- **All Unix:** `setrlimit(RLIMIT_CORE, 0)` — no core dumps.
+- **Linux:** `prctl(PR_SET_DUMPABLE, 0)` — `/proc/<pid>/mem` becomes root-only; `ptrace` attach from non-root peers is denied by the kernel even within the same UID.
+- **Linux:** `prctl(PR_SET_NO_NEW_PRIVS, 1)` — subsequent `exec*()` cannot gain setuid / file-capabilities privileges; shrinks the surface for wrapped-child-process escalation.
+
+Still not applied: `RLIMIT_AS`, seccomp-bpf system-call filtering, macOS `ptrace(PT_DENY_ATTACH)` (deprecated and fragile), and Windows `SetProcessMitigationPolicy`. Root can still dump memory unconditionally on any platform. Applications that want stricter memory protection must add their own mitigations on top.
 
 ### Zeroize coverage
 
