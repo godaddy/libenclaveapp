@@ -569,7 +569,32 @@ public func enclaveapp_keychain_store(
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
     }
     if let kc = kc { addQuery[kSecUseKeychain as String] = kc }
-    let status = SecItemAdd(addQuery as CFDictionary, nil)
+    var status = SecItemAdd(addQuery as CFDictionary, nil)
+
+    // `.userPresence` / `kSecAttrAccessControl` only works on the
+    // Data Protection keychain, which returns `errSecMissingEntitlement`
+    // (-34018) for unsigned callers. On the legacy keychain the same
+    // attribute is rejected with `errSecParam` (-50). If the ACL path
+    // fails for either reason, retry once with the plain
+    // `kSecAttrAccessible` attribute so unsigned / Homebrew / CI builds
+    // can still store wrapping keys — just without the biometric
+    // gate. Callers that configured user presence are expected to
+    // notice the missing prompts on first sign; surfacing the
+    // downgrade via stderr makes that explicit.
+    if use_user_presence != 0
+        && (status == errSecMissingEntitlement || status == errSecParam)
+    {
+        FileHandle.standardError.write(Data((
+            "enclaveapp: wrapping-key userPresence ACL rejected " +
+            "(OSStatus=\(status)); falling back to non-userPresence storage — " +
+            "userPresence gate won't fire for this key\n"
+        ).utf8))
+        addQuery.removeValue(forKey: kSecAttrAccessControl as String)
+        addQuery[kSecAttrAccessible as String] =
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        status = SecItemAdd(addQuery as CFDictionary, nil)
+    }
+
     return status == errSecSuccess ? SE_OK : SE_ERR_KEYCHAIN_STORE
 }
 
