@@ -21,6 +21,8 @@
 //!     extra_bridge_paths: vec![],
 //!     keys_dir: None,
 //!     force_keyring: false,
+//!     wrapping_key_user_presence: false,
+//!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //! })?;
 //!
 //! let ciphertext = storage.encrypt(b"secret")?;
@@ -39,6 +41,8 @@
 //!     extra_bridge_paths: vec![],
 //!     keys_dir: None,
 //!     force_keyring: false,
+//!     wrapping_key_user_presence: false,
+//!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //! })?;
 //!
 //! // Use the underlying signer/key_manager for operations.
