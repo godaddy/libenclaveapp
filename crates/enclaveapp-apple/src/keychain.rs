@@ -225,34 +225,27 @@ pub fn generate_and_save_key(
 
     let (pub_key, data_rep) = generate_key(key_type, policy.as_ffi_value())?;
 
-    // Generate a fresh wrapping key and store it in the keychain BEFORE
-    // encrypting, so a failure on either side leaves a consistent state.
-    let wrapping_key = crate::keychain_wrap::generate_wrapping_key();
+    // Ask keychain_wrap to create the wrapping key, persist it, and
+    // return the encrypted blob. The raw wrapping-key bytes stay
+    // inside that module — we only see the wrapped output.
     let app_name = config.app_name.clone();
-    let app_name_for_cleanup = app_name.clone();
     let label_owned = label.to_string();
-    if let Err(error) = crate::keychain_wrap::keychain_store(
+    let wrapped_blob = match crate::keychain_wrap::generate_and_wrap(
         &app_name,
         label,
-        &wrapping_key,
+        &data_rep,
         config.wrapping_key_user_presence,
     ) {
-        // The SE key was created but we can't store its wrapping key —
-        // roll back the SE key so we don't leave an orphaned key that
-        // we can never reload.
-        drop(delete_key_from_data_rep(&data_rep));
-        return Err(error);
-    }
-
-    let wrapped_blob = match crate::keychain_wrap::encrypt_blob(&wrapping_key, &data_rep) {
         Ok(blob) => blob,
         Err(error) => {
-            drop(crate::keychain_wrap::keychain_delete(&app_name, label));
+            // `generate_and_wrap` already removed any half-stored
+            // keychain entry; just roll back the SE side.
             drop(delete_key_from_data_rep(&data_rep));
             return Err(error);
         }
     };
 
+    let app_name_for_cleanup = app_name.clone();
     let cleanup = move || {
         drop(crate::keychain_wrap::keychain_delete(
             &app_name_for_cleanup,
@@ -352,60 +345,28 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
     let dir = config.keys_dir();
     let _lock = metadata::DirLock::acquire(&dir)?;
 
-    // Load the source's wrapping key up front; this is also the existence
-    // check. A missing source means `KeyNotFound` per the trait contract.
-    // Use `Duration::ZERO` for the cache TTL so the rename always reads
-    // the live keychain state; caching during a rename operation would
-    // risk re-using a value that a concurrent operation invalidated.
-    let wrapping_key = crate::keychain_wrap::keychain_load(
-        &config.app_name,
-        old_label,
-        std::time::Duration::ZERO,
-    )?
-    .ok_or_else(|| Error::KeyNotFound {
-        label: old_label.to_string(),
-    })?;
-
-    // Reject collision at the target label — both in keychain and on disk.
-    if crate::keychain_wrap::keychain_load(&config.app_name, new_label, std::time::Duration::ZERO)?
-        .is_some()
-    {
-        return Err(Error::DuplicateLabel {
-            label: new_label.to_string(),
-        });
-    }
-
-    // Disk rename first. If this fails we haven't touched the keychain.
+    // Disk rename first — cheap to roll back and doesn't touch the
+    // keychain. If this fails the keychain is untouched.
     metadata::rename_key_files(&dir, old_label, new_label)?;
 
-    // Install the wrapping key under the new label. If this fails, roll
-    // back the disk rename so we don't leave a handle file whose
-    // wrapping key is unreachable.
-    if let Err(error) = crate::keychain_wrap::keychain_store(
+    // Move the wrapping-key entry via the oracle API. The raw key
+    // bytes never escape `keychain_wrap`. On failure, roll back the
+    // disk rename so we don't leave a handle file whose wrapping key
+    // is unreachable.
+    if let Err(error) = crate::keychain_wrap::relabel_wrapping_key(
         &config.app_name,
+        old_label,
         new_label,
-        &wrapping_key,
         config.wrapping_key_user_presence,
     ) {
         let rollback = metadata::rename_key_files(&dir, new_label, old_label);
         if let Err(rollback_err) = rollback {
             tracing::error!(
-                "rename_key: keychain_store failed ({error}) and disk rollback ALSO failed ({rollback_err}); \
-                 key material may be in an inconsistent state"
+                "rename_key: relabel_wrapping_key failed ({error}) and disk rollback ALSO failed \
+                 ({rollback_err}); key material may be in an inconsistent state"
             );
         }
         return Err(error);
-    }
-
-    // Best-effort: remove the old keychain entry. A failure here leaves
-    // a dangling wrapping key that no `.handle` file references; it is
-    // harmless.
-    if let Err(error) = crate::keychain_wrap::keychain_delete(&config.app_name, old_label) {
-        tracing::warn!(
-            old_label = old_label,
-            "keychain_delete of old label failed during rename_key; \
-             the dangling wrapping-key entry can be removed manually: {error}"
-        );
     }
 
     Ok(())
@@ -440,23 +401,21 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
         return Ok(contents);
     }
 
-    let wrapping_key = match crate::keychain_wrap::keychain_load(
+    match crate::keychain_wrap::decrypt_with_cached_key(
         &config.app_name,
         label,
+        &contents,
         config.wrapping_key_cache_ttl,
     )? {
-        Some(k) => k,
-        None => {
-            return Err(Error::KeyOperation {
-                operation: "load_handle".into(),
-                detail: format!(
-                    "wrapped handle for label `{label}` is missing its keychain wrapping key; \
-                    the keychain entry may have been deleted or the user denied access"
-                ),
-            });
-        }
-    };
-    crate::keychain_wrap::decrypt_blob(&wrapping_key, &contents)
+        Some(plaintext) => Ok(plaintext),
+        None => Err(Error::KeyOperation {
+            operation: "load_handle".into(),
+            detail: format!(
+                "wrapped handle for label `{label}` is missing its keychain wrapping key; \
+                 the keychain entry may have been deleted or the user denied access"
+            ),
+        }),
+    }
 }
 
 /// Load the cached public key for a label. Falls back to extracting from data rep.
