@@ -466,6 +466,73 @@ pub fn list_labels(config: &SoftwareConfig) -> Result<Vec<String>> {
     metadata::list_labels(&config.keys_dir())
 }
 
+/// Rename a key from `old_label` to `new_label`.
+///
+/// On the keyring backend, the private key's KEK (when encryption is in
+/// effect) is stored in the system keyring keyed by `(app_name, label)`,
+/// and the disk blob is named `<label>.key`. Both must be moved together
+/// for the new label to decrypt correctly.
+///
+/// Strategy:
+///   1. Load and decrypt the secret under the old label.
+///   2. Save the secret under the new label (generates a fresh KEK in
+///      the keyring when applicable) at the new file path.
+///   3. Rename the `.meta`, `.pub`, `.handle` metadata files.
+///   4. Delete the old `.key` and the old keyring entry.
+///
+/// If step 3 fails after step 2, the new `.key` is removed so the disk
+/// state stays consistent with the keyring.
+pub fn rename_key(config: &SoftwareConfig, old_label: &str, new_label: &str) -> Result<()> {
+    validate_label(old_label)?;
+    validate_label(new_label)?;
+    if old_label == new_label {
+        return Ok(());
+    }
+
+    let dir = config.keys_dir();
+    let old_key_path = dir.join(format!("{old_label}.key"));
+    let new_key_path = dir.join(format!("{new_label}.key"));
+
+    if !old_key_path.exists() && !metadata::key_files_exist(&dir, old_label)? {
+        return Err(Error::KeyNotFound {
+            label: old_label.to_string(),
+        });
+    }
+    if new_key_path.exists() || metadata::key_files_exist(&dir, new_label)? {
+        return Err(Error::DuplicateLabel {
+            label: new_label.to_string(),
+        });
+    }
+
+    let _lock = metadata::DirLock::acquire(&dir)?;
+
+    // Load + decrypt (if encrypted) under the old label.
+    let secret_bytes = load_private_key_bytes(&config.app_name, &old_key_path, old_label)?;
+
+    // Save under the new label. For the keyring-encrypted case this
+    // creates a fresh KEK in the keyring under `(app_name, new_label)`.
+    save_private_key(config, &new_key_path, &secret_bytes, new_label)?;
+
+    // Rename the metadata sibling files. If this fails, roll back the
+    // new .key (and its freshly-registered keyring KEK, if any).
+    if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label) {
+        drop(std::fs::remove_file(&new_key_path));
+        #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
+        delete_keyring_entry(&config.app_name, new_label);
+        return Err(error);
+    }
+
+    // Clean up the old side: delete the old .key file and old keyring
+    // entry. Failures here are cosmetic — the new label is fully
+    // functional; log via a warning would be nice but we keep the
+    // helper dependency-light.
+    drop(std::fs::remove_file(&old_key_path));
+    #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
+    delete_keyring_entry(&config.app_name, old_label);
+
+    Ok(())
+}
+
 /// Delete a key and all associated files.
 pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     validate_label(label)?;

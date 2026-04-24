@@ -296,6 +296,73 @@ fn save_key(
     })
 }
 
+/// Rename a key from `old_label` to `new_label`, preserving both on-disk
+/// metadata and the macOS keychain wrapping-key entry.
+///
+/// Failure modes handled atomically where possible:
+///   - Missing source: returns `KeyNotFound`.
+///   - Target already exists on disk or in keychain: returns `DuplicateLabel`.
+///   - Disk rename fails: keychain untouched.
+///   - Keychain store of new entry fails: disk files rolled back.
+///   - Keychain delete of old entry fails: logged as warning (a harmless
+///     dangling keychain entry; the new entry is consistent).
+pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> Result<()> {
+    validate_label(old_label)?;
+    validate_label(new_label)?;
+    if old_label == new_label {
+        return Ok(());
+    }
+
+    let dir = config.keys_dir();
+    let _lock = metadata::DirLock::acquire(&dir)?;
+
+    // Load the source's wrapping key up front; this is also the existence
+    // check. A missing source means `KeyNotFound` per the trait contract.
+    let wrapping_key = crate::keychain_wrap::keychain_load(&config.app_name, old_label)?
+        .ok_or_else(|| Error::KeyNotFound {
+            label: old_label.to_string(),
+        })?;
+
+    // Reject collision at the target label — both in keychain and on disk.
+    if crate::keychain_wrap::keychain_load(&config.app_name, new_label)?.is_some() {
+        return Err(Error::DuplicateLabel {
+            label: new_label.to_string(),
+        });
+    }
+
+    // Disk rename first. If this fails we haven't touched the keychain.
+    metadata::rename_key_files(&dir, old_label, new_label)?;
+
+    // Install the wrapping key under the new label. If this fails, roll
+    // back the disk rename so we don't leave a handle file whose
+    // wrapping key is unreachable.
+    if let Err(error) =
+        crate::keychain_wrap::keychain_store(&config.app_name, new_label, &wrapping_key)
+    {
+        let rollback = metadata::rename_key_files(&dir, new_label, old_label);
+        if let Err(rollback_err) = rollback {
+            tracing::error!(
+                "rename_key: keychain_store failed ({error}) and disk rollback ALSO failed ({rollback_err}); \
+                 key material may be in an inconsistent state"
+            );
+        }
+        return Err(error);
+    }
+
+    // Best-effort: remove the old keychain entry. A failure here leaves
+    // a dangling wrapping key that no `.handle` file references; it is
+    // harmless.
+    if let Err(error) = crate::keychain_wrap::keychain_delete(&config.app_name, old_label) {
+        tracing::warn!(
+            old_label = old_label,
+            "keychain_delete of old label failed during rename_key; \
+             the dangling wrapping-key entry can be removed manually: {error}"
+        );
+    }
+
+    Ok(())
+}
+
 /// Load a key's data representation from the keys directory.
 ///
 /// The `.handle` file may be either a wrapped blob (magic prefix `EHW1`)

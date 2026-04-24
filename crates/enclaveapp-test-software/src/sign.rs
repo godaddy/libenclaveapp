@@ -56,6 +56,10 @@ impl EnclaveKeyManager for SoftwareSigner {
         key_storage::delete_key(&self.config, label)
     }
 
+    fn rename_key(&self, old_label: &str, new_label: &str) -> Result<()> {
+        key_storage::rename_key(&self.config, old_label, new_label)
+    }
+
     fn is_available(&self) -> bool {
         true
     }

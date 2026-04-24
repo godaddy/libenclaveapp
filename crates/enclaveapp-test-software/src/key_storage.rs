@@ -135,6 +135,44 @@ pub fn list_labels(config: &SoftwareConfig) -> Result<Vec<String>> {
     metadata::list_labels(&config.keys_dir())
 }
 
+/// Rename a key from `old_label` to `new_label`. All files live on disk,
+/// so a metadata+blob rename is sufficient.
+pub fn rename_key(config: &SoftwareConfig, old_label: &str, new_label: &str) -> Result<()> {
+    validate_label(old_label)?;
+    validate_label(new_label)?;
+    if old_label == new_label {
+        return Ok(());
+    }
+    let dir = config.keys_dir();
+    let old_key_path = dir.join(format!("{old_label}.key"));
+    let new_key_path = dir.join(format!("{new_label}.key"));
+
+    if !old_key_path.exists() && !metadata::key_files_exist(&dir, old_label)? {
+        return Err(Error::KeyNotFound {
+            label: old_label.to_string(),
+        });
+    }
+    if new_key_path.exists() || metadata::key_files_exist(&dir, new_label)? {
+        return Err(Error::DuplicateLabel {
+            label: new_label.to_string(),
+        });
+    }
+
+    let _lock = metadata::DirLock::acquire(&dir)?;
+
+    if old_key_path.exists() {
+        std::fs::rename(&old_key_path, &new_key_path)?;
+    }
+    if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label) {
+        // Roll back the .key rename if the metadata rename fails.
+        if new_key_path.exists() {
+            drop(std::fs::rename(&new_key_path, &old_key_path));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Delete a key and all associated files.
 pub fn delete_key(config: &SoftwareConfig, label: &str) -> Result<()> {
     validate_label(label)?;

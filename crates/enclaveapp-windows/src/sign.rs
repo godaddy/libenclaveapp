@@ -113,6 +113,23 @@ impl EnclaveKeyManager for TpmSigner {
         })
     }
 
+    fn rename_key(&self, old_label: &str, new_label: &str) -> Result<()> {
+        // Windows CNG persisted keys are immutable by name: renaming the
+        // CNG container requires exporting (not possible for
+        // hardware-bound keys) and re-importing under a new name. A
+        // consistent rename is therefore not achievable on this backend.
+        // Callers (e.g. sshenc's `default` promotion) already gate this
+        // operation off on Windows.
+        let _ = (old_label, new_label);
+        Err(Error::KeyOperation {
+            operation: "rename_key".into(),
+            detail: "renaming is not supported on the Windows TPM backend: \
+                     CNG keys are immutable by name. Create a new key with \
+                     the desired label and migrate authorized_keys instead."
+                .into(),
+        })
+    }
+
     fn is_available(&self) -> bool {
         provider::is_available()
     }
