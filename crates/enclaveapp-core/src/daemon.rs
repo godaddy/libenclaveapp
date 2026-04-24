@@ -23,6 +23,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(unix)]
 use crate::bin_discovery;
 
 /// Outcome of [`ensure_daemon_ready`] when the spawn path is taken.
@@ -90,11 +91,14 @@ impl std::error::Error for DaemonReadyError {}
 
 /// Exponential-backoff schedule used by [`ensure_daemon_ready`] when
 /// it has to wait for a freshly-spawned daemon. 100, 200, 400, 800,
-/// 1600 ms — ≈3.1 s in aggregate before giving up.
+/// 1600 ms — ≈3.1 s in aggregate before giving up. Unix only —
+/// the Windows stub doesn't spawn anything.
+#[cfg(unix)]
 const READINESS_BACKOFF_MS: &[u64] = &[100, 200, 400, 800, 1600];
 
 /// Total timeout across the [`READINESS_BACKOFF_MS`] schedule. Used
 /// when reporting [`DaemonReadyError::NotReady`].
+#[cfg(unix)]
 fn readiness_total_timeout() -> Duration {
     Duration::from_millis(READINESS_BACKOFF_MS.iter().sum())
 }
