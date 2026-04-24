@@ -355,6 +355,37 @@ pub fn key_blobs_exist(dir: &Path, label: &str) -> Result<bool> {
     Ok(pub_path.exists() || priv_path.exists())
 }
 
+/// Rename the `.tpm_pub` / `.tpm_priv` blob files associated with a key.
+/// Does not touch metadata — callers combine with `metadata::rename_key_files`.
+pub fn rename_key_blobs(dir: &Path, old_label: &str, new_label: &str) -> Result<()> {
+    let [old_pub, old_priv] = blob_paths(dir, old_label)?;
+    let [new_pub, new_priv] = blob_paths(dir, new_label)?;
+    if new_pub.exists() || new_priv.exists() {
+        return Err(Error::DuplicateLabel {
+            label: new_label.to_string(),
+        });
+    }
+    if !old_pub.exists() && !old_priv.exists() {
+        return Err(Error::KeyNotFound {
+            label: old_label.to_string(),
+        });
+    }
+    let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (old, new) in [(old_pub, new_pub), (old_priv, new_priv)] {
+        if old.exists() {
+            if let Err(err) = std::fs::rename(&old, &new) {
+                // Roll back prior renames to keep the old label complete.
+                for (backed_old, backed_new) in renamed.iter().rev() {
+                    drop(std::fs::rename(backed_new, backed_old));
+                }
+                return Err(err.into());
+            }
+            renamed.push((old, new));
+        }
+    }
+    Ok(())
+}
+
 fn persist_cached_key_artifacts(
     dir: &Path,
     label: &str,

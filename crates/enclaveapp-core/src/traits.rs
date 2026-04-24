@@ -38,6 +38,26 @@ pub trait EnclaveKeyManager: Send + Sync {
             Err(e) => Err(e),
         }
     }
+
+    /// Rename a key from `old_label` to `new_label`, preserving all
+    /// backend-specific state (hardware handles, keychain entries, etc.)
+    /// and on-disk metadata. Fails if `new_label` already exists.
+    ///
+    /// Backends that store extra state keyed by the label (e.g. macOS
+    /// keychain wrapping-key entries) MUST override this so the rename
+    /// stays consistent. The default implementation only renames the
+    /// on-disk metadata files and is correct for backends whose key
+    /// material lives entirely on disk (software / keyring backends).
+    fn rename_key(&self, old_label: &str, new_label: &str) -> Result<()> {
+        let _ = (old_label, new_label);
+        Err(crate::Error::KeyOperation {
+            operation: "rename_key".into(),
+            detail: "this backend does not implement rename_key; \
+                     caller must implement the rename using the backend's \
+                     native primitives"
+                .into(),
+        })
+    }
 }
 
 /// ECDSA signing operations. Used by sshenc for SSH key signing.

@@ -122,6 +122,28 @@ impl EnclaveKeyManager for LinuxTpmSigner {
         tpm::list_labels(&self.config.keys_dir())
     }
 
+    fn rename_key(&self, old_label: &str, new_label: &str) -> Result<()> {
+        validate_label(old_label)?;
+        validate_label(new_label)?;
+        if old_label == new_label {
+            return Ok(());
+        }
+        let dir = self.config.keys_dir();
+        if !dir.exists() {
+            return Err(Error::KeyNotFound {
+                label: old_label.to_string(),
+            });
+        }
+        let _lock = DirLock::acquire(&dir)?;
+        tpm::rename_key_blobs(&dir, old_label, new_label)?;
+        if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label) {
+            // Roll the blob rename back so state stays consistent.
+            drop(tpm::rename_key_blobs(&dir, new_label, old_label));
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn delete_key(&self, label: &str) -> Result<()> {
         validate_label(label)?;
         let dir = self.config.keys_dir();

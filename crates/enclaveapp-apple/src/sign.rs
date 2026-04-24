@@ -59,6 +59,10 @@ impl EnclaveKeyManager for SecureEnclaveSigner {
         keychain::delete_key(&self.config, label)
     }
 
+    fn rename_key(&self, old_label: &str, new_label: &str) -> Result<()> {
+        keychain::rename_key(&self.config, old_label, new_label)
+    }
+
     fn is_available(&self) -> bool {
         keychain::is_available()
     }
