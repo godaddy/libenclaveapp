@@ -123,27 +123,29 @@ public func enclaveapp_se_generate_signing_key(
     _ data_rep_len: UnsafeMutablePointer<Int32>,
     _ auth_policy: Int32
 ) -> Int32 {
-    guard SecureEnclave.isAvailable else {
-        return SE_ERR_NOT_AVAILABLE
-    }
-
-    do {
-        let key: SecureEnclave.P256.Signing.PrivateKey
-        if auth_policy != 0 {
-            guard let accessControl = makeAccessControl(auth_policy) else {
-                return SE_ERR_GENERATE
-            }
-            key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: accessControl)
-        } else {
-            key = try SecureEnclave.P256.Signing.PrivateKey()
+    return traceDuration("se_generate_signing_key auth_policy=\(auth_policy)") {
+        guard SecureEnclave.isAvailable else {
+            return SE_ERR_NOT_AVAILABLE
         }
 
-        let rc = copyUncompressedPubKey(key.publicKey.rawRepresentation, pub_key_out, pub_key_len)
-        if rc != SE_OK { return rc }
+        do {
+            let key: SecureEnclave.P256.Signing.PrivateKey
+            if auth_policy != 0 {
+                guard let accessControl = makeAccessControl(auth_policy) else {
+                    return SE_ERR_GENERATE
+                }
+                key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: accessControl)
+            } else {
+                key = try SecureEnclave.P256.Signing.PrivateKey()
+            }
 
-        return copyDataRep(key.dataRepresentation, data_rep_out, data_rep_len)
-    } catch {
-        return SE_ERR_GENERATE
+            let rc = copyUncompressedPubKey(key.publicKey.rawRepresentation, pub_key_out, pub_key_len)
+            if rc != SE_OK { return rc }
+
+            return copyDataRep(key.dataRepresentation, data_rep_out, data_rep_len)
+        } catch {
+            return SE_ERR_GENERATE
+        }
     }
 }
 
@@ -155,12 +157,14 @@ public func enclaveapp_se_signing_public_key(
     _ pub_key_out: UnsafeMutablePointer<UInt8>,
     _ pub_key_len: UnsafeMutablePointer<Int32>
 ) -> Int32 {
-    do {
-        let data = Data(bytes: data_rep, count: Int(data_rep_len))
-        let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
-        return copyUncompressedPubKey(key.publicKey.rawRepresentation, pub_key_out, pub_key_len)
-    } catch {
-        return SE_ERR_LOAD
+    return traceDuration("se_signing_public_key") {
+        do {
+            let data = Data(bytes: data_rep, count: Int(data_rep_len))
+            let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
+            return copyUncompressedPubKey(key.publicKey.rawRepresentation, pub_key_out, pub_key_len)
+        } catch {
+            return SE_ERR_LOAD
+        }
     }
 }
 
@@ -176,25 +180,27 @@ public func enclaveapp_se_sign(
     _ sig_out: UnsafeMutablePointer<UInt8>,
     _ sig_len: UnsafeMutablePointer<Int32>
 ) -> Int32 {
-    do {
-        let keyData = Data(bytes: data_rep, count: Int(data_rep_len))
-        let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: keyData)
+    return traceDuration("se_sign message_len=\(message_len)") {
+        do {
+            let keyData = Data(bytes: data_rep, count: Int(data_rep_len))
+            let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: keyData)
 
-        let msgData = Data(bytes: message, count: Int(message_len))
-        let signature = try key.signature(for: msgData)
+            let msgData = Data(bytes: message, count: Int(message_len))
+            let signature = try key.signature(for: msgData)
 
-        let derSig = signature.derRepresentation
-        let derCount = Int32(derSig.count)
-        if sig_len.pointee < derCount {
+            let derSig = signature.derRepresentation
+            let derCount = Int32(derSig.count)
+            if sig_len.pointee < derCount {
+                sig_len.pointee = derCount
+                return SE_ERR_BUFFER_TOO_SMALL
+            }
+            derSig.copyBytes(to: sig_out, count: derSig.count)
             sig_len.pointee = derCount
-            return SE_ERR_BUFFER_TOO_SMALL
-        }
-        derSig.copyBytes(to: sig_out, count: derSig.count)
-        sig_len.pointee = derCount
 
-        return SE_OK
-    } catch {
-        return SE_ERR_SIGN
+            return SE_OK
+        } catch {
+            return SE_ERR_SIGN
+        }
     }
 }
 
@@ -260,6 +266,9 @@ public func enclaveapp_se_delete_key(
     let keyRef = Data(bytes: data_rep, count: Int(data_rep_len))
     let query: [String: Any] = [kSecValuePersistentRef as String: keyRef]
     let status = SecItemDelete(query as CFDictionary)
+    keychainTrace(
+        "op=se_key_delete data_rep_len=\(data_rep_len) status=\(status)"
+    )
 
     switch status {
     case errSecSuccess, errSecItemNotFound:
@@ -444,6 +453,71 @@ public func enclaveapp_se_decrypt(
 /// still the only API that reaches the legacy file-based keychain;
 /// the modern Data Protection keychain is unavailable on unsigned
 /// builds (see the top-of-module comment).
+// MARK: - Crypto-op timing and prompt-detection instrumentation
+//
+// Every FFI entrypoint below is wrapped with `traceDuration`, which
+// measures the wall-clock time of the whole Apple call (including
+// CryptoKit's internal `SecKeyCreateSignature` / `SecItemAdd` / …
+// invocations). Two outputs come from that measurement:
+//
+// 1. **Always-on, shippable warning**: if an op takes longer than
+//    the threshold (default 1000 ms, overridable via
+//    `ENCLAVEAPP_SLOW_OP_THRESHOLD_MS`), write a one-line warning to
+//    stderr. Human-visible password / Touch ID / passcode prompts
+//    block for ≥1000 ms so any crossing of the threshold almost
+//    certainly means a sheet appeared. Normal cold-cache or
+//    cold-process starts are well under this.
+// 2. **Opt-in verbose trace**: when `ENCLAVEAPP_KEYCHAIN_TRACE=1`
+//    is set, write a line for every op (under the threshold or
+//    above) and every inner `SecItem*` call with its OSStatus. Used
+//    for exhaustive debugging.
+//
+// The warning branch is cheap and always compiled in; it's safe to
+// ship. Users who never hit a prompt never see output.
+
+private let slowCryptoOpThresholdMs: UInt64 = {
+    if let raw = ProcessInfo.processInfo.environment["ENCLAVEAPP_SLOW_OP_THRESHOLD_MS"],
+       let parsed = UInt64(raw) {
+        return parsed
+    }
+    return 1000
+}()
+
+private let keychainTraceEnabled: Bool = {
+    ProcessInfo.processInfo.environment["ENCLAVEAPP_KEYCHAIN_TRACE"] == "1"
+}()
+
+/// Emit a detail line (inner `SecItem*` OSStatus, etc.) when verbose
+/// trace mode is on. No-op otherwise.
+private func keychainTrace(_ line: @autoclosure () -> String) {
+    guard keychainTraceEnabled else { return }
+    FileHandle.standardError.write(Data(("keychain_trace: " + line() + "\n").utf8))
+}
+
+/// Measure the duration of `body`. On crossing the slow-op threshold
+/// emit a shippable warning (suspected prompt); in verbose mode,
+/// always emit a timing line for every call.
+private func traceDuration<T>(_ op: String, _ body: () -> T) -> T {
+    let start = DispatchTime.now()
+    let result = body()
+    let elapsed_ms =
+        (DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+
+    if elapsed_ms >= slowCryptoOpThresholdMs {
+        FileHandle.standardError.write(Data((
+            "enclaveapp: crypto op '\(op)' took \(elapsed_ms)ms " +
+            "(threshold=\(slowCryptoOpThresholdMs)ms) — likely triggered a " +
+            "password / biometric prompt. Set ENCLAVEAPP_KEYCHAIN_TRACE=1 " +
+            "for per-call detail.\n"
+        ).utf8))
+    } else if keychainTraceEnabled {
+        FileHandle.standardError.write(Data(
+            "keychain_trace: op=\(op) elapsed_ms=\(elapsed_ms)\n".utf8
+        ))
+    }
+    return result
+}
+
 /// Return `true` when Security.framework can locate a default
 /// keychain for this process. Query-only — it never prompts.
 private func hasDefaultKeychain() -> Bool {
@@ -513,7 +587,8 @@ public func enclaveapp_keychain_store(
     _ secret: UnsafePointer<UInt8>, _ secret_len: Int32,
     _ use_user_presence: Int32
 ) -> Int32 {
-    guard let serviceStr = makeServiceString(service, service_len) else {
+    return traceDuration("keychain_store userPresence=\(use_user_presence)") {
+      guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_STORE
     }
     guard let accountStr = makeAccountString(account, account_len) else {
@@ -542,7 +617,10 @@ public func enclaveapp_keychain_store(
         kSecAttrAccount as String: accountStr,
     ]
     if let kc = kc { deleteQuery[kSecMatchSearchList as String] = [kc] }
-    _ = SecItemDelete(deleteQuery as CFDictionary)
+    let predeleteStatus = SecItemDelete(deleteQuery as CFDictionary)
+    keychainTrace(
+        "op=store_predelete service=\(serviceStr) account=\(accountStr) status=\(predeleteStatus)"
+    )
 
     var addQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
@@ -570,6 +648,9 @@ public func enclaveapp_keychain_store(
     }
     if let kc = kc { addQuery[kSecUseKeychain as String] = kc }
     var status = SecItemAdd(addQuery as CFDictionary, nil)
+    keychainTrace(
+        "op=store_add service=\(serviceStr) account=\(accountStr) userPresence=\(use_user_presence) status=\(status)"
+    )
 
     // `.userPresence` / `kSecAttrAccessControl` only works on the
     // Data Protection keychain, which returns `errSecMissingEntitlement`
@@ -593,9 +674,13 @@ public func enclaveapp_keychain_store(
         addQuery[kSecAttrAccessible as String] =
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         status = SecItemAdd(addQuery as CFDictionary, nil)
+        keychainTrace(
+            "op=store_add_fallback service=\(serviceStr) account=\(accountStr) status=\(status)"
+        )
     }
 
     return status == errSecSuccess ? SE_OK : SE_ERR_KEYCHAIN_STORE
+    }
 }
 
 /// Load a previously-stored secret by service+account. Returns
@@ -606,7 +691,8 @@ public func enclaveapp_keychain_load(
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
     _ secret_out: UnsafeMutablePointer<UInt8>, _ secret_len: UnsafeMutablePointer<Int32>
 ) -> Int32 {
-    guard let serviceStr = makeServiceString(service, service_len) else {
+    return traceDuration("keychain_load") {
+        guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_LOAD
     }
     guard let accountStr = makeAccountString(account, account_len) else {
@@ -629,6 +715,9 @@ public func enclaveapp_keychain_load(
     if let kc = kc { query[kSecMatchSearchList as String] = [kc] }
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
+    keychainTrace(
+        "op=load service=\(serviceStr) account=\(accountStr) status=\(status)"
+    )
     if status == errSecItemNotFound {
         return SE_ERR_KEYCHAIN_NOT_FOUND
     }
@@ -647,6 +736,7 @@ public func enclaveapp_keychain_load(
     data.copyBytes(to: secret_out, count: data.count)
     secret_len.pointee = count
     return SE_OK
+    }
 }
 
 /// Delete the generic-password entry for a service+account pair. It is
@@ -657,31 +747,36 @@ public func enclaveapp_keychain_delete(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
     _ account: UnsafePointer<UInt8>, _ account_len: Int32
 ) -> Int32 {
-    guard let serviceStr = makeServiceString(service, service_len) else {
+    return traceDuration("keychain_delete") {
+        guard let serviceStr = makeServiceString(service, service_len) else {
+            return SE_ERR_KEYCHAIN_DELETE
+        }
+        guard let accountStr = makeAccountString(account, account_len) else {
+            return SE_ERR_KEYCHAIN_DELETE
+        }
+
+        let useExplicit = !hasDefaultKeychain()
+        let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
+        if useExplicit && kc == nil {
+            // Delete is idempotent — report not-found so the Rust
+            // caller treats the entry as already-gone rather than
+            // erroring out.
+            return SE_ERR_KEYCHAIN_NOT_FOUND
+        }
+
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceStr,
+            kSecAttrAccount as String: accountStr,
+        ]
+        if let kc = kc { query[kSecMatchSearchList as String] = [kc] }
+        let status = SecItemDelete(query as CFDictionary)
+        keychainTrace(
+            "op=delete service=\(serviceStr) account=\(accountStr) status=\(status)"
+        )
+        if status == errSecSuccess || status == errSecItemNotFound {
+            return SE_OK
+        }
         return SE_ERR_KEYCHAIN_DELETE
     }
-    guard let accountStr = makeAccountString(account, account_len) else {
-        return SE_ERR_KEYCHAIN_DELETE
-    }
-
-    let useExplicit = !hasDefaultKeychain()
-    let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
-    if useExplicit && kc == nil {
-        // Delete is idempotent — report not-found so the Rust
-        // caller treats the entry as already-gone rather than
-        // erroring out.
-        return SE_ERR_KEYCHAIN_NOT_FOUND
-    }
-
-    var query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: serviceStr,
-        kSecAttrAccount as String: accountStr,
-    ]
-    if let kc = kc { query[kSecMatchSearchList as String] = [kc] }
-    let status = SecItemDelete(query as CFDictionary)
-    if status == errSecSuccess || status == errSecItemNotFound {
-        return SE_OK
-    }
-    return SE_ERR_KEYCHAIN_DELETE
 }
