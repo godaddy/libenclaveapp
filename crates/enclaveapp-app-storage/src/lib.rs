@@ -88,6 +88,19 @@ pub struct StorageConfig {
     /// libtss2 TPM probing. Linux only — ignored on macOS and Windows.
     /// Useful for testing the keyring path from WSL environments.
     pub force_keyring: bool,
+    /// (macOS only) Protect the wrapping-key keychain item with a
+    /// `SecAccessControl(.userPresence)` flag so access is gated on
+    /// Touch ID / device passcode instead of the legacy code-signature
+    /// ACL. Trades a one-time LocalAuthentication prompt per process
+    /// (combined with `wrapping_key_cache_ttl`) for the elimination of
+    /// the "Always Allow" dialog that otherwise re-appears on every
+    /// unsigned-binary rebuild. Default: `false`.
+    pub wrapping_key_user_presence: bool,
+    /// (macOS only) How long the process may re-use a loaded wrapping
+    /// key without another keychain round-trip (and, on user-presence
+    /// items, another LocalAuthentication prompt). `Duration::ZERO`
+    /// disables the cache. Default: `ZERO`.
+    pub wrapping_key_cache_ttl: std::time::Duration,
 }
 
 /// Environment variable that, when the `mock` cargo feature is
@@ -148,6 +161,8 @@ mod tests {
             extra_bridge_paths: vec![],
             keys_dir: None,
             force_keyring: false,
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("test"));
@@ -163,6 +178,8 @@ mod tests {
             extra_bridge_paths: vec!["/custom/path".into()],
             keys_dir: Some(std::path::PathBuf::from("/custom/keys")),
             force_keyring: false,
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, "test");

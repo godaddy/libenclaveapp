@@ -25,3 +25,8 @@ mod sign;
 pub use encrypt::SecureEnclaveEncryptor;
 #[cfg(all(target_os = "macos", feature = "signing"))]
 pub use sign::SecureEnclaveSigner;
+
+// Export the keychain config so consumers can opt into
+// wrapping-key user-presence and cache-TTL before constructing a signer.
+#[cfg(target_os = "macos")]
+pub use keychain::KeychainConfig;

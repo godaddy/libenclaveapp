@@ -111,10 +111,11 @@ impl AppEncryptionStorage {
     #[cfg(target_os = "macos")]
     fn init_macos(config: &StorageConfig) -> Result<Self> {
         let keys_dir = Self::resolved_keys_dir(config);
-        let encryptor = enclaveapp_apple::SecureEnclaveEncryptor::with_keys_dir(
-            &config.app_name,
-            keys_dir.clone(),
-        );
+        let keychain_config =
+            enclaveapp_apple::KeychainConfig::with_keys_dir(&config.app_name, keys_dir.clone())
+                .with_user_presence(config.wrapping_key_user_presence)
+                .with_cache_ttl(config.wrapping_key_cache_ttl);
+        let encryptor = enclaveapp_apple::SecureEnclaveEncryptor::with_config(keychain_config);
 
         if !encryptor.is_available() {
             return Err(StorageError::NotAvailable);
@@ -475,6 +476,8 @@ mod tests {
             extra_bridge_paths: vec![],
             keys_dir: Some(keys_dir.to_path_buf()),
             force_keyring: false,
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
         }
     }
 

@@ -352,6 +352,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

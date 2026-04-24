@@ -20,6 +20,19 @@ pub struct KeychainConfig {
     /// Optional override for the keys directory. If None, uses the standard
     /// platform path (~/.config/<app_name>/keys/ on Unix).
     pub keys_dir_override: Option<PathBuf>,
+    /// When `true`, new wrapping-key entries are protected with
+    /// `SecAccessControl(.userPresence)` instead of the legacy
+    /// code-signature ACL. Access then requires Touch ID or the
+    /// device passcode — but is tied to the user, not the binary's
+    /// signature, so rebuilding an unsigned binary no longer
+    /// invalidates access. Defaults to `false` for backward
+    /// compatibility; callers opt in per-app.
+    pub wrapping_key_user_presence: bool,
+    /// How long a loaded wrapping key may be reused without another
+    /// keychain round-trip (and, on user-presence items, another
+    /// LocalAuthentication prompt). `Duration::ZERO` disables the
+    /// cache entirely. Defaults to `ZERO` for backward compatibility.
+    pub wrapping_key_cache_ttl: std::time::Duration,
 }
 
 impl KeychainConfig {
@@ -27,6 +40,8 @@ impl KeychainConfig {
         KeychainConfig {
             app_name: app_name.to_string(),
             keys_dir_override: None,
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
         }
     }
 
@@ -35,7 +50,23 @@ impl KeychainConfig {
         KeychainConfig {
             app_name: app_name.to_string(),
             keys_dir_override: Some(keys_dir),
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
         }
+    }
+
+    /// Return a new config with `wrapping_key_user_presence` set.
+    #[must_use]
+    pub fn with_user_presence(mut self, enabled: bool) -> Self {
+        self.wrapping_key_user_presence = enabled;
+        self
+    }
+
+    /// Return a new config with the wrapping-key cache TTL set.
+    #[must_use]
+    pub fn with_cache_ttl(mut self, ttl: std::time::Duration) -> Self {
+        self.wrapping_key_cache_ttl = ttl;
+        self
     }
 
     pub fn keys_dir(&self) -> PathBuf {
@@ -200,7 +231,12 @@ pub fn generate_and_save_key(
     let app_name = config.app_name.clone();
     let app_name_for_cleanup = app_name.clone();
     let label_owned = label.to_string();
-    if let Err(error) = crate::keychain_wrap::keychain_store(&app_name, label, &wrapping_key) {
+    if let Err(error) = crate::keychain_wrap::keychain_store(
+        &app_name,
+        label,
+        &wrapping_key,
+        config.wrapping_key_user_presence,
+    ) {
         // The SE key was created but we can't store its wrapping key —
         // roll back the SE key so we don't leave an orphaned key that
         // we can never reload.
@@ -318,13 +354,22 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
 
     // Load the source's wrapping key up front; this is also the existence
     // check. A missing source means `KeyNotFound` per the trait contract.
-    let wrapping_key = crate::keychain_wrap::keychain_load(&config.app_name, old_label)?
-        .ok_or_else(|| Error::KeyNotFound {
-            label: old_label.to_string(),
-        })?;
+    // Use `Duration::ZERO` for the cache TTL so the rename always reads
+    // the live keychain state; caching during a rename operation would
+    // risk re-using a value that a concurrent operation invalidated.
+    let wrapping_key = crate::keychain_wrap::keychain_load(
+        &config.app_name,
+        old_label,
+        std::time::Duration::ZERO,
+    )?
+    .ok_or_else(|| Error::KeyNotFound {
+        label: old_label.to_string(),
+    })?;
 
     // Reject collision at the target label — both in keychain and on disk.
-    if crate::keychain_wrap::keychain_load(&config.app_name, new_label)?.is_some() {
+    if crate::keychain_wrap::keychain_load(&config.app_name, new_label, std::time::Duration::ZERO)?
+        .is_some()
+    {
         return Err(Error::DuplicateLabel {
             label: new_label.to_string(),
         });
@@ -336,9 +381,12 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
     // Install the wrapping key under the new label. If this fails, roll
     // back the disk rename so we don't leave a handle file whose
     // wrapping key is unreachable.
-    if let Err(error) =
-        crate::keychain_wrap::keychain_store(&config.app_name, new_label, &wrapping_key)
-    {
+    if let Err(error) = crate::keychain_wrap::keychain_store(
+        &config.app_name,
+        new_label,
+        &wrapping_key,
+        config.wrapping_key_user_presence,
+    ) {
         let rollback = metadata::rename_key_files(&dir, new_label, old_label);
         if let Err(rollback_err) = rollback {
             tracing::error!(
@@ -392,7 +440,11 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
         return Ok(contents);
     }
 
-    let wrapping_key = match crate::keychain_wrap::keychain_load(&config.app_name, label)? {
+    let wrapping_key = match crate::keychain_wrap::keychain_load(
+        &config.app_name,
+        label,
+        config.wrapping_key_cache_ttl,
+    )? {
         Some(k) => k,
         None => {
             return Err(Error::KeyOperation {

@@ -173,6 +173,8 @@ impl EncryptedFileSecretStore {
                 extra_bridge_paths: Vec::new(),
                 keys_dir: None,
                 force_keyring: false,
+                wrapping_key_user_presence: false,
+                wrapping_key_cache_ttl: std::time::Duration::ZERO,
             })
             .map_err(|error| error.to_string())
         }) {

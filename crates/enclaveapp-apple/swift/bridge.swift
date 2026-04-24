@@ -498,11 +498,20 @@ private func makeServiceString(_ service: UnsafePointer<UInt8>, _ len: Int32) ->
 /// Store (or replace) an opaque secret in the keychain as a generic
 /// password. Any existing entry with the same service+account pair is
 /// removed first, so the call is effectively an upsert.
+///
+/// When `use_user_presence` is non-zero the item is protected by a
+/// `.userPresence` access-control flag (biometric-or-device-passcode)
+/// instead of the default code-signature ACL. Accessing the item then
+/// triggers a LocalAuthentication prompt instead of the legacy keychain
+/// "Always Allow" dialog, and the authorization is tied to the user
+/// rather than to a specific binary signature — so rebuilding an
+/// unsigned binary no longer invalidates access.
 @_cdecl("enclaveapp_keychain_store")
 public func enclaveapp_keychain_store(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
-    _ secret: UnsafePointer<UInt8>, _ secret_len: Int32
+    _ secret: UnsafePointer<UInt8>, _ secret_len: Int32,
+    _ use_user_presence: Int32
 ) -> Int32 {
     guard let serviceStr = makeServiceString(service, service_len) else {
         return SE_ERR_KEYCHAIN_STORE
@@ -540,8 +549,25 @@ public func enclaveapp_keychain_store(
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
         kSecValueData as String: secretData,
-        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
     ]
+    if use_user_presence != 0 {
+        // Bind access to user presence (Touch ID or device passcode)
+        // via LocalAuthentication. `kSecAttrAccessControl` implies
+        // accessibility, so `kSecAttrAccessible` must NOT also be set.
+        var acError: Unmanaged<CFError>?
+        guard let ac = SecAccessControlCreateWithFlags(
+            nil,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            .userPresence,
+            &acError
+        ) else {
+            acError?.release()
+            return SE_ERR_KEYCHAIN_STORE
+        }
+        addQuery[kSecAttrAccessControl as String] = ac
+    } else {
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    }
     if let kc = kc { addQuery[kSecUseKeychain as String] = kc }
     let status = SecItemAdd(addQuery as CFDictionary, nil)
     return status == errSecSuccess ? SE_OK : SE_ERR_KEYCHAIN_STORE

@@ -49,6 +49,10 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use enclaveapp_core::{Error, Result};
 use rand::TryRngCore;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 use crate::ffi;
 
@@ -160,13 +164,134 @@ pub fn service_name_for(app_name: &str) -> String {
     format!("com.libenclaveapp.{app_name}")
 }
 
+// -----------------------------------------------------------------------
+// Process-local wrapping-key cache
+// -----------------------------------------------------------------------
+//
+// The SE handle on disk is wrapped under a 32-byte AES key that lives in
+// the macOS keychain. When a keychain item is protected with
+// `SecAccessControlCreateWithFlags([.userPresence])`, every
+// `SecItemCopyMatching` against it triggers a LocalAuthentication prompt
+// (Touch ID or device passcode). That's strictly better than the legacy
+// code-signature ACL — rebuilding an unsigned binary no longer
+// invalidates access — but a per-sign prompt is unusable.
+//
+// We bridge that gap with a short-lived in-process cache: once the user
+// authenticates, the 32-byte wrapping key is held in memory for a
+// caller-supplied TTL, during which subsequent decrypt operations skip
+// the keychain round-trip (and the prompt).
+//
+// Hardening:
+//   - Each cached key lives in a `Box<Zeroizing<[u8; 32]>>` — the `Box`
+//     gives a stable heap address even when the HashMap re-hashes, and
+//     the `Zeroizing` Drop impl clears the memory when the entry
+//     expires or the process exits.
+//   - On creation we call `mlock_buffer` to keep the region out of swap.
+//   - We rely on the binary already having called
+//     `enclaveapp_core::process::harden_process()` at startup to disable
+//     core dumps (`RLIMIT_CORE=0` on macOS, `PR_SET_DUMPABLE=0` on
+//     Linux) so the cache can't be recovered from a crash dump.
+//
+// What this does NOT protect against: a same-UID attacker with
+// `task_for_pid` / `ptrace` debug entitlement can still read live
+// memory. That attacker already wins against any SSH agent, so it is
+// inherently out of scope.
+
+struct LockedWrappingKey {
+    // `Box` → stable heap address for the `mlock` pointer even when
+    // the enclosing HashMap resizes. `Zeroizing` → the 32 bytes are
+    // overwritten on Drop.
+    key: Box<Zeroizing<[u8; WRAP_KEY_LEN]>>,
+    inserted_at: Instant,
+    mlocked: bool,
+}
+
+impl LockedWrappingKey {
+    fn new(bytes: [u8; WRAP_KEY_LEN]) -> Self {
+        let boxed = Box::new(Zeroizing::new(bytes));
+        let ptr = (**boxed).as_ptr();
+        let mlocked = enclaveapp_core::process::mlock_buffer(ptr, WRAP_KEY_LEN);
+        Self {
+            key: boxed,
+            inserted_at: Instant::now(),
+            mlocked,
+        }
+    }
+
+    fn bytes(&self) -> [u8; WRAP_KEY_LEN] {
+        **self.key
+    }
+
+    fn age(&self) -> Duration {
+        self.inserted_at.elapsed()
+    }
+}
+
+impl Drop for LockedWrappingKey {
+    fn drop(&mut self) {
+        if self.mlocked {
+            let ptr = (**self.key).as_ptr();
+            let _ = enclaveapp_core::process::munlock_buffer(ptr, WRAP_KEY_LEN);
+        }
+        // Box drops → Zeroizing drops → bytes zeroed.
+    }
+}
+
+type CacheMap = HashMap<(String, String), LockedWrappingKey>;
+
+fn cache() -> &'static Mutex<CacheMap> {
+    static CACHE: OnceLock<Mutex<CacheMap>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_lookup(app_name: &str, label: &str, ttl: Duration) -> Option<[u8; WRAP_KEY_LEN]> {
+    if ttl.is_zero() {
+        return None;
+    }
+    let mut guard = cache().lock().ok()?;
+    let key = (app_name.to_string(), label.to_string());
+    if let Some(entry) = guard.get(&key) {
+        if entry.age() < ttl {
+            return Some(entry.bytes());
+        }
+    }
+    // Expired — drop it so the Zeroize + munlock runs now, not at the
+    // next insert.
+    guard.remove(&key);
+    None
+}
+
+fn cache_insert(app_name: &str, label: &str, bytes: [u8; WRAP_KEY_LEN], ttl: Duration) {
+    if ttl.is_zero() {
+        return;
+    }
+    if let Ok(mut guard) = cache().lock() {
+        guard.insert(
+            (app_name.to_string(), label.to_string()),
+            LockedWrappingKey::new(bytes),
+        );
+    }
+}
+
+fn cache_evict(app_name: &str, label: &str) {
+    if let Ok(mut guard) = cache().lock() {
+        guard.remove(&(app_name.to_string(), label.to_string()));
+    }
+}
+
 /// Store a wrapping key in the login keychain. Replaces any existing
 /// entry for the same service+account pair.
+///
+/// When `use_user_presence` is `true` the item is stored with a
+/// `.userPresence` access-control flag so subsequent reads trigger a
+/// LocalAuthentication prompt (Touch ID or device passcode) instead of
+/// the legacy code-signature ACL dialog.
 #[allow(unsafe_code)]
 pub fn keychain_store(
     app_name: &str,
     label: &str,
     wrapping_key: &[u8; WRAP_KEY_LEN],
+    use_user_presence: bool,
 ) -> Result<()> {
     let service = service_name_for(app_name);
     let service_bytes = service.as_bytes();
@@ -194,9 +319,12 @@ pub fn keychain_store(
             account_len,
             wrapping_key.as_ptr(),
             secret_len,
+            if use_user_presence { 1 } else { 0 },
         )
     };
     if rc == 0 {
+        // Overwriting an item — any cached copy is stale.
+        cache_evict(app_name, label);
         Ok(())
     } else {
         Err(Error::KeyOperation {
@@ -206,14 +334,25 @@ pub fn keychain_store(
     }
 }
 
-/// Load a wrapping key from the login keychain.
+/// Load a wrapping key from the login keychain, consulting the
+/// process-local cache first.
 ///
-/// Returns `None` if no entry exists for this service+account pair. That
-/// case is distinguished from a hard error (Keychain locked, access
-/// denied) so callers can decide between migration-from-plaintext and
-/// real failure.
+/// `cache_ttl` controls how long a loaded key may be reused for
+/// subsequent calls without re-consulting the keychain. Pass
+/// `Duration::ZERO` to disable the cache entirely (every call hits the
+/// keychain and, on user-presence items, re-prompts).
+///
+/// Returns `None` if no entry exists for this service+account pair.
 #[allow(unsafe_code)]
-pub fn keychain_load(app_name: &str, label: &str) -> Result<Option<[u8; WRAP_KEY_LEN]>> {
+pub fn keychain_load(
+    app_name: &str,
+    label: &str,
+    cache_ttl: Duration,
+) -> Result<Option<[u8; WRAP_KEY_LEN]>> {
+    if let Some(cached) = cache_lookup(app_name, label, cache_ttl) {
+        return Ok(Some(cached));
+    }
+
     let service = service_name_for(app_name);
     let service_bytes = service.as_bytes();
     let account_bytes = label.as_bytes();
@@ -242,6 +381,7 @@ pub fn keychain_load(app_name: &str, label: &str) -> Result<Option<[u8; WRAP_KEY
                     ),
                 });
             }
+            cache_insert(app_name, label, out, cache_ttl);
             Ok(Some(out))
         }
         12 => Ok(None), // SE_ERR_KEYCHAIN_NOT_FOUND
@@ -252,11 +392,13 @@ pub fn keychain_load(app_name: &str, label: &str) -> Result<Option<[u8; WRAP_KEY
     }
 }
 
-/// Delete a wrapping-key entry from the login keychain. Idempotent —
-/// treating "not found" as success so `delete_key` can clean up stale
-/// state without racing itself.
+/// Delete a wrapping-key entry from the login keychain and the
+/// process-local cache. Idempotent — "not found" is success so
+/// `delete_key` can clean up stale state without racing itself.
 #[allow(unsafe_code)]
 pub fn keychain_delete(app_name: &str, label: &str) -> Result<()> {
+    cache_evict(app_name, label);
+
     let service = service_name_for(app_name);
     let service_bytes = service.as_bytes();
     let account_bytes = label.as_bytes();
@@ -521,8 +663,10 @@ mod tests {
         let _guard = KeychainEntryGuard::new(TEST_APP, &label);
 
         let key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &key).unwrap();
-        let loaded = keychain_load(TEST_APP, &label).unwrap().unwrap();
+        keychain_store(TEST_APP, &label, &key, false).unwrap();
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded, key, "loaded wrapping key must equal stored");
     }
 
@@ -530,7 +674,7 @@ mod tests {
     fn keychain_load_missing_returns_none() {
         let label = unique_test_label("missing");
         // No guard needed — we never stored anything.
-        let loaded = keychain_load(TEST_APP, &label).unwrap();
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO).unwrap();
         assert!(loaded.is_none(), "load of absent entry must return None");
     }
 
@@ -541,10 +685,12 @@ mod tests {
 
         let k1 = generate_wrapping_key();
         let k2 = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &k1).unwrap();
+        keychain_store(TEST_APP, &label, &k1, false).unwrap();
         // Store again with a DIFFERENT key — should replace, not error.
-        keychain_store(TEST_APP, &label, &k2).unwrap();
-        let loaded = keychain_load(TEST_APP, &label).unwrap().unwrap();
+        keychain_store(TEST_APP, &label, &k2, false).unwrap();
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded, k2, "second store must overwrite first");
     }
 
@@ -563,11 +709,15 @@ mod tests {
         let _guard = KeychainEntryGuard::new(TEST_APP, &label);
 
         let key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &key).unwrap();
-        assert!(keychain_load(TEST_APP, &label).unwrap().is_some());
+        keychain_store(TEST_APP, &label, &key, false).unwrap();
+        assert!(keychain_load(TEST_APP, &label, Duration::ZERO)
+            .unwrap()
+            .is_some());
         keychain_delete(TEST_APP, &label).unwrap();
         assert!(
-            keychain_load(TEST_APP, &label).unwrap().is_none(),
+            keychain_load(TEST_APP, &label, Duration::ZERO)
+                .unwrap()
+                .is_none(),
             "load after delete must return None"
         );
     }
@@ -582,14 +732,31 @@ mod tests {
 
         let ka = generate_wrapping_key();
         let kb = generate_wrapping_key();
-        keychain_store(TEST_APP, &label_a, &ka).unwrap();
-        keychain_store(TEST_APP, &label_b, &kb).unwrap();
-        assert_eq!(keychain_load(TEST_APP, &label_a).unwrap().unwrap(), ka);
-        assert_eq!(keychain_load(TEST_APP, &label_b).unwrap().unwrap(), kb);
+        keychain_store(TEST_APP, &label_a, &ka, false).unwrap();
+        keychain_store(TEST_APP, &label_b, &kb, false).unwrap();
+        assert_eq!(
+            keychain_load(TEST_APP, &label_a, Duration::ZERO)
+                .unwrap()
+                .unwrap(),
+            ka
+        );
+        assert_eq!(
+            keychain_load(TEST_APP, &label_b, Duration::ZERO)
+                .unwrap()
+                .unwrap(),
+            kb
+        );
         // Deleting A does not affect B.
         keychain_delete(TEST_APP, &label_a).unwrap();
-        assert!(keychain_load(TEST_APP, &label_a).unwrap().is_none());
-        assert_eq!(keychain_load(TEST_APP, &label_b).unwrap().unwrap(), kb);
+        assert!(keychain_load(TEST_APP, &label_a, Duration::ZERO)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            keychain_load(TEST_APP, &label_b, Duration::ZERO)
+                .unwrap()
+                .unwrap(),
+            kb
+        );
     }
 
     #[test]
@@ -603,10 +770,20 @@ mod tests {
 
         let kx = generate_wrapping_key();
         let ky = generate_wrapping_key();
-        keychain_store(&app_x, &label, &kx).unwrap();
-        keychain_store(&app_y, &label, &ky).unwrap();
-        assert_eq!(keychain_load(&app_x, &label).unwrap().unwrap(), kx);
-        assert_eq!(keychain_load(&app_y, &label).unwrap().unwrap(), ky);
+        keychain_store(&app_x, &label, &kx, false).unwrap();
+        keychain_store(&app_y, &label, &ky, false).unwrap();
+        assert_eq!(
+            keychain_load(&app_x, &label, Duration::ZERO)
+                .unwrap()
+                .unwrap(),
+            kx
+        );
+        assert_eq!(
+            keychain_load(&app_y, &label, Duration::ZERO)
+                .unwrap()
+                .unwrap(),
+            ky
+        );
     }
 
     #[test]
@@ -618,12 +795,14 @@ mod tests {
 
         let plaintext = b"simulated SE dataRepresentation blob with \x00 null \xff bytes";
         let key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &key).unwrap();
+        keychain_store(TEST_APP, &label, &key, false).unwrap();
         let wrapped = encrypt_blob(&key, plaintext).unwrap();
 
         // Now the real load path: get the wrapping key back from the
         // keychain and decrypt the blob.
-        let loaded_key = keychain_load(TEST_APP, &label).unwrap().unwrap();
+        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO)
+            .unwrap()
+            .unwrap();
         let recovered = decrypt_blob(&loaded_key, &wrapped).unwrap();
         assert_eq!(recovered, plaintext);
     }
@@ -640,8 +819,10 @@ mod tests {
         let real_key = generate_wrapping_key();
         let wrapped = encrypt_blob(&real_key, b"secret").unwrap();
         let swapped_key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &swapped_key).unwrap();
-        let loaded_key = keychain_load(TEST_APP, &label).unwrap().unwrap();
+        keychain_store(TEST_APP, &label, &swapped_key, false).unwrap();
+        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO)
+            .unwrap()
+            .unwrap();
         assert_ne!(loaded_key, real_key);
         let err = decrypt_blob(&loaded_key, &wrapped).unwrap_err();
         assert!(err.to_string().contains("AES-GCM decrypt"));

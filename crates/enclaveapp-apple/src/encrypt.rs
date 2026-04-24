@@ -31,6 +31,13 @@ impl SecureEnclaveEncryptor {
             config: KeychainConfig::with_keys_dir(app_name, keys_dir),
         }
     }
+
+    /// Create an encryptor from a pre-built `KeychainConfig`. Use this
+    /// to supply non-default `wrapping_key_user_presence` /
+    /// `wrapping_key_cache_ttl` settings.
+    pub fn with_config(config: KeychainConfig) -> Self {
+        SecureEnclaveEncryptor { config }
+    }
 }
 
 impl EnclaveKeyManager for SecureEnclaveEncryptor {

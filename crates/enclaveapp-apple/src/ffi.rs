@@ -89,6 +89,7 @@ extern "C" {
         account_len: i32,
         secret: *const u8,
         secret_len: i32,
+        use_user_presence: i32,
     ) -> i32;
 
     pub fn enclaveapp_keychain_load(

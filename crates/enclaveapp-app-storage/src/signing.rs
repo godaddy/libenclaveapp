@@ -170,8 +170,11 @@ impl AppSigningBackend {
             .keys_dir
             .clone()
             .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
-        let signer =
-            enclaveapp_apple::SecureEnclaveSigner::with_keys_dir(&config.app_name, keys_dir);
+        let keychain_config =
+            enclaveapp_apple::KeychainConfig::with_keys_dir(&config.app_name, keys_dir)
+                .with_user_presence(config.wrapping_key_user_presence)
+                .with_cache_ttl(config.wrapping_key_cache_ttl);
+        let signer = enclaveapp_apple::SecureEnclaveSigner::with_config(keychain_config);
 
         if !signer.is_available() {
             return Err(StorageError::NotAvailable);
