@@ -25,6 +25,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
 tracing = "0.1"
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
