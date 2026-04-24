@@ -203,11 +203,7 @@ mod tests {
     /// socket creation succeeds regardless of temp-dir layout.
     fn unique_socket(tag: &str) -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = PathBuf::from("/tmp").join(format!(
-            "eacd-{}-{}-{tag}",
-            std::process::id(),
-            id
-        ));
+        let dir = PathBuf::from("/tmp").join(format!("eacd-{}-{}-{tag}", std::process::id(), id));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("d.sock")
     }
