@@ -195,15 +195,21 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Build a unique socket path under a short root to stay under
+    /// macOS's 104-byte `SUN_LEN` limit. `std::env::temp_dir()` on
+    /// GitHub's macos-latest runner resolves to a deeply-nested
+    /// `/private/var/folders/…/T/` which, with a descriptive per-
+    /// test suffix, blows past the cap — stick to `/tmp` so Unix
+    /// socket creation succeeds regardless of temp-dir layout.
     fn unique_socket(tag: &str) -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "enclaveapp-daemon-test-{}-{}-{tag}",
+        let dir = PathBuf::from("/tmp").join(format!(
+            "eacd-{}-{}-{tag}",
             std::process::id(),
             id
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("daemon.sock")
+        dir.join("d.sock")
     }
 
     #[test]
