@@ -6,8 +6,10 @@
 //! This crate provides the core abstractions shared across macOS Secure Enclave,
 //! Windows TPM 2.0, and WSL bridge implementations.
 
+pub mod bin_discovery;
 pub mod config;
 pub mod config_block;
+pub mod daemon;
 pub mod error;
 pub mod metadata;
 pub mod platform;
