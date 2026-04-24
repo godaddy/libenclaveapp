@@ -80,8 +80,11 @@ pub fn is_wrapped_handle(bytes: &[u8]) -> bool {
 }
 
 /// Generate a fresh 32-byte AES-256 wrapping key from the OS CSPRNG.
+///
+/// **Internal helper.** External callers should use
+/// [`generate_and_wrap`] instead.
 #[must_use]
-pub fn generate_wrapping_key() -> [u8; WRAP_KEY_LEN] {
+pub(crate) fn generate_wrapping_key() -> [u8; WRAP_KEY_LEN] {
     let mut key = [0_u8; WRAP_KEY_LEN];
     rand::rngs::OsRng
         .try_fill_bytes(&mut key)
@@ -93,7 +96,11 @@ pub fn generate_wrapping_key() -> [u8; WRAP_KEY_LEN] {
 ///
 /// Returns `magic || nonce || ciphertext || tag`. Empty plaintext is
 /// handled; the output is always at least `WRAP_MIN_LEN` bytes.
-pub fn encrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
+///
+/// **Internal helper.** External callers should use
+/// [`generate_and_wrap`] instead, which keeps the wrapping-key bytes
+/// inside this module.
+pub(crate) fn encrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(wrapping_key).map_err(|e| Error::KeyOperation {
         operation: "keychain_wrap_encrypt".into(),
         detail: format!("Aes256Gcm::new: {e}"),
@@ -123,7 +130,11 @@ pub fn encrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], plaintext: &[u8]) -> Resu
 /// Decrypt a wrapped handle blob. Returns the original `dataRepresentation`.
 ///
 /// Input must start with `WRAP_MAGIC`; call [`is_wrapped_handle`] first.
-pub fn decrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], blob: &[u8]) -> Result<Vec<u8>> {
+///
+/// **Internal helper.** External callers should use
+/// [`decrypt_with_cached_key`] instead, which keeps the wrapping-key
+/// bytes inside this module.
+pub(crate) fn decrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], blob: &[u8]) -> Result<Vec<u8>> {
     if blob.len() < WRAP_MIN_LEN {
         return Err(Error::KeyOperation {
             operation: "keychain_wrap_decrypt".into(),
@@ -286,8 +297,12 @@ fn cache_evict(app_name: &str, label: &str) {
 /// `.userPresence` access-control flag so subsequent reads trigger a
 /// LocalAuthentication prompt (Touch ID or device passcode) instead of
 /// the legacy code-signature ACL dialog.
+///
+/// **Internal helper.** External callers get raw key access through
+/// [`generate_and_wrap`] (generate path) and [`relabel_wrapping_key`]
+/// (rename path). No public API hands out raw wrapping-key bytes.
 #[allow(unsafe_code)]
-pub fn keychain_store(
+pub(crate) fn keychain_store(
     app_name: &str,
     label: &str,
     wrapping_key: &[u8; WRAP_KEY_LEN],
@@ -343,8 +358,13 @@ pub fn keychain_store(
 /// keychain and, on user-presence items, re-prompts).
 ///
 /// Returns `None` if no entry exists for this service+account pair.
+///
+/// **Internal helper.** This function hands out the raw 32-byte
+/// wrapping key — external callers must go through
+/// [`decrypt_with_cached_key`] instead, which never exposes the key
+/// outside this module.
 #[allow(unsafe_code)]
-pub fn keychain_load(
+pub(crate) fn keychain_load(
     app_name: &str,
     label: &str,
     cache_ttl: Duration,
@@ -390,6 +410,117 @@ pub fn keychain_load(
             detail: format!("Swift bridge returned error code {rc}"),
         }),
     }
+}
+
+// -----------------------------------------------------------------------
+// Encryption-service oracle API
+// -----------------------------------------------------------------------
+//
+// These are the only public entry points that touch wrapping-key
+// material. The raw 32-byte AES key never crosses a module boundary
+// as a return value — callers get either the wrapped blob (on create)
+// or the decrypted plaintext (on read). Any same-crate `pub(crate)`
+// helper that returns raw bytes carries that note in its docstring.
+//
+// The motivating threat: a memory-disclosure bug (log accident,
+// serialization mistake, overly-eager clone) in any caller should not
+// be able to spill wrapping-key material. Restricting the raw-bytes
+// surface to a small set of functions inside `keychain_wrap` shrinks
+// what code has to be audited against that class of bug.
+
+/// Generate a fresh wrapping key for `(app_name, label)`, persist it
+/// in the keychain under the given user-presence policy, and return
+/// `plaintext` encrypted under it.
+///
+/// On any intermediate failure the function removes the freshly-added
+/// keychain entry before returning the error, so callers are left
+/// with no dangling wrapping-key entry to clean up.
+///
+/// Raw wrapping-key bytes are generated, used, and dropped inside
+/// this function — they do not escape `keychain_wrap`.
+pub fn generate_and_wrap(
+    app_name: &str,
+    label: &str,
+    plaintext: &[u8],
+    use_user_presence: bool,
+) -> Result<Vec<u8>> {
+    let wrapping_key = generate_wrapping_key();
+    keychain_store(app_name, label, &wrapping_key, use_user_presence)?;
+    match encrypt_blob(&wrapping_key, plaintext) {
+        Ok(blob) => Ok(blob),
+        Err(error) => {
+            // Keep state consistent — remove the freshly-added entry.
+            drop(keychain_delete(app_name, label));
+            Err(error)
+        }
+    }
+}
+
+/// Load the wrapping key for `(app_name, label)` via the process cache
+/// (consulting the keychain on miss, which may prompt the user if the
+/// item is user-presence protected) and return `blob` decrypted under
+/// it.
+///
+/// Returns `Ok(None)` if no wrapping-key entry exists — the caller can
+/// distinguish that from a decrypt/IO error.
+///
+/// Raw wrapping-key bytes are fetched, used, and dropped inside this
+/// function — they do not escape `keychain_wrap`.
+pub fn decrypt_with_cached_key(
+    app_name: &str,
+    label: &str,
+    blob: &[u8],
+    cache_ttl: Duration,
+) -> Result<Option<Vec<u8>>> {
+    match keychain_load(app_name, label, cache_ttl)? {
+        Some(wrapping_key) => {
+            let plaintext = decrypt_blob(&wrapping_key, blob)?;
+            Ok(Some(plaintext))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Move the wrapping-key entry for `old_label` to `new_label` atomically
+/// from the caller's point of view: loads under the old label, stores
+/// under the new label with the given user-presence policy, then
+/// deletes the old entry. Cache entries for both labels are evicted.
+///
+/// Returns `Err(KeyNotFound)` if there's no entry under `old_label`
+/// and `Err(DuplicateLabel)` if `new_label` already has one.
+///
+/// Raw wrapping-key bytes are loaded, re-stored, and dropped inside
+/// this function — they do not escape `keychain_wrap`.
+pub(crate) fn relabel_wrapping_key(
+    app_name: &str,
+    old_label: &str,
+    new_label: &str,
+    use_user_presence: bool,
+) -> Result<()> {
+    if old_label == new_label {
+        return Ok(());
+    }
+    // Use `Duration::ZERO` so a rename always reads the live keychain
+    // state — a cached value could be stale vs. a concurrent operation.
+    let wrapping_key =
+        keychain_load(app_name, old_label, Duration::ZERO)?.ok_or_else(|| Error::KeyNotFound {
+            label: old_label.to_string(),
+        })?;
+
+    if keychain_load(app_name, new_label, Duration::ZERO)?.is_some() {
+        return Err(Error::DuplicateLabel {
+            label: new_label.to_string(),
+        });
+    }
+
+    keychain_store(app_name, new_label, &wrapping_key, use_user_presence)?;
+    // Best-effort removal of the old entry. A failure here leaves a
+    // dangling old entry that `.handle` files no longer reference —
+    // harmless and user-removable.
+    drop(keychain_delete(app_name, old_label));
+    Ok(())
+    // `wrapping_key` drops here; `keychain_load`'s stack copy goes
+    // away with it.
 }
 
 /// Delete a wrapping-key entry from the login keychain and the
