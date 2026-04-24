@@ -422,6 +422,27 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
 pub fn load_pub_key(config: &KeychainConfig, label: &str, key_type: KeyType) -> Result<Vec<u8>> {
     validate_label(label)?;
     let dir = config.keys_dir();
+
+    // Fast path: the `.pub` file is written at key-creation time by
+    // `persist_saved_key_material` and re-synced after any successful
+    // handle decrypt, so for every well-formed key it holds the
+    // authoritative public key bytes. Reading it here avoids a
+    // `load_handle` round-trip, which on user-presence-protected
+    // wrapping keys is a LocalAuthentication prompt. Public keys are
+    // public — there's no reason to gate reading them on biometric.
+    //
+    // Anything that looks even slightly off (missing file, wrong
+    // length, not a valid P-256 SEC1 point) falls through to the slow
+    // authoritative path so a tampered or truncated cache can't
+    // produce an invalid public key.
+    if let Ok(pub_key) = metadata::load_pub_key(&dir, label) {
+        if enclaveapp_core::types::validate_p256_point(&pub_key).is_ok() {
+            return Ok(pub_key);
+        }
+    }
+
+    // Slow authoritative path: decrypt the handle (may prompt) and
+    // re-sync the `.pub` cache so subsequent calls hit the fast path.
     let data_rep = load_handle(config, label)?;
     let pub_key = public_key_from_data_rep(key_type, &data_rep)?;
     metadata::sync_pub_key(&dir, label, &pub_key)
@@ -889,9 +910,14 @@ mod tests {
     }
 
     #[test]
-    fn load_pub_key_repairs_mismatched_cache_from_handle() {
+    fn load_pub_key_returns_cached_pub_without_touching_handle() {
+        // Fast path: a format-valid `.pub` cache is authoritative.
+        // The handle here is intentionally bogus — if `load_pub_key`
+        // touched it, the call would fail. Success proves the cache
+        // short-circuits the slow path (and, on real hardware, the
+        // biometric prompt it would trigger).
         let dir = std::env::temp_dir().join(format!(
-            "enclaveapp-apple-load-pub-{}-{}",
+            "enclaveapp-apple-load-pub-cached-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -902,7 +928,59 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let config = KeychainConfig::with_keys_dir("test-app", dir.clone());
-        metadata::save_pub_key(&dir, "cached", &[0x04; 65]).unwrap();
+        let cached_pub = [0x04_u8; 65];
+        metadata::save_pub_key(&dir, "cached", &cached_pub).unwrap();
+        metadata::atomic_write(&dir.join("cached.handle"), &[0_u8; 32]).unwrap();
+
+        let got = load_pub_key(&config, "cached", KeyType::Signing).unwrap();
+        assert_eq!(got, cached_pub);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_pub_key_falls_through_when_cached_pub_is_malformed() {
+        // Wrong SEC1 prefix (0x05 instead of 0x04) fails format
+        // validation, so the fast path rejects the cache and the slow
+        // path decrypts the handle. With a bogus handle here, the
+        // slow path errors — proving the fast path did fall through.
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-apple-load-pub-malformed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config = KeychainConfig::with_keys_dir("test-app", dir.clone());
+        metadata::save_pub_key(&dir, "cached", &[0x05; 65]).unwrap();
+        metadata::atomic_write(&dir.join("cached.handle"), &[0_u8; 32]).unwrap();
+
+        let err = load_pub_key(&config, "cached", KeyType::Signing).unwrap_err();
+        assert!(matches!(err, Error::KeyOperation { .. }));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_pub_key_falls_through_when_cached_pub_is_missing() {
+        // No `.pub` cache at all, so the fast path can't trigger.
+        // Slow path decrypts the (bogus) handle and errors.
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-apple-load-pub-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config = KeychainConfig::with_keys_dir("test-app", dir.clone());
         metadata::atomic_write(&dir.join("cached.handle"), &[0_u8; 32]).unwrap();
 
         let err = load_pub_key(&config, "cached", KeyType::Signing).unwrap_err();
