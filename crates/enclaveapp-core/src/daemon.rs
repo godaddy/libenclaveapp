@@ -90,11 +90,16 @@ impl std::fmt::Display for DaemonReadyError {
 impl std::error::Error for DaemonReadyError {}
 
 /// Exponential-backoff schedule used by [`ensure_daemon_ready`] when
-/// it has to wait for a freshly-spawned daemon. 100, 200, 400, 800,
-/// 1600 ms — ≈3.1 s in aggregate before giving up. Unix only —
-/// the Windows stub doesn't spawn anything.
+/// it has to wait for a freshly-spawned daemon. ≈10 s in aggregate
+/// before giving up — chosen to match `sshenc-agent`'s internal
+/// `wait_for_ready_file` timeout, so the outer caller doesn't give
+/// up before the inner daemonize machinery does. Slow CI runners
+/// (Linux containers under load, macOS notarization checks on first
+/// launch) can take several seconds for a fresh fork+exec to bind
+/// the socket; a 3 s budget produced flakes in production CI runs.
+/// Unix only — the Windows stub doesn't spawn anything.
 #[cfg(unix)]
-const READINESS_BACKOFF_MS: &[u64] = &[100, 200, 400, 800, 1600];
+const READINESS_BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800, 1600, 3000, 4000];
 
 /// Total timeout across the [`READINESS_BACKOFF_MS`] schedule. Used
 /// when reporting [`DaemonReadyError::NotReady`].
@@ -147,7 +152,7 @@ pub fn ensure_daemon_ready(
     }
 
     use std::process::Stdio;
-    std::process::Command::new(&binary)
+    let mut child = std::process::Command::new(&binary)
         .arg("--socket")
         .arg(socket_path)
         .stdin(Stdio::null())
@@ -159,12 +164,60 @@ pub fn ensure_daemon_ready(
             reason: e.to_string(),
         })?;
 
+    // Two readiness signals, polled together:
+    //
+    // 1. The socket accepts connections — the universal sign of
+    //    readiness.
+    // 2. The spawned process exited with status 0 — emitted by
+    //    daemonize-style binaries (sshenc-agent, awsenc-daemon)
+    //    that fork and have the parent block on a per-app
+    //    `wait_for_ready_file` before calling `exit(0)`. When that
+    //    parent exits cleanly, the actual daemon child is already
+    //    bound on the socket, so this is a strong signal we can
+    //    short-circuit on. Non-zero exit → spawn-time failure that
+    //    we should surface immediately rather than wait out.
     for backoff_ms in READINESS_BACKOFF_MS {
         std::thread::sleep(Duration::from_millis(*backoff_ms));
+
         if is_socket_ready(socket_path) {
+            // Best-effort reap: don't leave a zombie if the parent
+            // already exited. Ignore the result either way.
+            drop(child.try_wait());
             return Ok(DaemonSpawn::Spawned { binary });
         }
+
+        // try_wait → Some(status) means the spawned process exited.
+        // None means still running; Err means the call itself failed
+        // (e.g. EINTR). For both of those, keep polling — the socket
+        // is the ground truth.
+        if let Ok(Some(status)) = child.try_wait() {
+            if status.success() {
+                // Parent reported ready (exit 0) but the socket
+                // isn't yet visible — give the kernel one tiny
+                // window for the listening child to finish bind.
+                if is_socket_ready(socket_path) {
+                    return Ok(DaemonSpawn::Spawned { binary });
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                if is_socket_ready(socket_path) {
+                    return Ok(DaemonSpawn::Spawned { binary });
+                }
+                return Err(DaemonReadyError::NotReady {
+                    socket_path: socket_path.to_path_buf(),
+                    timeout: readiness_total_timeout(),
+                });
+            }
+            return Err(DaemonReadyError::SpawnFailed {
+                binary: binary.clone(),
+                reason: format!(
+                    "daemon exited with status {} before becoming ready",
+                    status.code().unwrap_or(-1)
+                ),
+            });
+        }
     }
+    // Final reap attempt before bailing.
+    drop(child.try_wait());
     Err(DaemonReadyError::NotReady {
         socket_path: socket_path.to_path_buf(),
         timeout: readiness_total_timeout(),
@@ -191,13 +244,30 @@ fn is_socket_ready(socket_path: &Path) -> bool {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::print_stderr)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, MutexGuard};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Tests that mutate process-global `$HOME` must not run in
+    /// parallel — the test runner spawns multiple test threads by
+    /// default, and concurrent `set_var("HOME", ...)` calls would
+    /// stomp on each other and break `bin_discovery`'s home_dir
+    /// resolution. Hold this mutex for the duration of any test
+    /// that calls `with_fake_home_bin`.
+    static HOME_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn lock_home() -> MutexGuard<'static, ()> {
+        // Recover from a poisoned mutex (a previous test panicked
+        // while holding it); for serialization purposes the data
+        // we're protecting is `$HOME`, which the Drop guard always
+        // restores regardless of whether we panicked.
+        HOME_MUTEX.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     /// Build a unique socket path under a short root to stay under
     /// macOS's 104-byte `SUN_LEN` limit. `std::env::temp_dir()` on
@@ -237,6 +307,187 @@ mod tests {
             .expect_err("should fail");
         assert!(matches!(err, DaemonReadyError::BinaryNotFound { .. }));
 
+        let _unused = std::fs::remove_file(&sock);
+    }
+
+    /// Plant the fake binary under a fake `~/.local/bin` so
+    /// bin_discovery finds it via the home_dir lookup. Returns a
+    /// guard whose Drop cleans up.
+    struct FakeBinaryHome {
+        home: PathBuf,
+        original_home: Option<std::ffi::OsString>,
+    }
+    impl Drop for FakeBinaryHome {
+        fn drop(&mut self) {
+            // SAFETY: tests in this module aren't multi-threaded
+            // (cargo runs them serially on a single binary by
+            // default unless --test-threads>1, and these don't
+            // mutate any other thread-shared state).
+            #[allow(unsafe_code)]
+            unsafe {
+                if let Some(prev) = self.original_home.take() {
+                    std::env::set_var("HOME", prev);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+            }
+            let _unused = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    /// Set `HOME` to a tempdir and plant a fake binary at
+    /// `$HOME/.local/bin/<name>`. The bin_discovery search path
+    /// includes `$HOME/.local/bin`, so this is enough for
+    /// `find_trusted_binary` to pick it up. Returns a Drop guard
+    /// that restores `HOME` and removes the tempdir.
+    fn with_fake_home_bin(name: &str, contents: &[u8]) -> FakeBinaryHome {
+        use std::os::unix::fs::PermissionsExt;
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let home =
+            PathBuf::from("/tmp").join(format!("eacd-home-{}-{}-{name}", std::process::id(), id));
+        let bindir = home.join(".local").join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        let bin_path = bindir.join(name);
+        std::fs::write(&bin_path, contents).unwrap();
+        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original = std::env::var_os("HOME");
+        // SAFETY: see Drop impl above.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        FakeBinaryHome {
+            home,
+            original_home: original,
+        }
+    }
+
+    /// A binary that exits 0 immediately without binding the
+    /// socket simulates a daemonize-style parent that signals
+    /// "ready" via exit. With the new logic, ensure_daemon_ready
+    /// should observe the exit, peek at the socket (still absent),
+    /// and report NotReady promptly — *not* wait the full 10s
+    /// readiness budget.
+    #[test]
+    fn binary_exits_zero_without_socket_returns_not_ready_promptly() {
+        let _home_guard = lock_home();
+        let bin_name = format!("eacd-exit0-{}", std::process::id());
+        let _fake = with_fake_home_bin(&bin_name, b"#!/bin/sh\nexit 0\n");
+        let sock = unique_socket("exit0");
+        let _unused = std::fs::remove_file(&sock);
+
+        let start = std::time::Instant::now();
+        let err =
+            ensure_daemon_ready(&bin_name, "myapp", &sock).expect_err("should fail (no socket)");
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, DaemonReadyError::NotReady { .. }),
+            "expected NotReady; got {err:?}"
+        );
+        // The full readiness schedule sums to ~10s; the exit-0
+        // short-circuit should resolve well under 1s on any
+        // halfway sane machine.
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "exit-0 short-circuit took too long: {elapsed:?}",
+        );
+    }
+
+    /// A binary that exits non-zero immediately is a spawn-time
+    /// failure (failed config load, missing dependency, etc.). The
+    /// new logic should surface SpawnFailed promptly rather than
+    /// silently waiting out the full readiness budget on a
+    /// guaranteed-fail spawn.
+    #[test]
+    fn binary_exits_nonzero_returns_spawn_failed_promptly() {
+        let _home_guard = lock_home();
+        let bin_name = format!("eacd-exit42-{}", std::process::id());
+        let _fake = with_fake_home_bin(&bin_name, b"#!/bin/sh\nexit 42\n");
+        let sock = unique_socket("exit42");
+        let _unused = std::fs::remove_file(&sock);
+
+        let start = std::time::Instant::now();
+        let err =
+            ensure_daemon_ready(&bin_name, "myapp", &sock).expect_err("should fail (exit 42)");
+        let elapsed = start.elapsed();
+
+        match err {
+            DaemonReadyError::SpawnFailed { reason, .. } => {
+                assert!(
+                    reason.contains("42") || reason.contains("status"),
+                    "SpawnFailed reason should reference the exit status; got: {reason}"
+                );
+            }
+            other => panic!("expected SpawnFailed; got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "exit-nonzero short-circuit took too long: {elapsed:?}",
+        );
+    }
+
+    /// A binary that forks: parent exits 0 quickly (signaling
+    /// readiness in daemonize style), the forked child binds the
+    /// socket and stays alive. This is the sshenc-agent code path
+    /// — covered to verify the new try_wait branch still treats
+    /// exit-0 as a real ready signal when the socket comes up.
+    ///
+    /// Implemented with a sh-based fork: a background subshell
+    /// binds the socket via `nc -lU`; the foreground exits 0
+    /// immediately. We skip if `nc` lacks `-U` (rare).
+    #[test]
+    fn fork_style_daemon_exit_zero_after_socket_bound_returns_spawned() {
+        // Validate that the platform's nc has the `-U` Unix-socket
+        // listener flag. macOS nc does; busybox nc on minimal
+        // Linux distros doesn't. Skip rather than fail when not.
+        let nc_check = std::process::Command::new("nc")
+            .arg("-h")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        let supports_unix = match nc_check {
+            Ok(out) => {
+                let h = String::from_utf8_lossy(&out.stderr) + String::from_utf8_lossy(&out.stdout);
+                h.contains("-U")
+            }
+            Err(_) => false,
+        };
+        if !supports_unix {
+            eprintln!("skip: nc -U not supported on this host");
+            return;
+        }
+
+        let _home_guard = lock_home();
+        let bin_name = format!("eacd-fork-{}", std::process::id());
+        // Fork: background nc binds the socket; foreground exits
+        // immediately. The shebang invokes /bin/sh which is
+        // guaranteed present on macOS / Linux test runners.
+        // `nc -lU "$2"` listens on the Unix socket given as $2
+        // (i.e. the socket path we pass via `--socket <path>`).
+        let script = b"#!/bin/sh\n\
+            (nc -lU \"$2\" >/dev/null 2>&1 &)\n\
+            sleep 0.05\n\
+            exit 0\n";
+        let _fake = with_fake_home_bin(&bin_name, script);
+        let sock = unique_socket("fork-bind");
+        let _unused = std::fs::remove_file(&sock);
+
+        let got = ensure_daemon_ready(&bin_name, "myapp", &sock).expect("should succeed");
+        assert!(
+            matches!(got, DaemonSpawn::Spawned { .. }),
+            "expected Spawned; got {got:?}"
+        );
+
+        // Cleanup: kill the lingering nc process (best-effort).
+        drop(
+            std::process::Command::new("pkill")
+                .arg("-f")
+                .arg(format!("nc -lU.*{}", sock.display()))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status(),
+        );
         let _unused = std::fs::remove_file(&sock);
     }
 }
