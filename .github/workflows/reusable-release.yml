@@ -55,10 +55,30 @@ on:
         required: false
         default: ''
         type: string
+      macos_signing_identity:
+        description: 'macOS code-signing identity name, e.g. "Developer ID Application: Foo Bar (TEAMID)". When set with the matching MACOS_SIGNING_* and NOTARIZATION_* secrets, macOS binaries are codesigned (hardened runtime + secure timestamp) and notarized via Apple''s notary service. Empty to skip.'
+        required: false
+        default: ''
+        type: string
     secrets:
       HOMEBREW_TAP_TOKEN:
         required: false
       SCOOP_BUCKET_TOKEN:
+        required: false
+      MACOS_SIGNING_CERTIFICATE_P12:
+        description: 'Base64-encoded .p12 holding the Developer ID Application cert + private key. Required when macos_signing_identity is set.'
+        required: false
+      MACOS_SIGNING_CERTIFICATE_PASSWORD:
+        description: 'Passphrase for MACOS_SIGNING_CERTIFICATE_P12. Required when macos_signing_identity is set.'
+        required: false
+      NOTARIZATION_API_KEY:
+        description: 'Base64-encoded App Store Connect API key (.p8). Required when macos_signing_identity is set.'
+        required: false
+      NOTARIZATION_KEY_ID:
+        description: 'App Store Connect API Key ID (10-char). Required when macos_signing_identity is set.'
+        required: false
+      NOTARIZATION_ISSUER_ID:
+        description: 'App Store Connect Issuer ID (UUID). Required when macos_signing_identity is set.'
         required: false
 
 permissions:
@@ -211,6 +231,68 @@ jobs:
           ENCLAVEAPP_MOCK_STORAGE: ${{ runner.os == 'macOS' && '1' || '' }}
         run: cargo test --workspace ${{ inputs.cargo_build_args }} ${{ inputs.test_args && format('-- {0}', inputs.test_args) || '' }}
 
+      # macOS code signing + notarization. Gated on `macos_signing_identity`
+      # being set AND the matching secrets being present, so consumers
+      # without an Apple Developer cert keep building unsigned tarballs
+      # exactly as before. The keychain is created in $RUNNER_TEMP, torn
+      # down at job exit, and never persists across runs.
+      - name: Set up signing keychain (macOS)
+        id: signing_keychain
+        if: runner.os == 'macOS' && inputs.macos_signing_identity != ''
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -z "$P12_BASE64" ] || [ -z "$P12_PASSWORD" ]; then
+            echo "::warning::macos_signing_identity is set but MACOS_SIGNING_CERTIFICATE_P12 / _PASSWORD are missing — skipping signing"
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/sign.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          P12_PATH="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$P12_BASE64" | base64 -d > "$P12_PATH"
+          security import "$P12_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "$P12_PATH"
+
+          # Prepend our temp keychain to the user search list so codesign
+          # finds the imported identity. Preserve the existing search list
+          # so the rest of the runner's tooling keeps working.
+          existing=$(security list-keychains -d user | sed -e 's/^[[:space:]]*//' -e 's/"//g')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $existing
+
+          # Authorize codesign + apple security tools to use the private key
+          # without per-call prompts. -S is the partition list.
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          echo "keychain_path=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Sign release binaries (macOS)
+        if: runner.os == 'macOS' && inputs.macos_signing_identity != '' && steps.signing_keychain.outputs.keychain_path != ''
+        shell: bash
+        env:
+          IDENTITY: ${{ inputs.macos_signing_identity }}
+        run: |
+          extra='${{ inputs.extra_packaging }}'
+          unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
+          for item in ${{ inputs.unix_binaries }} $unix_libs; do
+            path="target/${{ matrix.target }}/release/${item}"
+            [ -f "$path" ] || continue
+            codesign --force --sign "$IDENTITY" \
+              --options runtime --timestamp "$path"
+            codesign --verify --strict --verbose=2 "$path"
+          done
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -225,6 +307,43 @@ jobs:
             cp "target/${{ matrix.target }}/release/${lib}" dist/ 2>/dev/null || true
           done
           tar czf "${{ inputs.app_name }}-${{ matrix.target }}.tar.gz" -C dist .
+
+      - name: Notarize binaries (macOS)
+        if: runner.os == 'macOS' && inputs.macos_signing_identity != '' && steps.signing_keychain.outputs.keychain_path != ''
+        shell: bash
+        env:
+          API_KEY_BASE64: ${{ secrets.NOTARIZATION_API_KEY }}
+          KEY_ID: ${{ secrets.NOTARIZATION_KEY_ID }}
+          ISSUER_ID: ${{ secrets.NOTARIZATION_ISSUER_ID }}
+        run: |
+          if [ -z "$API_KEY_BASE64" ] || [ -z "$KEY_ID" ] || [ -z "$ISSUER_ID" ]; then
+            echo "::warning::NOTARIZATION_* secrets missing — binaries are signed but not notarized"
+            exit 0
+          fi
+          # notarytool accepts .zip / .pkg / .dmg only — re-pack dist/ as zip.
+          # The .tar.gz built above for distribution holds the same signed
+          # binaries; once Apple accepts the cdhash, Gatekeeper resolves the
+          # ticket for the binary regardless of which container ships it.
+          NOTARY_ZIP="$RUNNER_TEMP/notarize.zip"
+          (cd dist && zip -r "$NOTARY_ZIP" .)
+
+          KEY_PATH="$RUNNER_TEMP/notary_key.p8"
+          printf '%s' "$API_KEY_BASE64" | base64 -d > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+
+          xcrun notarytool submit "$NOTARY_ZIP" \
+            --key "$KEY_PATH" \
+            --key-id "$KEY_ID" \
+            --issuer "$ISSUER_ID" \
+            --wait
+
+          rm -f "$KEY_PATH" "$NOTARY_ZIP"
+
+      - name: Tear down signing keychain (macOS)
+        if: always() && runner.os == 'macOS' && steps.signing_keychain.outputs.keychain_path != ''
+        shell: bash
+        run: |
+          security delete-keychain "${{ steps.signing_keychain.outputs.keychain_path }}" || true
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
