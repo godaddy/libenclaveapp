@@ -3,7 +3,7 @@
 
 //! Core trait hierarchy for hardware-backed key management backends.
 
-use crate::{AccessPolicy, KeyType, Result};
+use crate::{AccessPolicy, KeyType, PresenceMode, Result};
 
 /// Core key management operations. Every platform backend implements this.
 pub trait EnclaveKeyManager: Send + Sync {
@@ -69,6 +69,28 @@ pub trait EnclaveSigner: EnclaveKeyManager {
     ///
     /// Returns a DER-encoded ECDSA signature.
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>>;
+
+    /// Sign a message with explicit user-presence cadence.
+    ///
+    /// `mode` controls whether the underlying SEP / TPM prompt is batched
+    /// within `cache_ttl_secs` (`PresenceMode::Cached`), required per sign
+    /// (`PresenceMode::Strict`), or not required at all (`PresenceMode::None`).
+    /// `cache_ttl_secs == 0` collapses `Cached` into `Strict`.
+    ///
+    /// The default impl ignores `mode` and `cache_ttl_secs` and falls back
+    /// to [`sign`]. Backends that can honour a reusable user-presence
+    /// authentication (today: macOS) override this; software / TPM
+    /// backends keep the default because their gate is per-call regardless.
+    fn sign_with_presence(
+        &self,
+        label: &str,
+        data: &[u8],
+        mode: PresenceMode,
+        cache_ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        let _ = (mode, cache_ttl_secs);
+        self.sign(label, data)
+    }
 }
 
 /// ECIES encryption operations. Used by awsenc and sso-jwt for credential caching.

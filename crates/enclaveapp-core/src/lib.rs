@@ -22,4 +22,4 @@ pub mod types;
 pub use error::{Error, Result};
 pub use metadata::KeyMeta;
 pub use traits::{EnclaveEncryptor, EnclaveKeyManager, EnclaveSigner};
-pub use types::{AccessPolicy, KeyType};
+pub use types::{AccessPolicy, KeyType, PresenceMode};

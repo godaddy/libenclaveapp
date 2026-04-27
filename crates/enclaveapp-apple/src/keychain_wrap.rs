@@ -288,6 +288,13 @@ fn cache_evict(app_name: &str, label: &str) {
     if let Ok(mut guard) = cache().lock() {
         guard.remove(&(app_name.to_string(), label.to_string()));
     }
+    // Keep the LAContext registry aligned with the wrapping-key cache:
+    // a key whose wrapping material has been re-loaded must also drop
+    // any reusable user-presence authentication tied to it. Otherwise
+    // a delete-then-recreate flow would leak the prior context across
+    // a key identity change.
+    #[cfg(feature = "signing")]
+    crate::lacontext::evict(app_name, label);
 }
 
 /// Store a wrapping key in the login keychain. Replaces any existing
