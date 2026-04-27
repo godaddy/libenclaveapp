@@ -15,6 +15,8 @@ mod ffi;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod keychain_wrap;
+#[cfg(all(target_os = "macos", feature = "signing"))]
+mod lacontext;
 
 #[cfg(all(target_os = "macos", feature = "encryption"))]
 mod encrypt;

@@ -48,6 +48,74 @@ let ECIES_VERSION: UInt8 = 0x01
 let ECIES_HEADER_SIZE = 1 + 65 + 12  // version + ephemeral pubkey + nonce
 let ECIES_TAG_SIZE = 16
 
+// MARK: - LAContext registry
+//
+// Keeps long-lived LAContext objects alive across multiple SE sign
+// calls, keyed by an opaque `UInt64` token. The token is the only
+// thing that crosses the FFI boundary; Rust never dereferences it.
+//
+// Lifetime is owned by Rust: every `enclaveapp_se_lacontext_create`
+// must be paired with a matching `enclaveapp_se_lacontext_release`.
+// Rust's drop / cache-eviction code path is responsible for that
+// pairing — see `enclaveapp-apple::lacontext::LaContextHandle`.
+//
+// Token 0 is reserved as a sentinel for "no context, prompt every
+// sign" — it must never appear in the registry.
+
+private let lacontextLock = NSLock()
+private var lacontextRegistry: [UInt64: LAContext] = [:]
+private var lacontextNextToken: UInt64 = 0
+
+/// Create a new LAContext with the given Touch ID reuse duration in
+/// seconds and register it under a fresh token. Returns the token
+/// (always > 0) on success, or 0 on failure.
+///
+/// The context is *not* pre-authenticated. The first SE sign that
+/// receives this token will trigger the user-presence prompt; signs
+/// within `ttl_secs` after that will reuse the authentication and
+/// skip the prompt.
+@_cdecl("enclaveapp_se_lacontext_create")
+public func enclaveapp_se_lacontext_create(_ ttl_secs: Double) -> UInt64 {
+    let ctx = LAContext()
+    // 0 here is treated by Apple as "must re-authenticate every time" —
+    // equivalent to no reuse. We honour that.
+    ctx.touchIDAuthenticationAllowableReuseDuration = max(0.0, ttl_secs)
+
+    lacontextLock.lock()
+    defer { lacontextLock.unlock() }
+    lacontextNextToken &+= 1
+    if lacontextNextToken == 0 { lacontextNextToken = 1 } // skip sentinel
+    let token = lacontextNextToken
+    lacontextRegistry[token] = ctx
+    return token
+}
+
+/// Release the LAContext referenced by `token`. Idempotent — a
+/// second release of the same token is a no-op. Releasing token 0
+/// is a no-op.
+@_cdecl("enclaveapp_se_lacontext_release")
+public func enclaveapp_se_lacontext_release(_ token: UInt64) {
+    if token == 0 { return }
+    lacontextLock.lock()
+    defer { lacontextLock.unlock() }
+    if let ctx = lacontextRegistry.removeValue(forKey: token) {
+        // `invalidate` clears any cached authentication so the LAContext
+        // can't be reused after the Rust side has dropped it.
+        ctx.invalidate()
+    }
+}
+
+/// Look up the LAContext for `token`, or `nil` if not registered.
+/// Caller must hold `lacontextLock` *only when reading the dict*; the
+/// returned LAContext is fine to hand to CryptoKit without the lock,
+/// because Rust's lifetime contract prevents concurrent release.
+private func lacontextLookup(_ token: UInt64) -> LAContext? {
+    if token == 0 { return nil }
+    lacontextLock.lock()
+    defer { lacontextLock.unlock() }
+    return lacontextRegistry[token]
+}
+
 // MARK: - Helper: access control
 
 func makeAccessControl(_ authPolicy: Int32) -> SecAccessControl? {
@@ -178,12 +246,30 @@ public func enclaveapp_se_sign(
     _ message: UnsafePointer<UInt8>,
     _ message_len: Int32,
     _ sig_out: UnsafeMutablePointer<UInt8>,
-    _ sig_len: UnsafeMutablePointer<Int32>
+    _ sig_len: UnsafeMutablePointer<Int32>,
+    _ lacontext_token: UInt64
 ) -> Int32 {
-    return traceDuration("se_sign message_len=\(message_len)") {
+    return traceDuration("se_sign message_len=\(message_len) ctx=\(lacontext_token)") {
         do {
             let keyData = Data(bytes: data_rep, count: Int(data_rep_len))
-            let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: keyData)
+            let key: SecureEnclave.P256.Signing.PrivateKey
+            if let ctx = lacontextLookup(lacontext_token) {
+                // Reusable context path — first sign on a fresh ctx
+                // prompts the user; subsequent signs within the
+                // ctx's `touchIDAuthenticationAllowableReuseDuration`
+                // window are silent.
+                key = try SecureEnclave.P256.Signing.PrivateKey(
+                    dataRepresentation: keyData,
+                    authenticationContext: ctx
+                )
+            } else {
+                // Strict path — fresh implicit context per sign,
+                // SEP enforces a prompt every time the key has a
+                // user-presence access control.
+                key = try SecureEnclave.P256.Signing.PrivateKey(
+                    dataRepresentation: keyData
+                )
+            }
 
             let msgData = Data(bytes: message, count: Int(message_len))
             let signature = try key.signature(for: msgData)

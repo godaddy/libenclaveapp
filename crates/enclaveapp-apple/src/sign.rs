@@ -5,8 +5,9 @@
 
 use crate::ffi;
 use crate::keychain::{self, KeychainConfig};
+use crate::lacontext;
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
-use enclaveapp_core::types::{validate_label, AccessPolicy, KeyType};
+use enclaveapp_core::types::{validate_label, AccessPolicy, KeyType, PresenceMode};
 use enclaveapp_core::{Error, Result};
 
 /// ECDSA P-256 signing backend using the macOS Secure Enclave.
@@ -35,6 +36,39 @@ impl SecureEnclaveSigner {
     /// `wrapping_key_cache_ttl` settings.
     pub fn with_config(config: KeychainConfig) -> Self {
         SecureEnclaveSigner { config }
+    }
+
+    /// Internal sign-with-token routine. `lacontext_token == 0` means
+    /// "no reusable context; SEP enforces a prompt per sign." Non-zero
+    /// is a token returned from the Swift LAContext registry.
+    #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
+    fn sign_inner(&self, label: &str, data: &[u8], lacontext_token: u64) -> Result<Vec<u8>> {
+        validate_label(label)?;
+        let data_rep = keychain::load_handle(&self.config, label)?;
+
+        let mut sig = vec![0_u8; 128]; // DER ECDSA P-256 sig is at most ~72 bytes
+        let mut sig_len: i32 = 128;
+
+        let rc = unsafe {
+            ffi::enclaveapp_se_sign(
+                data_rep.as_ptr(),
+                data_rep.len() as i32,
+                data.as_ptr(),
+                data.len() as i32,
+                sig.as_mut_ptr(),
+                &mut sig_len,
+                lacontext_token,
+            )
+        };
+
+        if rc != 0 {
+            return Err(Error::SignFailed {
+                detail: format!("FFI returned error code {rc}"),
+            });
+        }
+
+        sig.truncate(sig_len as usize);
+        Ok(sig)
     }
 }
 
@@ -76,32 +110,29 @@ impl EnclaveKeyManager for SecureEnclaveSigner {
 }
 
 impl EnclaveSigner for SecureEnclaveSigner {
-    #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
-        validate_label(label)?;
-        let data_rep = keychain::load_handle(&self.config, label)?;
+        // No reusable context — per-sign SEP prompt if the key has a
+        // user-presence access control, silent otherwise. Preserves
+        // pre-LAContext behaviour for callers that haven't migrated
+        // to `sign_with_presence`.
+        self.sign_inner(label, data, 0)
+    }
 
-        let mut sig = vec![0_u8; 128]; // DER ECDSA P-256 sig is at most ~72 bytes
-        let mut sig_len: i32 = 128;
-
-        let rc = unsafe {
-            ffi::enclaveapp_se_sign(
-                data_rep.as_ptr(),
-                data_rep.len() as i32,
-                data.as_ptr(),
-                data.len() as i32,
-                sig.as_mut_ptr(),
-                &mut sig_len,
-            )
+    fn sign_with_presence(
+        &self,
+        label: &str,
+        data: &[u8],
+        mode: PresenceMode,
+        cache_ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        let token = match mode {
+            PresenceMode::Cached => {
+                lacontext::acquire(&self.config.app_name, label, cache_ttl_secs)
+                    .map(|h| h.token())
+                    .unwrap_or(0)
+            }
+            PresenceMode::Strict | PresenceMode::None => 0,
         };
-
-        if rc != 0 {
-            return Err(Error::SignFailed {
-                detail: format!("FFI returned error code {rc}"),
-            });
-        }
-
-        sig.truncate(sig_len as usize);
-        Ok(sig)
+        self.sign_inner(label, data, token)
     }
 }

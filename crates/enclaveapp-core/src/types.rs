@@ -31,6 +31,49 @@ pub enum AccessPolicy {
     PasswordOnly,
 }
 
+/// User-presence prompt cadence for sign operations.
+///
+/// Orthogonal to [`AccessPolicy`]: `AccessPolicy` says *what* counts as
+/// authentication (e.g. fingerprint vs. passcode); `PresenceMode` says *how
+/// often* the user must reproduce it.
+///
+/// On macOS the choice is implemented by passing (or omitting) a long-lived
+/// `LAContext` to CryptoKit's `SecureEnclave.P256.Signing.PrivateKey`. The
+/// non-mac platforms (Linux software, Windows TPM) do not have an analogous
+/// cached-context concept, so they treat all variants identically — the gate
+/// is the key's underlying access policy alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceMode {
+    /// User-presence prompt batched within a TTL window. The first sign
+    /// after the cache is cold prompts; subsequent signs within the cache
+    /// TTL reuse the same `LAContext` and are silent. This is the default
+    /// for any new key created with user-presence enabled.
+    #[default]
+    Cached,
+    /// User-presence prompt on every sign. The agent does not pass a
+    /// long-lived `LAContext`, so the SEP enforces a fresh authentication
+    /// per signature.
+    Strict,
+    /// No user-presence prompt. The key has `AccessPolicy::None` (or its
+    /// platform equivalent) and signs silently regardless of cache state.
+    None,
+}
+
+impl PresenceMode {
+    /// Migration default for keys whose `.meta` predates `presence_mode`:
+    /// historically, a key with any access policy other than `None`
+    /// effectively had `Strict` semantics (one prompt per sign), and a
+    /// key with `None` was silent. Use this when reading a legacy
+    /// `.meta` file with no `presence_mode` field.
+    pub fn migration_default(policy: AccessPolicy) -> Self {
+        match policy {
+            AccessPolicy::None => PresenceMode::None,
+            _ => PresenceMode::Strict,
+        }
+    }
+}
+
 impl AccessPolicy {
     /// Convert to the integer used by the CryptoKit/CNG FFI layer.
     pub fn as_ffi_value(&self) -> i32 {
