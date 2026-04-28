@@ -23,6 +23,7 @@
 //!     force_keyring: false,
 //!     wrapping_key_user_presence: false,
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
+//!     keychain_access_group: None,
 //! })?;
 //!
 //! let ciphertext = storage.encrypt(b"secret")?;
@@ -43,6 +44,7 @@
 //!     force_keyring: false,
 //!     wrapping_key_user_presence: false,
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
+//!     keychain_access_group: None,
 //! })?;
 //!
 //! // Use the underlying signer/key_manager for operations.
@@ -105,6 +107,20 @@ pub struct StorageConfig {
     /// items, another LocalAuthentication prompt). `Duration::ZERO`
     /// disables the cache. Default: `ZERO`.
     pub wrapping_key_cache_ttl: std::time::Duration,
+    /// (macOS only) Data Protection keychain access group, in
+    /// `<TEAMID>.<group>` form. When `Some`, wrapping-key items are
+    /// stored in the modern Data Protection keychain (which actually
+    /// accepts the `.userPresence` ACL — the legacy keychain rejects
+    /// it with `errSecParam` -50). The calling binary MUST be
+    /// codesigned with a `keychain-access-groups` entitlement listing
+    /// the same group, otherwise SecItemAdd returns
+    /// `errSecMissingEntitlement` -34018 and the bridge falls back to
+    /// the legacy keychain (no userPresence gate).
+    ///
+    /// When `None` (default), the legacy keychain is used directly,
+    /// which accepts unsigned callers but rejects userPresence ACLs.
+    /// Default: `None`.
+    pub keychain_access_group: Option<String>,
 }
 
 /// Environment variable that, when the `mock` cargo feature is
@@ -167,6 +183,7 @@ mod tests {
             force_keyring: false,
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
+            keychain_access_group: None,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("test"));
@@ -184,6 +201,7 @@ mod tests {
             force_keyring: false,
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
+            keychain_access_group: None,
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, "test");
