@@ -60,6 +60,11 @@ on:
         required: false
         default: ''
         type: string
+      macos_entitlements_plist:
+        description: 'Path (relative to the consuming repo root) to an entitlements .plist file passed to codesign as `--entitlements`. Required when the consuming binaries need entitlements such as `keychain-access-groups` to access the Data Protection keychain. Empty to sign without entitlements.'
+        required: false
+        default: ''
+        type: string
     secrets:
       HOMEBREW_TAP_TOKEN:
         required: false
@@ -282,14 +287,27 @@ jobs:
         shell: bash
         env:
           IDENTITY: ${{ inputs.macos_signing_identity }}
+          ENTITLEMENTS: ${{ inputs.macos_entitlements_plist }}
         run: |
+          entitlements_arg=()
+          if [ -n "$ENTITLEMENTS" ]; then
+            if [ -f "$ENTITLEMENTS" ]; then
+              entitlements_arg=(--entitlements "$ENTITLEMENTS")
+              echo "Using entitlements plist: $ENTITLEMENTS"
+            else
+              echo "::error::macos_entitlements_plist points to '$ENTITLEMENTS' which does not exist relative to the repo root"
+              exit 1
+            fi
+          fi
           extra='${{ inputs.extra_packaging }}'
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
           for item in ${{ inputs.unix_binaries }} $unix_libs; do
             path="target/${{ matrix.target }}/release/${item}"
             [ -f "$path" ] || continue
             codesign --force --sign "$IDENTITY" \
-              --options runtime --timestamp "$path"
+              --options runtime --timestamp \
+              "${entitlements_arg[@]}" \
+              "$path"
             codesign --verify --strict --verbose=2 "$path"
           done
 

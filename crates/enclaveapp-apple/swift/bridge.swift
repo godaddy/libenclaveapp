@@ -655,6 +655,11 @@ private func makeServiceString(_ service: UnsafePointer<UInt8>, _ len: Int32) ->
     return String(data: bytes, encoding: .utf8)
 }
 
+private func makeUtf8String(_ ptr: UnsafePointer<UInt8>, _ len: Int32) -> String? {
+    let bytes = Data(bytes: ptr, count: Int(len))
+    return String(data: bytes, encoding: .utf8)
+}
+
 /// Store (or replace) an opaque secret in the keychain as a generic
 /// password. Any existing entry with the same service+account pair is
 /// removed first, so the call is effectively an upsert.
@@ -671,7 +676,8 @@ public func enclaveapp_keychain_store(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
     _ secret: UnsafePointer<UInt8>, _ secret_len: Int32,
-    _ use_user_presence: Int32
+    _ use_user_presence: Int32,
+    _ access_group: UnsafePointer<UInt8>?, _ access_group_len: Int32
 ) -> Int32 {
     return traceDuration("keychain_store userPresence=\(use_user_presence)") {
       guard let serviceStr = makeServiceString(service, service_len) else {
@@ -682,16 +688,29 @@ public func enclaveapp_keychain_store(
     }
     let secretData = Data(bytes: secret, count: Int(secret_len))
 
-    // Prefer Security.framework's implicit default-keychain routing
-    // when a default is available (standard interactive sessions, and
-    // GitHub Actions macOS runners). That path reaches the Data
-    // Protection keychain on unsigned builds and does NOT trigger the
-    // legacy-keychain ACL prompt that blocks headless CI. Only when
-    // no default is reachable (typical of `$HOME`-overridden test
-    // contexts and launchd sandboxes) do we fall back to opening the
-    // login keychain by explicit absolute path and pinning the op to
-    // it via `kSecUseKeychain` / `kSecMatchSearchList`.
-    let useExplicit = !hasDefaultKeychain()
+    // When the caller supplies a `keychain-access-groups`-style access
+    // group string we route the op through the modern Data Protection
+    // keychain (`kSecUseDataProtectionKeychain: true`). That keychain
+    // accepts `kSecAttrAccessControl(.userPresence)` cleanly — the
+    // legacy file-based keychain rejects the same attribute with
+    // `errSecParam` (-50) — so this is the only path on which the
+    // userPresence gate actually fires. The caller's binary must be
+    // codesigned with a `keychain-access-groups` entitlement
+    // containing the same group, otherwise SecItemAdd returns
+    // `errSecMissingEntitlement` (-34018) and we fall through to the
+    // legacy-keychain path below.
+    let accessGroup: String? = {
+        guard let ptr = access_group, access_group_len > 0 else { return nil }
+        return makeUtf8String(ptr, access_group_len)
+    }()
+    let useDPKeychain = (accessGroup != nil)
+
+    // Legacy-keychain path needs an explicit SecKeychain ref when no
+    // default keychain is reachable (test contexts that override $HOME,
+    // launchd sandboxes). The Data Protection path doesn't use
+    // SecKeychain at all — accessGroup + access-control attribute
+    // identify the item.
+    let useExplicit = !useDPKeychain && !hasDefaultKeychain()
     let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
     if useExplicit && kc == nil {
         return SE_ERR_KEYCHAIN_NOT_FOUND
@@ -702,6 +721,12 @@ public func enclaveapp_keychain_store(
         kSecAttrService as String: serviceStr,
         kSecAttrAccount as String: accountStr,
     ]
+    if useDPKeychain {
+        deleteQuery[kSecUseDataProtectionKeychain as String] = true
+        if let group = accessGroup {
+            deleteQuery[kSecAttrAccessGroup as String] = group
+        }
+    }
     if let kc = kc { deleteQuery[kSecMatchSearchList as String] = [kc] }
     let predeleteStatus = SecItemDelete(deleteQuery as CFDictionary)
     keychainTrace(
@@ -714,6 +739,12 @@ public func enclaveapp_keychain_store(
         kSecAttrAccount as String: accountStr,
         kSecValueData as String: secretData,
     ]
+    if useDPKeychain {
+        addQuery[kSecUseDataProtectionKeychain as String] = true
+        if let group = accessGroup {
+            addQuery[kSecAttrAccessGroup as String] = group
+        }
+    }
     if use_user_presence != 0 {
         // Bind access to user presence (Touch ID or device passcode)
         // via LocalAuthentication. `kSecAttrAccessControl` implies
@@ -735,20 +766,44 @@ public func enclaveapp_keychain_store(
     if let kc = kc { addQuery[kSecUseKeychain as String] = kc }
     var status = SecItemAdd(addQuery as CFDictionary, nil)
     keychainTrace(
-        "op=store_add service=\(serviceStr) account=\(accountStr) userPresence=\(use_user_presence) status=\(status)"
+        "op=store_add service=\(serviceStr) account=\(accountStr) " +
+        "userPresence=\(use_user_presence) dp=\(useDPKeychain) " +
+        "group=\(accessGroup ?? "<nil>") status=\(status)"
     )
 
-    // `.userPresence` / `kSecAttrAccessControl` only works on the
-    // Data Protection keychain, which returns `errSecMissingEntitlement`
-    // (-34018) for unsigned callers. On the legacy keychain the same
-    // attribute is rejected with `errSecParam` (-50). If the ACL path
-    // fails for either reason, retry once with the plain
-    // `kSecAttrAccessible` attribute so unsigned / Homebrew / CI builds
-    // can still store wrapping keys — just without the biometric
-    // gate. Callers that configured user presence are expected to
-    // notice the missing prompts on first sign; surfacing the
-    // downgrade via stderr makes that explicit.
-    if use_user_presence != 0
+    // Two failure modes that share a fallback:
+    //
+    // 1. DP keychain + access group asked for, but the caller's binary
+    //    isn't entitled — `errSecMissingEntitlement` (-34018). Drop
+    //    DP/access-group flags and retry against the legacy keychain.
+    //    UserPresence won't fire either way; the wrapping key still
+    //    needs to land somewhere so the agent can sign.
+    // 2. Legacy keychain + `.userPresence` ACL — `errSecParam` (-50).
+    //    Drop the ACL and retry without it.
+    //
+    // Both fallbacks surface a stderr line so an operator who
+    // configured user presence sees the downgrade explicitly.
+    if useDPKeychain && status == errSecMissingEntitlement {
+        FileHandle.standardError.write(Data((
+            "enclaveapp: Data Protection keychain rejected access group " +
+            "'\(accessGroup ?? "")' (OSStatus=\(status), errSecMissingEntitlement) — " +
+            "binary lacks the matching keychain-access-groups entitlement. " +
+            "Falling back to legacy keychain — userPresence gate won't fire " +
+            "for this key.\n"
+        ).utf8))
+        addQuery.removeValue(forKey: kSecUseDataProtectionKeychain as String)
+        addQuery.removeValue(forKey: kSecAttrAccessGroup as String)
+        if use_user_presence != 0 {
+            // Userpresence on legacy keychain is errSecParam → flatten now
+            addQuery.removeValue(forKey: kSecAttrAccessControl as String)
+            addQuery[kSecAttrAccessible as String] =
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
+        status = SecItemAdd(addQuery as CFDictionary, nil)
+        keychainTrace(
+            "op=store_add_fallback_legacy service=\(serviceStr) account=\(accountStr) status=\(status)"
+        )
+    } else if use_user_presence != 0
         && (status == errSecMissingEntitlement || status == errSecParam)
     {
         FileHandle.standardError.write(Data((

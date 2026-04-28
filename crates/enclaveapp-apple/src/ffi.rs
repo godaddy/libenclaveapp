@@ -93,6 +93,11 @@ extern "C" {
     //   10  SE_ERR_KEYCHAIN_LOAD
     //   11  SE_ERR_KEYCHAIN_DELETE
     //   12  SE_ERR_KEYCHAIN_NOT_FOUND
+    // `access_group` (UTF-8 pointer) + `access_group_len`: when
+    // non-null with len > 0, the bridge routes SecItemAdd through the
+    // Data Protection keychain with `kSecAttrAccessGroup` set —
+    // required for `.userPresence` ACL to install. Pass null / 0 to
+    // use the legacy keychain (no userPresence support).
     pub fn enclaveapp_keychain_store(
         service: *const u8,
         service_len: i32,
@@ -101,6 +106,8 @@ extern "C" {
         secret: *const u8,
         secret_len: i32,
         use_user_presence: i32,
+        access_group: *const u8,
+        access_group_len: i32,
     ) -> i32;
 
     pub fn enclaveapp_keychain_load(

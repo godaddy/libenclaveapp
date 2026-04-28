@@ -314,6 +314,7 @@ pub(crate) fn keychain_store(
     label: &str,
     wrapping_key: &[u8; WRAP_KEY_LEN],
     use_user_presence: bool,
+    access_group: Option<&str>,
 ) -> Result<()> {
     let service = service_name_for(app_name);
     let service_bytes = service.as_bytes();
@@ -332,6 +333,17 @@ pub(crate) fn keychain_store(
         operation: "keychain_store".into(),
         detail: "secret length too long".into(),
     })?;
+    let access_group_bytes = access_group.map(str::as_bytes);
+    let (access_group_ptr, access_group_len) = match access_group_bytes {
+        Some(bytes) => {
+            let len = i32::try_from(bytes.len()).map_err(|_| Error::KeyOperation {
+                operation: "keychain_store".into(),
+                detail: "access group too long".into(),
+            })?;
+            (bytes.as_ptr(), len)
+        }
+        None => (std::ptr::null(), 0),
+    };
 
     let rc = unsafe {
         ffi::enclaveapp_keychain_store(
@@ -342,6 +354,8 @@ pub(crate) fn keychain_store(
             wrapping_key.as_ptr(),
             secret_len,
             if use_user_presence { 1 } else { 0 },
+            access_group_ptr,
+            access_group_len,
         )
     };
     if rc == 0 {
@@ -450,9 +464,16 @@ pub fn generate_and_wrap(
     label: &str,
     plaintext: &[u8],
     use_user_presence: bool,
+    access_group: Option<&str>,
 ) -> Result<Vec<u8>> {
     let wrapping_key = generate_wrapping_key();
-    keychain_store(app_name, label, &wrapping_key, use_user_presence)?;
+    keychain_store(
+        app_name,
+        label,
+        &wrapping_key,
+        use_user_presence,
+        access_group,
+    )?;
     match encrypt_blob(&wrapping_key, plaintext) {
         Ok(blob) => Ok(blob),
         Err(error) => {
@@ -503,6 +524,7 @@ pub(crate) fn relabel_wrapping_key(
     old_label: &str,
     new_label: &str,
     use_user_presence: bool,
+    access_group: Option<&str>,
 ) -> Result<()> {
     if old_label == new_label {
         return Ok(());
@@ -520,7 +542,13 @@ pub(crate) fn relabel_wrapping_key(
         });
     }
 
-    keychain_store(app_name, new_label, &wrapping_key, use_user_presence)?;
+    keychain_store(
+        app_name,
+        new_label,
+        &wrapping_key,
+        use_user_presence,
+        access_group,
+    )?;
     // Best-effort removal of the old entry. A failure here leaves a
     // dangling old entry that `.handle` files no longer reference —
     // harmless and user-removable.
@@ -801,7 +829,7 @@ mod tests {
         let _guard = KeychainEntryGuard::new(TEST_APP, &label);
 
         let key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &key, false).unwrap();
+        keychain_store(TEST_APP, &label, &key, false, None).unwrap();
         let loaded = keychain_load(TEST_APP, &label, Duration::ZERO)
             .unwrap()
             .unwrap();
@@ -823,9 +851,9 @@ mod tests {
 
         let k1 = generate_wrapping_key();
         let k2 = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &k1, false).unwrap();
+        keychain_store(TEST_APP, &label, &k1, false, None).unwrap();
         // Store again with a DIFFERENT key — should replace, not error.
-        keychain_store(TEST_APP, &label, &k2, false).unwrap();
+        keychain_store(TEST_APP, &label, &k2, false, None).unwrap();
         let loaded = keychain_load(TEST_APP, &label, Duration::ZERO)
             .unwrap()
             .unwrap();
@@ -847,7 +875,7 @@ mod tests {
         let _guard = KeychainEntryGuard::new(TEST_APP, &label);
 
         let key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &key, false).unwrap();
+        keychain_store(TEST_APP, &label, &key, false, None).unwrap();
         assert!(keychain_load(TEST_APP, &label, Duration::ZERO)
             .unwrap()
             .is_some());
@@ -870,8 +898,8 @@ mod tests {
 
         let ka = generate_wrapping_key();
         let kb = generate_wrapping_key();
-        keychain_store(TEST_APP, &label_a, &ka, false).unwrap();
-        keychain_store(TEST_APP, &label_b, &kb, false).unwrap();
+        keychain_store(TEST_APP, &label_a, &ka, false, None).unwrap();
+        keychain_store(TEST_APP, &label_b, &kb, false, None).unwrap();
         assert_eq!(
             keychain_load(TEST_APP, &label_a, Duration::ZERO)
                 .unwrap()
@@ -908,8 +936,8 @@ mod tests {
 
         let kx = generate_wrapping_key();
         let ky = generate_wrapping_key();
-        keychain_store(&app_x, &label, &kx, false).unwrap();
-        keychain_store(&app_y, &label, &ky, false).unwrap();
+        keychain_store(&app_x, &label, &kx, false, None).unwrap();
+        keychain_store(&app_y, &label, &ky, false, None).unwrap();
         assert_eq!(
             keychain_load(&app_x, &label, Duration::ZERO)
                 .unwrap()
@@ -933,7 +961,7 @@ mod tests {
 
         let plaintext = b"simulated SE dataRepresentation blob with \x00 null \xff bytes";
         let key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &key, false).unwrap();
+        keychain_store(TEST_APP, &label, &key, false, None).unwrap();
         let wrapped = encrypt_blob(&key, plaintext).unwrap();
 
         // Now the real load path: get the wrapping key back from the
@@ -957,7 +985,7 @@ mod tests {
         let real_key = generate_wrapping_key();
         let wrapped = encrypt_blob(&real_key, b"secret").unwrap();
         let swapped_key = generate_wrapping_key();
-        keychain_store(TEST_APP, &label, &swapped_key, false).unwrap();
+        keychain_store(TEST_APP, &label, &swapped_key, false, None).unwrap();
         let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO)
             .unwrap()
             .unwrap();

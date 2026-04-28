@@ -33,6 +33,17 @@ pub struct KeychainConfig {
     /// LocalAuthentication prompt). `Duration::ZERO` disables the
     /// cache entirely. Defaults to `ZERO` for backward compatibility.
     pub wrapping_key_cache_ttl: std::time::Duration,
+    /// Data Protection keychain access group, in `<TEAMID>.<group>`
+    /// form. When `Some`, wrapping-key items are stored in the modern
+    /// Data Protection keychain (which actually accepts the
+    /// `.userPresence` ACL). The calling binary MUST be codesigned
+    /// with a `keychain-access-groups` entitlement listing the same
+    /// group, otherwise SecItemAdd returns `errSecMissingEntitlement`
+    /// and the bridge falls back to the legacy keychain (no
+    /// userPresence gate). When `None` (default), the legacy keychain
+    /// is used directly — which accepts unsigned callers but rejects
+    /// the userPresence ACL with `errSecParam`.
+    pub keychain_access_group: Option<String>,
 }
 
 impl KeychainConfig {
@@ -42,6 +53,7 @@ impl KeychainConfig {
             keys_dir_override: None,
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
+            keychain_access_group: None,
         }
     }
 
@@ -52,6 +64,7 @@ impl KeychainConfig {
             keys_dir_override: Some(keys_dir),
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
+            keychain_access_group: None,
         }
     }
 
@@ -66,6 +79,16 @@ impl KeychainConfig {
     #[must_use]
     pub fn with_cache_ttl(mut self, ttl: std::time::Duration) -> Self {
         self.wrapping_key_cache_ttl = ttl;
+        self
+    }
+
+    /// Return a new config that routes wrapping-key SecItemAdd through
+    /// the Data Protection keychain under the given access group. See
+    /// the [`Self::keychain_access_group`] field doc for entitlement
+    /// requirements.
+    #[must_use]
+    pub fn with_access_group(mut self, group: impl Into<String>) -> Self {
+        self.keychain_access_group = Some(group.into());
         self
     }
 
@@ -235,6 +258,7 @@ pub fn generate_and_save_key(
         label,
         &data_rep,
         config.wrapping_key_user_presence,
+        config.keychain_access_group.as_deref(),
     ) {
         Ok(blob) => blob,
         Err(error) => {
@@ -358,6 +382,7 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
         old_label,
         new_label,
         config.wrapping_key_user_presence,
+        config.keychain_access_group.as_deref(),
     ) {
         let rollback = metadata::rename_key_files(&dir, new_label, old_label);
         if let Err(rollback_err) = rollback {

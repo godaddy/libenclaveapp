@@ -175,6 +175,7 @@ impl EncryptedFileSecretStore {
                 force_keyring: false,
                 wrapping_key_user_presence: false,
                 wrapping_key_cache_ttl: std::time::Duration::ZERO,
+                keychain_access_group: None,
             })
             .map_err(|error| error.to_string())
         }) {
