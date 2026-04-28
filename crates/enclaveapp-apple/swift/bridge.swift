@@ -799,6 +799,41 @@ public func enclaveapp_keychain_store(
             addQuery[kSecAttrAccessible as String] =
                 kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
+        // The DP-keychain initial path runs with `useExplicit = false`,
+        // so we never opened a SecKeychain handle. If the default
+        // keychain isn't reachable (typical of `$HOME`-overridden
+        // contexts: e2e tests, launchd sandboxes, cron) the fallback
+        // SecItemAdd will fall into a system-modal "A keychain cannot
+        // be found to store '<account>'" dialog the user can't
+        // dismiss. Pin the fallback to the explicit login-keychain
+        // handle just like the non-DP path does.
+        var fallback_kc: SecKeychain? = nil
+        if !hasDefaultKeychain() {
+            guard let kc_explicit = openLoginKeychain() else {
+                keychainTrace(
+                    "op=store_add_fallback_legacy_open_login_failed service=\(serviceStr) account=\(accountStr)"
+                )
+                return SE_ERR_KEYCHAIN_NOT_FOUND
+            }
+            fallback_kc = kc_explicit
+            // The DP-side predelete didn't reach the legacy keychain.
+            // If a stale legacy item exists under the same
+            // service+account, SecItemAdd would return
+            // errSecDuplicateItem; predelete to make the retry an
+            // upsert.
+            let legacyDeleteQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: serviceStr,
+                kSecAttrAccount as String: accountStr,
+                kSecMatchSearchList as String: [kc_explicit],
+            ]
+            let legacyPredelete = SecItemDelete(legacyDeleteQuery as CFDictionary)
+            keychainTrace(
+                "op=store_predelete_legacy service=\(serviceStr) account=\(accountStr) status=\(legacyPredelete)"
+            )
+            addQuery[kSecUseKeychain as String] = kc_explicit
+        }
+        let _ = fallback_kc
         status = SecItemAdd(addQuery as CFDictionary, nil)
         keychainTrace(
             "op=store_add_fallback_legacy service=\(serviceStr) account=\(accountStr) status=\(status)"
