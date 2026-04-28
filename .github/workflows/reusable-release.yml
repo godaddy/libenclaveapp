@@ -65,6 +65,16 @@ on:
         required: false
         default: ''
         type: string
+      macos_bundle_id:
+        description: 'CFBundleIdentifier for the macOS .app bundle, e.g. `com.libenclaveapp.sshenc`. When set with `MACOS_PROVISIONING_PROFILE`, macOS binaries are staged into `<app_name>.app/Contents/MacOS/` and the bundle (with embedded provisioning profile) is signed + notarized as a unit. When empty (default), binaries ship as a flat tarball — the pre-bundling behaviour. See `docs/macos-app-bundle-distribution.md`.'
+        required: false
+        default: ''
+        type: string
+      macos_binaries:
+        description: 'Space-separated list of binaries to include in the macOS tarball / .app bundle. Empty defaults to `unix_binaries` (the all-Unix list). Use to drop platform-specific binaries that don''t belong on macOS, e.g. tpm-bridge stdio servers used only by WSL.'
+        required: false
+        default: ''
+        type: string
     secrets:
       HOMEBREW_TAP_TOKEN:
         required: false
@@ -84,6 +94,9 @@ on:
         required: false
       NOTARIZATION_ISSUER_ID:
         description: 'App Store Connect Issuer ID (UUID). Required when macos_signing_identity is set.'
+        required: false
+      MACOS_PROVISIONING_PROFILE:
+        description: 'Base64-encoded `<consumer>.provisionprofile` from developer.apple.com (Profiles → Distribution → Developer ID, bound to the consumer''s App ID and the team''s Developer ID Application certificate). Decoded into `<app_name>.app/Contents/embedded.provisionprofile` so AMFI accepts the binary''s `keychain-access-groups` claim. Required when `macos_bundle_id` is set.'
         required: false
 
 permissions:
@@ -282,12 +295,95 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           echo "keychain_path=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
 
+      # Resolve the macOS-specific binary list. When `macos_binaries`
+      # is set, it overrides `unix_binaries` for every macOS step
+      # below — so consumers can drop binaries that don't make sense
+      # on macOS (e.g. tpm-bridge stdio servers) without disturbing
+      # Linux. When empty, falls back to `unix_binaries` for
+      # bit-for-bit compatibility with the pre-bundling pipeline.
+      - name: Resolve macOS binary list
+        if: runner.os == 'macOS'
+        id: macos_bins
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.macos_binaries }}" ]; then
+            echo "list=${{ inputs.macos_binaries }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${{ inputs.unix_binaries }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Stage the .app bundle layout when the consumer opts in via
+      # `macos_bundle_id`. The provisioning profile is decoded into
+      # `Contents/embedded.provisionprofile` so AMFI accepts the
+      # binary's `keychain-access-groups` claim — without it,
+      # entitled binaries would be SIGKILL-ed at launch with
+      # `Restricted entitlements not validated`. See
+      # `docs/macos-app-bundle-distribution.md`.
+      - name: Stage .app bundle (macOS)
+        if: runner.os == 'macOS' && inputs.macos_bundle_id != ''
+        id: app_bundle
+        shell: bash
+        env:
+          PROFILE_BASE64: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+          BUNDLE_ID: ${{ inputs.macos_bundle_id }}
+          BINARIES: ${{ steps.macos_bins.outputs.list }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$PROFILE_BASE64" ]; then
+            echo "::error::macos_bundle_id is set but MACOS_PROVISIONING_PROFILE secret is missing — bundle would fail AMFI launch"
+            exit 1
+          fi
+          APP="${{ inputs.app_name }}.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS"
+          # Stage binaries (and any unix_libs from extra_packaging) into the bundle.
+          extra='${{ inputs.extra_packaging }}'
+          unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
+          for item in $BINARIES $unix_libs; do
+            src="target/${{ matrix.target }}/release/${item}"
+            if [ -f "$src" ]; then
+              cp "$src" "$APP/Contents/MacOS/"
+            fi
+          done
+          # Info.plist — minimum viable for AMFI + Gatekeeper. The
+          # primary executable is the first entry in macos_binaries
+          # (matches the `bin.install_symlink` ordering in the
+          # generated Homebrew formula).
+          PRIMARY=$(echo "$BINARIES" | awk '{print $1}')
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+              <key>CFBundleName</key><string>${{ inputs.app_name }}</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleExecutable</key><string>${PRIMARY}</string>
+              <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+              <key>CFBundleVersion</key><string>${VERSION}</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+          # The leading-whitespace guard above lets us indent the
+          # heredoc for readability; strip it so plutil accepts.
+          sed -i '' 's/^          //' "$APP/Contents/Info.plist"
+          plutil -lint "$APP/Contents/Info.plist"
+
+          # Decode + drop the provisioning profile.
+          printf '%s' "$PROFILE_BASE64" | base64 -d > "$APP/Contents/embedded.provisionprofile"
+          chmod 644 "$APP/Contents/embedded.provisionprofile"
+
+          echo "bundle_path=$APP" >> "$GITHUB_OUTPUT"
+          echo "primary=$PRIMARY" >> "$GITHUB_OUTPUT"
+
       - name: Sign release binaries (macOS)
         if: runner.os == 'macOS' && inputs.macos_signing_identity != '' && steps.signing_keychain.outputs.keychain_path != ''
         shell: bash
         env:
           IDENTITY: ${{ inputs.macos_signing_identity }}
           ENTITLEMENTS: ${{ inputs.macos_entitlements_plist }}
+          BUNDLE_PATH: ${{ steps.app_bundle.outputs.bundle_path }}
         run: |
           entitlements_arg=()
           if [ -n "$ENTITLEMENTS" ]; then
@@ -301,22 +397,58 @@ jobs:
           fi
           extra='${{ inputs.extra_packaging }}'
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
-          for item in ${{ inputs.unix_binaries }} $unix_libs; do
-            path="target/${{ matrix.target }}/release/${item}"
-            [ -f "$path" ] || continue
+
+          if [ -n "$BUNDLE_PATH" ]; then
+            # .app mode: sign every Mach-O inside Contents/MacOS first,
+            # then sign the bundle as a whole. Apple deprecated `--deep`;
+            # the recommended pattern is "leaves first, then container".
+            for f in "$BUNDLE_PATH/Contents/MacOS"/*; do
+              [ -f "$f" ] || continue
+              codesign --force --sign "$IDENTITY" \
+                --options runtime --timestamp \
+                "${entitlements_arg[@]}" \
+                "$f"
+              codesign --verify --strict --verbose=2 "$f"
+            done
             codesign --force --sign "$IDENTITY" \
               --options runtime --timestamp \
               "${entitlements_arg[@]}" \
-              "$path"
-            codesign --verify --strict --verbose=2 "$path"
-          done
+              "$BUNDLE_PATH"
+            codesign --verify --strict --deep --verbose=2 "$BUNDLE_PATH"
+          else
+            # Flat mode: sign each binary in target/<target>/release/.
+            BINARIES="${{ steps.macos_bins.outputs.list }}"
+            for item in $BINARIES $unix_libs; do
+              path="target/${{ matrix.target }}/release/${item}"
+              [ -f "$path" ] || continue
+              codesign --force --sign "$IDENTITY" \
+                --options runtime --timestamp \
+                "${entitlements_arg[@]}" \
+                "$path"
+              codesign --verify --strict --verbose=2 "$path"
+            done
+          fi
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.app_bundle.outputs.bundle_path }}
         run: |
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "$BUNDLE_PATH" ]; then
+            # .app mode: tar the signed bundle directly. The Homebrew
+            # formula installs <app>.app into Cellar/ and symlinks the
+            # CLI binaries inside Contents/MacOS/ from /opt/homebrew/bin.
+            tar czf "${{ inputs.app_name }}-${{ matrix.target }}.tar.gz" "$BUNDLE_PATH"
+            exit 0
+          fi
           mkdir -p dist
-          for bin in ${{ inputs.unix_binaries }}; do
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            BINARIES="${{ steps.macos_bins.outputs.list }}"
+          else
+            BINARIES="${{ inputs.unix_binaries }}"
+          fi
+          for bin in $BINARIES; do
             cp "target/${{ matrix.target }}/release/${bin}" dist/
           done
           extra='${{ inputs.extra_packaging }}'
@@ -333,21 +465,27 @@ jobs:
           API_KEY_BASE64: ${{ secrets.NOTARIZATION_API_KEY }}
           KEY_ID: ${{ secrets.NOTARIZATION_KEY_ID }}
           ISSUER_ID: ${{ secrets.NOTARIZATION_ISSUER_ID }}
+          BUNDLE_PATH: ${{ steps.app_bundle.outputs.bundle_path }}
         run: |
           if [ -z "$API_KEY_BASE64" ] || [ -z "$KEY_ID" ] || [ -z "$ISSUER_ID" ]; then
             echo "::warning::NOTARIZATION_* secrets missing — binaries are signed but not notarized"
             exit 0
           fi
-          # notarytool accepts .zip / .pkg / .dmg only — re-pack dist/ as zip.
-          # The .tar.gz built above for distribution holds the same signed
-          # binaries; once Apple accepts the cdhash, Gatekeeper resolves the
-          # ticket for the binary regardless of which container ships it.
-          NOTARY_ZIP="$RUNNER_TEMP/notarize.zip"
-          (cd dist && zip -r "$NOTARY_ZIP" .)
-
           KEY_PATH="$RUNNER_TEMP/notary_key.p8"
           printf '%s' "$API_KEY_BASE64" | base64 -d > "$KEY_PATH"
           chmod 600 "$KEY_PATH"
+
+          if [ -n "$BUNDLE_PATH" ]; then
+            # .app mode: zip the bundle and submit. notarytool accepts
+            # .zip/.pkg/.dmg containers; for .app bundles the standard
+            # is to ditto -c -k --sequesterRsrc.
+            NOTARY_ZIP="$RUNNER_TEMP/notarize.zip"
+            ditto -c -k --sequesterRsrc --keepParent "$BUNDLE_PATH" "$NOTARY_ZIP"
+          else
+            # Flat mode: zip dist/ as before.
+            NOTARY_ZIP="$RUNNER_TEMP/notarize.zip"
+            (cd dist && zip -r "$NOTARY_ZIP" .)
+          fi
 
           xcrun notarytool submit "$NOTARY_ZIP" \
             --key "$KEY_PATH" \
@@ -477,6 +615,7 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
           app="${{ inputs.app_name }}"
+          bundle_id="${{ inputs.macos_bundle_id }}"
 
           tap_repo=$(echo '${{ inputs.homebrew }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['tap_repo'])")
           formula_class=$(echo '${{ inputs.homebrew }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['formula_class'])")
@@ -487,15 +626,40 @@ jobs:
 
           git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${tap_repo}.git" /tmp/tap
 
+          # Pick the macOS binary list — falls back to unix_binaries
+          # when consumers haven't set macos_binaries explicitly.
+          mac_binaries="${{ inputs.macos_binaries }}"
+          if [ -z "$mac_binaries" ]; then
+            mac_binaries="${{ inputs.unix_binaries }}"
+          fi
+
           install_lines=""
-          for bin in ${{ inputs.unix_binaries }}; do
-            install_lines="${install_lines}    bin.install \"${bin}\"\n"
-          done
+          if [ -n "$bundle_id" ]; then
+            # .app bundle mode — install the bundle into the formula
+            # prefix and symlink each CLI binary out of
+            # `Contents/MacOS/` into `bin/` so users continue to invoke
+            # `<app>` / `<app>-keygen` etc. directly from PATH.
+            install_lines="${install_lines}    prefix.install \"${app}.app\"\n"
+            for bin in $mac_binaries; do
+              install_lines="${install_lines}    bin.install_symlink prefix/\"${app}.app/Contents/MacOS/${bin}\" => \"${bin}\"\n"
+            done
+          else
+            for bin in $mac_binaries; do
+              install_lines="${install_lines}    bin.install \"${bin}\"\n"
+            done
+          fi
           extra='${{ inputs.extra_packaging }}'
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
           for lib in $unix_libs; do
             case "$lib" in *.so) continue ;; esac
-            install_lines="${install_lines}    lib.install \"${lib}\"\n"
+            # In .app mode the .dylib is inside the bundle alongside
+            # the binaries; the symlink loop above doesn't cover it,
+            # but it's bundle-internal so consumers that link against
+            # it should DYLD_LIBRARY_PATH the bundle's MacOS dir or
+            # use a wrapper. For now, install loose-mode only.
+            if [ -z "$bundle_id" ]; then
+              install_lines="${install_lines}    lib.install \"${lib}\"\n"
+            fi
           done
 
           cat > /tmp/tap/Formula/${app}.rb << FORMULA
