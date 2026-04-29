@@ -269,6 +269,46 @@ mod tests {
         HOME_MUTEX.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// `ensure_daemon_ready` wrapper that absorbs the Linux ETXTBSY
+    /// race seen in CI. `cargo test` runs the test binary multi-
+    /// threaded, and Linux's `i_writecount` exec check is global to
+    /// the file's inode: between the `fork()` and the `exec()` of
+    /// any other test thread's `Command::spawn`, that fork's child
+    /// inherits writer FDs the parent had open at fork time
+    /// (O_CLOEXEC closes them at exec, but not at fork). If our
+    /// `with_fake_home_bin`'s O_WRONLY FD on the script is still
+    /// open in some other thread's in-flight fork at the moment we
+    /// exec the script, the kernel returns `ETXTBSY` (`os error
+    /// 26`, "Text file busy"). The window is small but real on a
+    /// loaded CI runner and produces a `SpawnFailed { reason:
+    /// "Text file busy ..." }` instead of the test-relevant
+    /// SpawnFailed/NotReady the test was designed to assert on.
+    ///
+    /// Retry briefly on that exact reason; let any other error
+    /// (and any success) through unchanged. The retries are
+    /// per-call, capped, and short — total wait is bounded by the
+    /// backoff schedule below — so the per-test timing assertions
+    /// (~800ms) still hold on any sane host.
+    fn ensure_daemon_ready_etxtbsy_resilient(
+        binary_name: &str,
+        app_name: &str,
+        socket_path: &Path,
+    ) -> Result<DaemonSpawn, DaemonReadyError> {
+        const ETXTBSY_BACKOFF_MS: &[u64] = &[5, 10, 20, 40, 80];
+        for backoff_ms in ETXTBSY_BACKOFF_MS {
+            match ensure_daemon_ready(binary_name, app_name, socket_path) {
+                Err(DaemonReadyError::SpawnFailed { reason, .. })
+                    if reason.contains("Text file busy") =>
+                {
+                    std::thread::sleep(Duration::from_millis(*backoff_ms));
+                }
+                other => return other,
+            }
+        }
+        // Final attempt — surface whatever it returns.
+        ensure_daemon_ready(binary_name, app_name, socket_path)
+    }
+
     /// Build a unique socket path under a short root to stay under
     /// macOS's 104-byte `SUN_LEN` limit. `std::env::temp_dir()` on
     /// GitHub's macos-latest runner resolves to a deeply-nested
@@ -377,8 +417,8 @@ mod tests {
         let _unused = std::fs::remove_file(&sock);
 
         let start = std::time::Instant::now();
-        let err =
-            ensure_daemon_ready(&bin_name, "myapp", &sock).expect_err("should fail (no socket)");
+        let err = ensure_daemon_ready_etxtbsy_resilient(&bin_name, "myapp", &sock)
+            .expect_err("should fail (no socket)");
         let elapsed = start.elapsed();
 
         assert!(
@@ -387,9 +427,10 @@ mod tests {
         );
         // The full readiness schedule sums to ~10s; the exit-0
         // short-circuit should resolve well under 1s on any
-        // halfway sane machine.
+        // halfway sane machine. Allow extra slack for the ETXTBSY
+        // retry budget (worst case ~155ms of sleeps).
         assert!(
-            elapsed < Duration::from_millis(800),
+            elapsed < Duration::from_millis(1200),
             "exit-0 short-circuit took too long: {elapsed:?}",
         );
     }
@@ -408,8 +449,8 @@ mod tests {
         let _unused = std::fs::remove_file(&sock);
 
         let start = std::time::Instant::now();
-        let err =
-            ensure_daemon_ready(&bin_name, "myapp", &sock).expect_err("should fail (exit 42)");
+        let err = ensure_daemon_ready_etxtbsy_resilient(&bin_name, "myapp", &sock)
+            .expect_err("should fail (exit 42)");
         let elapsed = start.elapsed();
 
         match err {
@@ -421,8 +462,9 @@ mod tests {
             }
             other => panic!("expected SpawnFailed; got {other:?}"),
         }
+        // Slack for the ETXTBSY retry budget (worst case ~155ms).
         assert!(
-            elapsed < Duration::from_millis(800),
+            elapsed < Duration::from_millis(1200),
             "exit-nonzero short-circuit took too long: {elapsed:?}",
         );
     }
@@ -473,7 +515,8 @@ mod tests {
         let sock = unique_socket("fork-bind");
         let _unused = std::fs::remove_file(&sock);
 
-        let got = ensure_daemon_ready(&bin_name, "myapp", &sock).expect("should succeed");
+        let got = ensure_daemon_ready_etxtbsy_resilient(&bin_name, "myapp", &sock)
+            .expect("should succeed");
         assert!(
             matches!(got, DaemonSpawn::Spawned { .. }),
             "expected Spawned; got {got:?}"
