@@ -384,6 +384,7 @@ jobs:
           IDENTITY: ${{ inputs.macos_signing_identity }}
           ENTITLEMENTS: ${{ inputs.macos_entitlements_plist }}
           BUNDLE_PATH: ${{ steps.app_bundle.outputs.bundle_path }}
+          PRIMARY: ${{ steps.app_bundle.outputs.primary }}
         run: |
           entitlements_arg=()
           if [ -n "$ENTITLEMENTS" ]; then
@@ -399,23 +400,40 @@ jobs:
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
 
           if [ -n "$BUNDLE_PATH" ]; then
-            # .app mode: sign every Mach-O inside Contents/MacOS first,
-            # then sign the bundle as a whole. Apple deprecated `--deep`;
-            # the recommended pattern is "leaves first, then container".
+            # .app mode: sign leaves first, then the bundle's primary
+            # executable, then the bundle as a whole. Apple deprecated
+            # `--deep`; the canonical ordering is "all helpers, then
+            # the main executable, then the container".
             #
-            # Important: do NOT verify each child individually here.
-            # `codesign --verify` on a binary inside `<app>.app/Contents/MacOS/`
-            # is bundle-aware — it triggers a whole-bundle verification
-            # that fails on the still-unsigned siblings later in the
-            # alphabetic loop. Save verification for the bundle pass at
-            # the end, where `--strict --deep` covers every child.
+            # `codesign --sign` on the file matching `CFBundleExecutable`
+            # is bundle-aware — it validates the bundle's other components
+            # at sign time and refuses if any helper is unsigned. So we
+            # MUST sign all non-primary children before touching the
+            # primary, regardless of alphabetic order.
+            #
+            # Per-child verify is deliberately omitted: `codesign --verify`
+            # on a child of an .app is also bundle-aware and would trip
+            # the same "unsigned subcomponent" failure. The final bundle
+            # verify at the bottom of this branch covers every child via
+            # `--strict --deep`.
             for f in "$BUNDLE_PATH/Contents/MacOS"/*; do
               [ -f "$f" ] || continue
+              base=$(basename "$f")
+              if [ "$base" = "$PRIMARY" ]; then
+                continue
+              fi
               codesign --force --sign "$IDENTITY" \
                 --options runtime --timestamp \
                 "${entitlements_arg[@]}" \
                 "$f"
             done
+            primary_path="$BUNDLE_PATH/Contents/MacOS/$PRIMARY"
+            if [ -f "$primary_path" ]; then
+              codesign --force --sign "$IDENTITY" \
+                --options runtime --timestamp \
+                "${entitlements_arg[@]}" \
+                "$primary_path"
+            fi
             codesign --force --sign "$IDENTITY" \
               --options runtime --timestamp \
               "${entitlements_arg[@]}" \
