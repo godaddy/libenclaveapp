@@ -402,13 +402,19 @@ jobs:
             # .app mode: sign every Mach-O inside Contents/MacOS first,
             # then sign the bundle as a whole. Apple deprecated `--deep`;
             # the recommended pattern is "leaves first, then container".
+            #
+            # Important: do NOT verify each child individually here.
+            # `codesign --verify` on a binary inside `<app>.app/Contents/MacOS/`
+            # is bundle-aware — it triggers a whole-bundle verification
+            # that fails on the still-unsigned siblings later in the
+            # alphabetic loop. Save verification for the bundle pass at
+            # the end, where `--strict --deep` covers every child.
             for f in "$BUNDLE_PATH/Contents/MacOS"/*; do
               [ -f "$f" ] || continue
               codesign --force --sign "$IDENTITY" \
                 --options runtime --timestamp \
                 "${entitlements_arg[@]}" \
                 "$f"
-              codesign --verify --strict --verbose=2 "$f"
             done
             codesign --force --sign "$IDENTITY" \
               --options runtime --timestamp \
