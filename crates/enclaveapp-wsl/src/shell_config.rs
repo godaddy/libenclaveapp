@@ -70,10 +70,23 @@ pub fn is_installed(path: &Path, config: &ShellBlockConfig) -> Result<bool> {
 
 /// Install a managed block into a shell config file.
 ///
-/// Appends the block at the end of the file, separated by a blank line from
-/// any existing content. Creates the file and parent directories if needed.
+/// Three outcomes:
 ///
-/// Returns `AlreadyPresent` if the block marker is already found.
+/// - **Block missing** → append the new block at the end of the
+///   file, separated by a blank line from any existing content.
+///   Returns `Installed`.
+/// - **Block present with the *same* content** → no-op.
+///   Returns `AlreadyPresent`.
+/// - **Block present with *different* content** (e.g. an older
+///   release of the same app shipped a different shell block) →
+///   replace the block in place, preserving everything outside the
+///   markers. Returns `Installed`. This is what makes
+///   `sshenc install` on a newer release actually update the
+///   bashrc — without this, an older marker keeps the old block
+///   alive forever and the user never gets the v0.6.37 native-only
+///   transport.
+///
+/// Creates the file and parent directories if needed.
 pub fn install_block(path: &Path, config: &ShellBlockConfig) -> Result<InstallResult> {
     let content = if path.exists() {
         std::fs::read_to_string(path)?
@@ -83,9 +96,33 @@ pub fn install_block(path: &Path, config: &ShellBlockConfig) -> Result<InstallRe
 
     // Normalize line endings
     let content = content.replace("\r\n", "\n");
+    let begin = config.begin_marker();
+    let end = config.end_marker();
+    let new_block = config.full_block();
 
-    if content.contains(&config.begin_marker()) {
-        return Ok(InstallResult::AlreadyPresent);
+    // Block already present — diff it against the current shipped
+    // content. If identical, no-op; if different, replace in place.
+    if let Some(begin_idx) = content.find(&begin) {
+        if let Some(rel_end_idx) = content[begin_idx..].find(&end) {
+            let block_end = begin_idx + rel_end_idx + end.len();
+            let existing = &content[begin_idx..block_end];
+            if existing == new_block {
+                return Ok(InstallResult::AlreadyPresent);
+            }
+            // Replace the block in place — keep everything before
+            // and after the markers exactly as-is.
+            let mut output = String::with_capacity(content.len() + new_block.len());
+            output.push_str(&content[..begin_idx]);
+            output.push_str(&new_block);
+            output.push_str(&content[block_end..]);
+            std::fs::write(path, &output)?;
+            return Ok(InstallResult::Installed);
+        }
+        // BEGIN marker present but no END marker — file got
+        // truncated or hand-edited. Fall through to append, even
+        // though that produces a messy file; better than refusing
+        // to install. The duplicate BEGIN will be picked up by
+        // `uninstall_block` and `is_installed`.
     }
 
     // Ensure parent directory exists
@@ -102,7 +139,7 @@ pub fn install_block(path: &Path, config: &ShellBlockConfig) -> Result<InstallRe
     if !output.is_empty() {
         output.push('\n');
     }
-    output.push_str(&config.full_block());
+    output.push_str(&new_block);
     output.push('\n');
 
     std::fs::write(path, &output)?;
@@ -286,6 +323,50 @@ mod tests {
         let content_second = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(content_first, content_second);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_replaces_outdated_block() {
+        // The exact scenario `sshenc install` v0.6.37 hit on hosts
+        // upgraded from v0.6.33: a managed block already exists,
+        // but its content is the older shipped block (e.g. socat
+        // fallback). The new install must overwrite it in place,
+        // keeping everything outside the markers untouched.
+        let dir = test_dir("install-replaces-outdated");
+        let path = dir.join(".bashrc");
+
+        // Stamp an old block with the same markers but different
+        // body, surrounded by user content.
+        let old_config = ShellBlockConfig::new("testapp", "export OLD=1");
+        std::fs::write(
+            &path,
+            format!(
+                "# user pre-content\nexport USER_VAR=keep\n\n{}\n\n# user post-content\nalias ll='ls -la'\n",
+                old_config.full_block()
+            ),
+        )
+        .unwrap();
+
+        // Install a *new* block under the same app name.
+        let new_config = ShellBlockConfig::new("testapp", "export NEW=v2");
+        let result = install_block(&path, &new_config).unwrap();
+        assert_eq!(result, InstallResult::Installed);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // New body present, old body gone.
+        assert!(content.contains("export NEW=v2"), "new body missing");
+        assert!(!content.contains("export OLD=1"), "old body still present");
+        // User content outside the markers untouched.
+        assert!(content.contains("export USER_VAR=keep"));
+        assert!(content.contains("alias ll='ls -la'"));
+        // Exactly one block, not two appended.
+        let block_count = content.matches(&new_config.begin_marker()).count();
+        assert_eq!(
+            block_count, 1,
+            "expected exactly one block, got {block_count}"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
