@@ -114,48 +114,85 @@ pub fn verify_ui_policy_matches(
         .chain(std::iter::once(0))
         .collect();
 
-    let mut actual = NCRYPT_UI_POLICY {
-        dwVersion: 0,
-        dwFlags: 0,
-        pszCreationTitle: PCWSTR::null(),
-        pszFriendlyName: PCWSTR::null(),
-        pszDescription: PCWSTR::null(),
-    };
-    let mut actual_size: u32 = 0;
-    let buf = unsafe {
-        std::slice::from_raw_parts_mut(
-            &mut actual as *mut _ as *mut u8,
-            std::mem::size_of::<NCRYPT_UI_POLICY>(),
+    // Two-call pattern. CNG's serialized form for `NCRYPT_UI_POLICY`
+    // is the struct followed by the inline string contents that the
+    // three `LPCWSTR` fields point to (length is variable and can
+    // exceed `sizeof(NCRYPT_UI_POLICY)` even when the strings were
+    // null at SET time, because CNG normalizes them). Passing a
+    // fixed-size buffer fails with `NTE_BUFFER_TOO_SMALL (0x80090028)`
+    // — the symptom in sshenc#180. First query the required size
+    // with a null buffer, then allocate exactly that and read.
+    let mut required: u32 = 0;
+    let size_result = unsafe {
+        NCryptGetProperty(
+            NCRYPT_HANDLE(key_handle.as_key().0),
+            PCWSTR(prop_name.as_ptr()),
+            None,
+            &mut required,
+            OBJECT_SECURITY_INFORMATION(0),
         )
     };
 
+    if let Err(e) = size_result {
+        // SPC_E_NO_POLICY / NTE_NOT_FOUND surface as a missing policy
+        // — translate to "no flag set" so the comparison below treats
+        // it as AccessPolicy::None.
+        if expected == AccessPolicy::None {
+            return Ok(());
+        }
+        return Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail: format!(
+                "NCryptGetProperty(UI Policy) size query for key with expected policy \
+                 {expected:?}: {e}",
+            ),
+        });
+    }
+
+    if (required as usize) < std::mem::size_of::<NCRYPT_UI_POLICY>() {
+        return Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail: format!(
+                "NCryptGetProperty(UI Policy) reported a buffer size of {required} bytes, \
+                 smaller than sizeof(NCRYPT_UI_POLICY)={}",
+                std::mem::size_of::<NCRYPT_UI_POLICY>()
+            ),
+        });
+    }
+
+    let mut buf = vec![0_u8; required as usize];
+    let mut actual_size = required;
     let result = unsafe {
         NCryptGetProperty(
             NCRYPT_HANDLE(key_handle.as_key().0),
             PCWSTR(prop_name.as_ptr()),
-            Some(buf),
+            Some(&mut buf),
             &mut actual_size,
             OBJECT_SECURITY_INFORMATION(0),
         )
     };
 
-    let actual_flags: u32 = match result {
-        Ok(()) => actual.dwFlags,
-        Err(e) => {
-            // SPC_E_NO_POLICY / NTE_NOT_FOUND both surface as a missing
-            // policy — translate to "no flag set" so the comparison
-            // below treats it as AccessPolicy::None.
-            if expected == AccessPolicy::None {
-                return Ok(());
-            }
-            return Err(enclaveapp_core::Error::KeyOperation {
-                operation: "verify_ui_policy".into(),
-                detail: format!(
-                    "NCryptGetProperty(UI Policy) for key with expected policy {expected:?}: {e}",
-                ),
-            });
+    if let Err(e) = result {
+        if expected == AccessPolicy::None {
+            return Ok(());
         }
-    };
+        return Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail: format!(
+                "NCryptGetProperty(UI Policy) for key with expected policy {expected:?}: {e}",
+            ),
+        });
+    }
+
+    // We only need `dwFlags`; ignore the trailing inline strings and
+    // their pointers, which point into the local buffer (not stable
+    // outside this scope).
+    //
+    // SAFETY: `buf` is at least `sizeof(NCRYPT_UI_POLICY)` bytes (we
+    // checked `required` above) and CNG just wrote a valid
+    // `NCRYPT_UI_POLICY` into the prefix. Reading a `u32`-sized
+    // `dwFlags` field from a properly-sized buffer is sound.
+    let actual_flags = unsafe { (*(buf.as_ptr() as *const NCRYPT_UI_POLICY)).dwFlags };
 
     let has_protect_flag =
         (actual_flags & NCRYPT_UI_PROTECT_KEY_FLAG) == NCRYPT_UI_PROTECT_KEY_FLAG;
