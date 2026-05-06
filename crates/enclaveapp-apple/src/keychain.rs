@@ -373,7 +373,10 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
 
     // Disk rename first — cheap to roll back and doesn't touch the
     // keychain. If this fails the keychain is untouched.
-    metadata::rename_key_files(&dir, old_label, new_label)?;
+    // Apple/Secure Enclave keys do not use the `.meta.hmac` sidecar
+    // (hardware-side enforcement makes the meta HMAC redundant), so
+    // pass `None`.
+    metadata::rename_key_files(&dir, old_label, new_label, None)?;
 
     // Move the wrapping-key entry via the oracle API. The raw key
     // bytes never escape `keychain_wrap`. On failure, roll back the
@@ -386,7 +389,7 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
         config.wrapping_key_user_presence,
         config.keychain_access_group.as_deref(),
     ) {
-        let rollback = metadata::rename_key_files(&dir, new_label, old_label);
+        let rollback = metadata::rename_key_files(&dir, new_label, old_label, None);
         if let Err(rollback_err) = rollback {
             tracing::error!(
                 "rename_key: relabel_wrapping_key failed ({error}) and disk rollback ALSO failed \

@@ -513,9 +513,15 @@ pub fn rename_key(config: &SoftwareConfig, old_label: &str, new_label: &str) -> 
     // creates a fresh KEK in the keyring under `(app_name, new_label)`.
     save_private_key(config, &new_key_path, &secret_bytes, new_label)?;
 
-    // Rename the metadata sibling files. If this fails, roll back the
-    // new .key (and its freshly-registered keyring KEK, if any).
-    if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label) {
+    // Rename the metadata sibling files. Pass the per-app HMAC key
+    // (when keyring is available) so the `.meta.hmac` sidecar is
+    // recomputed against the relabeled meta. Otherwise the rename
+    // would either leave the old-label sidecar orphaned (now wrong
+    // for the new-label meta JSON) or, if rename_key_files refused
+    // to proceed without the key, fail outright.
+    let hmac_key = meta_hmac_key(&config.app_name);
+    let hmac_slice = hmac_key.as_ref().map(|k| k.as_slice());
+    if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label, hmac_slice) {
         drop(std::fs::remove_file(&new_key_path));
         #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
         delete_keyring_entry(&config.app_name, new_label);
