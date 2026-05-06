@@ -1,11 +1,68 @@
 # Design: Cross-platform `.meta` HMAC integrity
 
-**Status:** Draft
+**Status:** PRs 1-5 implemented on `cross-platform-meta-hmac`
+branch. PRs 6-7 pending.
 **Updated:** 2026-05-06
-**Branch:** `cross-platform-meta-hmac`
+**Branch:** `cross-platform-meta-hmac` (rebased onto
+`deep-review-fixes`)
 **Depends on:** `deep-review-fixes` branch (PR godaddy/libenclaveapp#119,
 godaddy/sshenc#193) — adds `MetaIntegrityMode` and the strict-mode
 load on the Linux keyring path.
+
+## Implementation status
+
+| PR | Title | Status | Commit |
+| -- | ----- | ------ | ------ |
+| 1  | macOS legacy-Keychain backing for meta-HMAC key | **DONE** | `db0e3e3` |
+| 2  | Windows DPAPI-backed meta-HMAC key | **DONE** | `5a482e8` |
+| 3  | Cross-platform `meta_hmac_key` dispatch + `verify_meta_integrity` helper | **DONE** | `22d210e` |
+| 4  | Encryption-side `ensure_key` strict-HMAC on all platforms | **DONE** | `9506185` |
+| 5  | Signing-side init paths wired through `verify_meta_integrity` | **DONE** | `9ff4b62` |
+| 6  | Hardware backends switch from `save_meta` to `save_meta_with_hmac` | **PENDING** | — |
+| 7  | Threat-model edits + design-doc final pass | **PENDING** | — |
+
+## Operational invariants enforced by the code
+
+These were not all in the original draft. Two surfaced during
+implementation as user-visible regressions and now belong here:
+
+### No Keychain access without a `.meta` to verify
+
+`platform::verify_meta_integrity` and the strict-mode path in
+`encryption::ensure_key` both check
+`<keys_dir>/<label>.meta.exists()` **before** invoking
+`platform::meta_hmac_key`. Without this guard, a synthetic call
+site (test binary, fresh-install probe, dev tool) hits the macOS
+Keychain to *create* an HMAC item from the test binary's code
+signature, which fires the legacy-Keychain ACL approval prompt and
+pollutes the user's login keychain with debris. That regression
+fired during this branch's `cargo test --workspace` run — the
+file-existence check is non-negotiable.
+
+### No extra biometric / approval prompts per op
+
+The macOS and Windows `meta_hmac` modules cache the loaded HMAC
+key process-locally in a `Mutex<HashMap<String, Box<Zeroizing<[u8;
+32]>>>>`. Once the agent loads the HMAC key once at init, every
+subsequent `verify_meta_integrity` call within that process
+returns from cache — HMAC compute only, no Keychain or DPAPI
+syscall, no biometric or approval prompt. The cost matches the
+wrapping-key cache discipline: once-per-agent-session, never
+per-op.
+
+### Agent-only Keychain reads on macOS
+
+The macOS HMAC store uses the legacy Keychain whose ACL is bound
+to the creating binary's code signature. Cross-binary access
+fires the approval sheet. To keep the prompt count flat:
+
+- `enclaveapp-apple::meta_hmac` is intended to be called from
+  `sshenc-agent` only — never from sshenc CLI binaries.
+- The CLI's `AgentProxyBackend` already has zero direct
+  platform-FFI calls (it forwards every write op to the agent
+  via IPC); the same invariant extends to the meta-HMAC store.
+- Single-binary apps (awsenc, sso-jwt, npmenc) call the store
+  from their own binary, so cross-binary doesn't apply there.
 
 ## Background
 
