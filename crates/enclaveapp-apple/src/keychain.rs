@@ -10,6 +10,7 @@ use enclaveapp_core::metadata::{self, KeyMeta};
 use enclaveapp_core::types::{validate_label, KeyType};
 use enclaveapp_core::{Error, Result};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 const SE_ERR_BUFFER_TOO_SMALL: i32 = 4;
 
@@ -410,7 +411,7 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
 /// legacy plaintext blobs are returned unchanged for transparent
 /// migration — they'll be re-wrapped the next time `generate_and_save_key`
 /// replaces the label.
-pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
+pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Zeroizing<Vec<u8>>> {
     load_handle_with_context(config, label, 0)
 }
 
@@ -421,11 +422,19 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
 /// "no context, prompt independently if userPresence-protected"
 /// behaviour. Used by the sign path so a single `evaluatePolicy`
 /// covers both the keychain decrypt and the SE sign that follows.
+///
+/// The returned data-representation handle is wrapped in
+/// [`Zeroizing`] so its plaintext bytes are wiped on drop. The
+/// `data_rep` is the SE-key reference that lets a caller derive
+/// the public key, sign, encrypt, decrypt, or delete the key — it
+/// is not the raw private-key bytes (those never leave the SEP),
+/// but it is sensitive enough that we don't want copies lingering
+/// in the heap allocator's freelist.
 pub fn load_handle_with_context(
     config: &KeychainConfig,
     label: &str,
     lacontext_token: u64,
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     validate_label(label)?;
     let path = config.keys_dir().join(format!("{label}.handle"));
     if !path.exists() {
@@ -443,7 +452,7 @@ pub fn load_handle_with_context(
             label = label,
             "loaded legacy plaintext SE handle; re-save to upgrade to wrapped format"
         );
-        return Ok(contents);
+        return Ok(Zeroizing::new(contents));
     }
 
     match crate::keychain_wrap::decrypt_with_cached_key(
@@ -454,7 +463,7 @@ pub fn load_handle_with_context(
         config.keychain_access_group.as_deref(),
         lacontext_token,
     )? {
-        Some(plaintext) => Ok(plaintext),
+        Some(plaintext) => Ok(Zeroizing::new(plaintext)),
         None => Err(Error::KeyOperation {
             operation: "load_handle".into(),
             detail: format!(
