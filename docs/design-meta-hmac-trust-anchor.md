@@ -314,6 +314,176 @@ A second-run attempt always requires `--force-rerun-i-understand`
 even with `--yes`, so the marker-present strong warning cannot be
 short-circuited by ambient automation.
 
+## Cross-platform follow-ups
+
+The macOS-first PR (libenclaveapp #122 + sshenc #196) closes the
+auto-migrate hole **for sshenc on macOS only**. Three follow-up
+tracks remain. Each is a self-contained PR; the macOS implementation
+is the reference template for files / function shapes.
+
+Reference points to mirror:
+
+| Concept | Reference (macOS) |
+| --- | --- |
+| Per-key keychain meta-tag store | `crates/enclaveapp-apple/src/meta_tag.rs` |
+| Migration marker | `crates/enclaveapp-apple/src/meta_migration_marker.rs` |
+| Read-only meta-HMAC key access | `enclaveapp_apple::meta_hmac::load_existing` |
+| Per-op verify entry point | `crates/enclaveapp-apple/src/keychain.rs::ensure_meta_integrity` |
+| Cross-platform helper | `enclaveapp_app_storage::platform::check_meta_integrity` (currently macOS-only branch) |
+| Agent RPCs | `SSH_AGENTC_SSHENC_MIGRATE_META`, `SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER`, `SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER` in `sshenc-agent-proto/src/message.rs` |
+
+### Track 1: Windows TPM (CNG)
+
+**Crate:** `enclaveapp-windows`.
+
+- **Per-key tag storage.** Two viable mechanisms:
+  - `NCryptSetProperty` on the persisted CNG key handle with a
+    custom property name (e.g. `L"sshenc-meta-tag"`). Pro: tag
+    travels with the key; deleting the key cleans up the tag for
+    free. Con: NCrypt custom-property quirks across Windows
+    versions; need to test on 10 / 11 / Server 2022.
+  - Separate `<%APPDATA%\<app>\.meta-tags\<label>.dpapi>` file
+    per key, encrypted via `CryptProtectData(CRYPTPROTECT_UI_FORBIDDEN)`.
+    Pro: simpler to implement, mirrors the existing
+    `.meta-hmac.dpapi` pattern in `crates/enclaveapp-windows/src/meta_hmac.rs`.
+    Con: another file the user can delete (deletion primitive
+    risk applies — but DPAPI is bound to the user profile, so a
+    fresh write would fail without the right user context, which
+    helps).
+- **Recommended:** option 1 (`NCryptSetProperty`). Same trust
+  domain as the wrapping key.
+- **Migration marker:** another DPAPI blob at
+  `%APPDATA%\<app>\.migrate-marker.dpapi`. Cannot live in NCrypt
+  because no per-key handle exists at marker-set time.
+  Alternative: a single keyring-style entry via Windows Credential
+  Manager's `CredRead`/`CredWrite` for app-scoped credentials —
+  more aligned with the keychain pattern but more code. Pick
+  whichever is cheaper.
+- **Per-op verify:** add `ensure_meta_integrity` analogue to
+  `crates/enclaveapp-windows/src/sign.rs::TpmSigner::sign` (or a
+  new helper in `crates/enclaveapp-windows/src/keychain.rs` if
+  there is one) that fires before `NCryptSignHash`.
+- **Test environment:** must run on a real Windows host with a
+  TPM. Hyper-V / Parallels VMs with vTPM enabled should work.
+  Plain VMs without vTPM cannot exercise this.
+- **Existing CI matrix:** `Check / Test (Windows)` already runs
+  on `windows-latest` (currently `windows-2025`). Confirm whether
+  GitHub-hosted runners have vTPM (they do not, by default —
+  TPM-bound tests will need to be `#[ignore]`d on CI and run
+  via a local Windows VM or self-hosted runner).
+
+### Track 2: Linux keyring (software)
+
+**Crate:** `enclaveapp-keyring`.
+
+- **Per-key tag storage.** Two viable mechanisms:
+  - Kernel keyring via the `keyutils` crate. `add_key` /
+    `keyctl_read` with a per-key keyring entry under a
+    user-scoped session keyring. Trust domain: same as the
+    wrapping key (per-app keyring entry).
+  - File-backed: a sibling file `<keys_dir>/<label>.meta.tag`
+    at 0600. **Worse** than the keyring path because it's another
+    `rm`-able file — same deletion primitive issue the macOS PR
+    explicitly avoided. Avoid unless keyring is unavailable.
+- **Recommended:** kernel keyring with file fallback.
+- **Migration marker:** keyring entry under
+  `enclaveapp:sshenc:migrate-marker` or similar. Same access
+  semantics as the meta-HMAC key entry already in
+  `enclaveapp-keyring::meta_hmac_key`.
+- **Per-op verify:** wire into
+  `crates/enclaveapp-keyring/src/sign.rs::SoftwareSigner::sign`
+  before the actual ECDSA signature.
+- **Note:** the Linux keyring backend is software-only. The
+  trust anchor here protects against same-UID FS attackers but
+  does not provide hardware-rooted security. Worth being explicit
+  about that in the threat model entry — the meta-tag is an
+  integrity check, not a confidentiality boundary.
+
+### Track 3: Linux TPM (`enclaveapp-linux-tpm`)
+
+**Caveat first:** the Linux TPM backend currently does **not**
+enforce `AccessPolicy` at sign time (per
+`libenclaveapp/THREAT_MODEL.md` § "Linux TPM backend"). Adding
+meta-tag protection on top of a backend that doesn't gate on
+policy is partial — the `AccessPolicy` field could be respected
+by the meta-tag check but ignored at the TPM layer. Decide whether
+to fix the policy-enforcement gap first or accept that meta-tag is
+"integrity for the displayed value, not enforcement for the
+hardware op" on Linux TPM.
+
+- **Per-key tag storage.** Sealed against the TPM's PCR-bound
+  policy via `Esys_PolicySecret` + `Esys_HashSequenceComplete`,
+  or a TPM-NV-RAM index. Heavy. Cheaper alternative: piggy-back
+  on the kernel keyring (Track 2) since the Linux TPM signer
+  already has a software side for ancillary state.
+- **Recommended:** kernel keyring (Track 2), shared mechanism
+  between software-keyring and TPM Linux backends.
+- **Per-op verify:** wire into
+  `crates/enclaveapp-linux-tpm/src/sign.rs::LinuxTpmSigner::sign`.
+
+### Track 4: shell rc support beyond zsh/bash
+
+**Crate:** `sshenc-core` (`shell_env.rs`) and `sshenc-cli`
+(`commands.rs::install` / `uninstall`).
+
+Current coverage:
+
+- `Shell::Zsh` → `~/.zshrc`
+- `Shell::Bash` on macOS → `~/.bash_profile`
+- `Shell::Bash` on Linux → `~/.bashrc`
+- `Shell::Unknown` (fish, PowerShell, cmd.exe, others) → no
+  rc edit; user is told to add the snippet manually.
+
+Follow-up tracks:
+
+- **fish (`~/.config/fish/config.fish`):** different syntax. Use
+  `set -gx SSH_AUTH_SOCK` instead of `export`. Conditional with
+  `test -S` instead of `[ -S ]`. Add `Shell::Fish` variant to the
+  enum and a fish-specific snippet generator.
+- **PowerShell (`$PROFILE`, typically
+  `~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1`):**
+  PowerShell 7's profile file. Different syntax:
+  `if (Test-Path "$env:USERPROFILE\.sshenc\agent.sock") { $env:SSH_AUTH_SOCK = ... }`.
+  Note: native Windows ssh-keygen reads `SSH_AUTH_SOCK` differently
+  than POSIX — it expects a named pipe path, not a Unix socket path.
+  Confirm Windows OpenSSH behavior before writing the snippet.
+- **cmd.exe:** has no rc file. Use `setx SSH_AUTH_SOCK` to write to
+  the user's persistent environment, plus a transient `set` for
+  the current session. Document that cmd.exe support is "user-
+  level env var only" — no per-session rc.
+- **Windows PowerShell 5.1 (the legacy system one):** different
+  profile path (`~/Documents/WindowsPowerShell/...`). Probably
+  not worth special-casing; users running modern setups have
+  PowerShell 7.
+
+### Track 5: cross-app coverage
+
+`migrate-meta` ships only in sshenc. The trust-anchor design is
+also relevant to:
+
+- **awsenc** — uses `enclaveapp-app-storage::encryption` for AWS
+  credential storage. The encryption-side `ensure_key` already
+  uses `verify_meta_integrity` with auto-migrate; the same hole
+  the trust anchor closes for sshenc applies there. Add an
+  `awsenc migrate-meta` subcommand and the matching agent RPC
+  (or have awsenc reuse sshenc's agent RPCs by app-name
+  parameter).
+- **sso-jwt** — same situation as awsenc.
+- **npmenc** — same.
+- **gitenc** — wraps sshenc, no separate migrate-meta needed.
+
+The cross-platform `meta_migration_marker` and `meta_tag` modules
+should be parameterized by app-name (already done — they take
+`app_name: &str`). The agent RPC handlers in `sshenc-agent` are
+hardcoded to `"sshenc"` today; a follow-up either:
+
+1. Generalizes the agent to multi-app, or
+2. Each app gets its own agent (current pattern: awsenc-agent,
+   etc.), each with its own copy of the migrate-meta RPC handler.
+
+Pick one before duplicating the macOS sshenc-agent code into
+awsenc-agent, or the duplication compounds.
+
 ## Open questions (implementation-time)
 
 1. **Where in the keychain item does the tag live?** Settled:
