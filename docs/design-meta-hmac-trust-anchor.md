@@ -204,6 +204,25 @@ reflex impossible.
 Treat the version number `vX.Y.0` as a placeholder — the implementing
 release substitutes its own version into the strings below.
 
+### Where the migration marker lives
+
+The marker that distinguishes "first time after upgrade" from "second
+time, this is suspicious" is stored **in the legacy macOS Keychain**
+under service `com.godaddy.<app>.migrate-marker` / account
+`__completed__`, **not in a file**. A file marker (e.g.,
+`~/.config/<app>/.meta-migration-completed`) is a trivial deletion
+primitive: a same-UID FS attacker simply `rm`s it to fake "first time
+after upgrade" and gets the gentle migrate-meta UI back, restoring
+the auto-migrate hole the trust anchor closes. The keychain-stored
+marker shares the signed-binary ACL with the per-key meta-tags;
+attacker without the agent's code signature can neither read nor
+delete it.
+
+The agent owns reads and writes via two RPCs
+(`SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER`,
+`SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER`); the CLI never touches the
+Keychain directly, preserving the cross-binary ACL invariant.
+
 ### Agent `legacy_meta` error message
 
 Printed when the agent encounters a key with no keychain tag (no
