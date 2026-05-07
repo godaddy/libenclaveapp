@@ -265,6 +265,39 @@ pub fn save_meta_with_hmac(dir: &Path, label: &str, meta: &KeyMeta, hmac_key: &[
     Ok(())
 }
 
+/// Integrity policy for [`load_meta_with_hmac`].
+///
+/// On the keyring/software backend, `<label>.meta.hmac` is the only
+/// thing that authenticates the `.meta` JSON — meta-tamper without
+/// the sidecar means a same-UID attacker can lie about
+/// `AccessPolicy` (and any other policy-bearing field) without
+/// keyring access. Strict mode refuses missing sidecars so the
+/// promise in the threat model ("attacker without keyring access is
+/// caught") actually holds. Legacy mode is for one-shot migration
+/// from caches that pre-date the sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaIntegrityMode {
+    /// Both `.meta` and `.meta.hmac` must be present and verify. A
+    /// missing sidecar is a hard error
+    /// (`Error::KeyOperation { operation: "meta_hmac_missing", … }`).
+    /// New production code should use this mode.
+    RequireSidecar,
+    /// A missing sidecar is treated as a legacy cache from before the
+    /// HMAC sidecar shipped: the meta JSON is loaded verbatim and the
+    /// caller is expected to migrate via [`migrate_meta_to_hmac`]
+    /// immediately after a successful load. Reserved for the
+    /// one-time upgrade path.
+    AllowLegacyMissingSidecar,
+}
+
+/// Operation tag used in `Error::KeyOperation` when strict-mode
+/// HMAC loading sees `.meta` without a `.meta.hmac` sidecar.
+pub const META_HMAC_MISSING_OP: &str = "meta_hmac_missing";
+
+/// Operation tag used when a `.meta.hmac` sidecar exists but does
+/// not match the recomputed HMAC of the `.meta` JSON.
+pub const META_HMAC_VERIFY_OP: &str = "meta_hmac_verify";
+
 /// Load key metadata from a JSON file. Returns a default if the file doesn't exist.
 pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
     crate::types::validate_label(label)?;
@@ -284,14 +317,26 @@ pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
 
 /// Load key metadata with an HMAC check.
 ///
-/// If a sidecar `<label>.meta.hmac` exists, the HMAC is verified
-/// against `hmac_key`; on mismatch, returns [`Error::KeyOperation`]
-/// with `operation = "meta_hmac_verify"`. If the sidecar is absent,
-/// the meta is loaded verbatim — this preserves migration for
-/// legacy caches from before the sidecar shipped. Callers that care
-/// about strict verification should check for sidecar presence
-/// explicitly before accepting loaded meta.
-pub fn load_meta_with_hmac(dir: &Path, label: &str, hmac_key: &[u8]) -> Result<KeyMeta> {
+/// Behavior depends on `mode`:
+///
+/// - [`MetaIntegrityMode::RequireSidecar`]: both `<label>.meta` and
+///   `<label>.meta.hmac` must be present and verify. A missing
+///   `.meta.hmac` returns [`Error::KeyOperation`] with
+///   `operation = "meta_hmac_missing"`; a mismatching one returns
+///   `operation = "meta_hmac_verify"`.
+/// - [`MetaIntegrityMode::AllowLegacyMissingSidecar`]: a missing
+///   `.meta.hmac` is treated as a legacy cache — the meta JSON is
+///   returned verbatim and the caller is expected to migrate via
+///   [`migrate_meta_to_hmac`].
+///
+/// If `<label>.meta` itself is missing the function returns the
+/// default empty `KeyMeta` via [`load_meta`] in either mode.
+pub fn load_meta_with_hmac(
+    dir: &Path,
+    label: &str,
+    hmac_key: &[u8],
+    mode: MetaIntegrityMode,
+) -> Result<KeyMeta> {
     crate::types::validate_label(label)?;
     let meta_path = dir.join(format!("{label}.meta"));
     if !meta_path.exists() {
@@ -305,16 +350,49 @@ pub fn load_meta_with_hmac(dir: &Path, label: &str, hmac_key: &[u8]) -> Result<K
         let actual_hex = compute_meta_hmac(hmac_key, content.as_bytes());
         if !constant_time_eq(expected_hex.trim().as_bytes(), actual_hex.as_bytes()) {
             return Err(Error::KeyOperation {
-                operation: "meta_hmac_verify".into(),
+                operation: META_HMAC_VERIFY_OP.into(),
                 detail: format!(
                     "`.meta.hmac` does not match the stored `.meta` JSON for label {label}: \
                      metadata was tampered with after save"
                 ),
             });
         }
+    } else if mode == MetaIntegrityMode::RequireSidecar {
+        return Err(Error::KeyOperation {
+            operation: META_HMAC_MISSING_OP.into(),
+            detail: format!(
+                "`.meta` is present without a `.meta.hmac` sidecar for label {label}: \
+                 either the sidecar was deleted (tamper) or this is a legacy meta \
+                 that needs `migrate_meta_to_hmac`"
+            ),
+        });
     }
 
     serde_json::from_str(&content).map_err(|e| Error::Serialization(e.to_string()))
+}
+
+/// Write a `<label>.meta.hmac` sidecar for an existing `<label>.meta`
+/// using `hmac_key`. Used by callers that hit a missing-sidecar load
+/// in legacy mode and want to upgrade the on-disk artifacts so
+/// subsequent strict loads succeed.
+///
+/// This blesses the current `.meta` content as authentic. Callers
+/// that need to detect tamper before migration must do so via some
+/// other channel (e.g. a separately-authenticated marker in the
+/// keyring). Returns the sidecar path on success.
+pub fn migrate_meta_to_hmac(dir: &Path, label: &str, hmac_key: &[u8]) -> Result<PathBuf> {
+    crate::types::validate_label(label)?;
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Err(Error::KeyNotFound {
+            label: label.to_string(),
+        });
+    }
+    let content = read_to_string_no_follow(&meta_path)?;
+    let tag = compute_meta_hmac(hmac_key, content.as_bytes());
+    let hmac_path = dir.join(format!("{label}.meta.hmac"));
+    atomic_write(&hmac_path, tag.as_bytes())?;
+    Ok(hmac_path)
 }
 
 /// Compute HMAC-SHA256 over `data` keyed by `key`, hex-encoded.
@@ -462,14 +540,27 @@ pub fn key_files_exist(dir: &Path, label: &str) -> Result<bool> {
 }
 
 /// Rename all files associated with a key label.
-pub fn rename_key_files(dir: &Path, old_label: &str, new_label: &str) -> Result<()> {
-    rename_key_files_with_writer(dir, old_label, new_label, atomic_write)
+///
+/// If a `<old_label>.meta.hmac` sidecar exists, the caller must
+/// supply `hmac_key` so the sidecar can be recomputed against the
+/// renamed-and-relabeled meta JSON. Passing `None` when a sidecar is
+/// present returns an error rather than leaving an orphan or stale
+/// sidecar — the latter would break subsequent strict
+/// [`load_meta_with_hmac`] calls.
+pub fn rename_key_files(
+    dir: &Path,
+    old_label: &str,
+    new_label: &str,
+    hmac_key: Option<&[u8]>,
+) -> Result<()> {
+    rename_key_files_with_writer(dir, old_label, new_label, hmac_key, atomic_write)
 }
 
 fn rename_key_files_with_writer<F>(
     dir: &Path,
     old_label: &str,
     new_label: &str,
+    hmac_key: Option<&[u8]>,
     metadata_writer: F,
 ) -> Result<()>
 where
@@ -477,7 +568,6 @@ where
 {
     crate::types::validate_label(old_label)?;
     crate::types::validate_label(new_label)?;
-    let extensions = ["meta", "pub", "handle", "ssh.pub"];
     let old_handle = dir.join(format!("{old_label}.handle"));
     let old_meta = dir.join(format!("{old_label}.meta"));
     if !old_handle.exists() && !old_meta.exists() {
@@ -490,6 +580,20 @@ where
             label: new_label.to_string(),
         });
     }
+    let old_hmac = dir.join(format!("{old_label}.meta.hmac"));
+    if old_hmac.exists() && hmac_key.is_none() {
+        return Err(Error::KeyOperation {
+            operation: "rename_key_files".into(),
+            detail: format!(
+                "`{old_label}.meta.hmac` sidecar exists but no hmac_key was supplied; \
+                 rename would leave the sidecar stale or orphaned"
+            ),
+        });
+    }
+    // The handle/pub/ssh.pub files just move; .meta moves too but
+    // its content is rewritten below; .meta.hmac is regenerated
+    // below from the rewritten meta and is not part of the rename.
+    let extensions = ["meta", "pub", "handle", "ssh.pub"];
     let mut renamed = Vec::new();
     for ext in &extensions {
         let old = dir.join(format!("{old_label}.{ext}"));
@@ -504,6 +608,7 @@ where
     }
     // Update the label in the metadata file
     let new_meta_path = dir.join(format!("{new_label}.meta"));
+    let mut new_meta_json: Option<String> = None;
     if new_meta_path.exists() {
         let content = read_to_string_no_follow(&new_meta_path)?;
         let mut meta: KeyMeta =
@@ -512,6 +617,21 @@ where
         let json =
             serde_json::to_string_pretty(&meta).map_err(|e| Error::Serialization(e.to_string()))?;
         if let Err(err) = metadata_writer(&new_meta_path, json.as_bytes()) {
+            rollback_renames(&renamed)?;
+            return Err(err);
+        }
+        new_meta_json = Some(json);
+    }
+    // Recompute and rewrite the HMAC sidecar against the new meta.
+    // The old sidecar (still under the old label name) is unlinked
+    // unconditionally so a stale sidecar can't be picked up later.
+    if old_hmac.exists() {
+        drop(std::fs::remove_file(&old_hmac));
+    }
+    if let (Some(json), Some(key)) = (new_meta_json.as_ref(), hmac_key) {
+        let new_hmac = dir.join(format!("{new_label}.meta.hmac"));
+        let tag = compute_meta_hmac(key, json.as_bytes());
+        if let Err(err) = metadata_writer(&new_hmac, tag.as_bytes()) {
             rollback_renames(&renamed)?;
             return Err(err);
         }
@@ -560,7 +680,13 @@ mod tests {
             AccessPolicy::BiometricOnly,
         );
         save_meta_with_hmac(&dir, "roundtrip", &meta, hmac_key).unwrap();
-        let loaded = load_meta_with_hmac(&dir, "roundtrip", hmac_key).unwrap();
+        let loaded = load_meta_with_hmac(
+            &dir,
+            "roundtrip",
+            hmac_key,
+            MetaIntegrityMode::RequireSidecar,
+        )
+        .unwrap();
         assert_eq!(loaded.access_policy, AccessPolicy::BiometricOnly);
         assert_eq!(loaded.label, "roundtrip");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -579,9 +705,10 @@ mod tests {
         let tampered = raw.replace("biometric_only", "none");
         std::fs::write(&meta_path, tampered).unwrap();
 
-        let err = load_meta_with_hmac(&dir, "tamper", hmac_key).unwrap_err();
+        let err = load_meta_with_hmac(&dir, "tamper", hmac_key, MetaIntegrityMode::RequireSidecar)
+            .unwrap_err();
         assert!(
-            err.to_string().contains("meta_hmac_verify"),
+            err.to_string().contains(META_HMAC_VERIFY_OP),
             "expected HMAC-verify failure, got: {err}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -595,20 +722,74 @@ mod tests {
         save_meta_with_hmac(&dir, "wrongkey", &meta, hmac_key).unwrap();
 
         let bad_key = b"different-hmac-key-material-32by";
-        let err = load_meta_with_hmac(&dir, "wrongkey", bad_key).unwrap_err();
-        assert!(err.to_string().contains("meta_hmac_verify"));
+        let err = load_meta_with_hmac(&dir, "wrongkey", bad_key, MetaIntegrityMode::RequireSidecar)
+            .unwrap_err();
+        assert!(err.to_string().contains(META_HMAC_VERIFY_OP));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn meta_hmac_load_without_sidecar_is_transparent() {
-        // Legacy caches saved before the sidecar shipped must load OK.
+    fn meta_hmac_legacy_mode_accepts_missing_sidecar() {
+        // Legacy caches saved before the sidecar shipped must load OK
+        // in legacy/migration mode.
         let dir = test_dir();
         let hmac_key = b"test-hmac-key-material-32-bytes!";
         let meta = KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
         save_meta(&dir, "legacy", &meta).unwrap(); // no sidecar
-        let loaded = load_meta_with_hmac(&dir, "legacy", hmac_key).unwrap();
+        let loaded = load_meta_with_hmac(
+            &dir,
+            "legacy",
+            hmac_key,
+            MetaIntegrityMode::AllowLegacyMissingSidecar,
+        )
+        .unwrap();
         assert_eq!(loaded.label, "legacy");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn meta_hmac_strict_rejects_missing_sidecar() {
+        // Same scenario as the legacy test, but in strict mode the
+        // load must fail — otherwise an attacker who deletes the
+        // sidecar bypasses HMAC verification entirely.
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
+        save_meta(&dir, "legacy", &meta).unwrap();
+        let err = load_meta_with_hmac(&dir, "legacy", hmac_key, MetaIntegrityMode::RequireSidecar)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(META_HMAC_MISSING_OP),
+            "expected meta_hmac_missing, got: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migrate_meta_to_hmac_writes_sidecar_for_legacy_meta() {
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new("legacy", KeyType::Signing, AccessPolicy::None);
+        save_meta(&dir, "legacy", &meta).unwrap();
+        assert!(!dir.join("legacy.meta.hmac").exists());
+
+        migrate_meta_to_hmac(&dir, "legacy", hmac_key).unwrap();
+        assert!(dir.join("legacy.meta.hmac").exists());
+
+        // After migration, strict load succeeds.
+        let loaded =
+            load_meta_with_hmac(&dir, "legacy", hmac_key, MetaIntegrityMode::RequireSidecar)
+                .unwrap();
+        assert_eq!(loaded.label, "legacy");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migrate_meta_to_hmac_errors_for_missing_meta() {
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let err = migrate_meta_to_hmac(&dir, "ghost", hmac_key).unwrap_err();
+        assert!(matches!(err, Error::KeyNotFound { .. }));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -804,7 +985,7 @@ mod tests {
         let err = delete_key_files(&dir, "../escape").unwrap_err();
         assert!(matches!(err, Error::InvalidLabel { .. }));
 
-        let err = rename_key_files(&dir, "valid", "../escape").unwrap_err();
+        let err = rename_key_files(&dir, "valid", "../escape", None).unwrap_err();
         assert!(matches!(err, Error::InvalidLabel { .. }));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -897,7 +1078,7 @@ mod tests {
         save_meta(&dir, "old-name", &meta).unwrap();
         save_pub_key(&dir, "old-name", b"pubkey").unwrap();
 
-        rename_key_files(&dir, "old-name", "new-name").unwrap();
+        rename_key_files(&dir, "old-name", "new-name", None).unwrap();
 
         assert!(!dir.join("old-name.meta").exists());
         assert!(!dir.join("old-name.pub").exists());
@@ -918,7 +1099,7 @@ mod tests {
         let meta2 = KeyMeta::new("dst", KeyType::Signing, AccessPolicy::None);
         save_meta(&dir, "dst", &meta2).unwrap();
 
-        let err = rename_key_files(&dir, "src", "dst").unwrap_err();
+        let err = rename_key_files(&dir, "src", "dst", None).unwrap_err();
         match err {
             Error::DuplicateLabel { label } => assert_eq!(label, "dst"),
             other => panic!("expected DuplicateLabel, got: {other}"),
@@ -934,7 +1115,7 @@ mod tests {
         save_meta(&dir, "src", &meta).unwrap();
         save_pub_key(&dir, "dst", b"existing").unwrap();
 
-        let err = rename_key_files(&dir, "src", "dst").unwrap_err();
+        let err = rename_key_files(&dir, "src", "dst", None).unwrap_err();
         match err {
             Error::DuplicateLabel { label } => assert_eq!(label, "dst"),
             other => panic!("expected DuplicateLabel, got: {other}"),
@@ -952,7 +1133,7 @@ mod tests {
         save_meta(&dir, "old-name", &meta).unwrap();
         save_pub_key(&dir, "old-name", b"pubkey").unwrap();
 
-        let err = rename_key_files_with_writer(&dir, "old-name", "new-name", |_, _| {
+        let err = rename_key_files_with_writer(&dir, "old-name", "new-name", None, |_, _| {
             Err(Error::Serialization("forced failure".into()))
         })
         .unwrap_err();
@@ -967,10 +1148,63 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn rename_key_files_with_sidecar_recomputes_hmac_under_new_label() {
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new("old-name", KeyType::Signing, AccessPolicy::None);
+        save_meta_with_hmac(&dir, "old-name", &meta, hmac_key).unwrap();
+        save_pub_key(&dir, "old-name", b"pubkey").unwrap();
+
+        rename_key_files(&dir, "old-name", "new-name", Some(hmac_key)).unwrap();
+
+        assert!(!dir.join("old-name.meta").exists());
+        assert!(!dir.join("old-name.meta.hmac").exists());
+        assert!(dir.join("new-name.meta").exists());
+        assert!(dir.join("new-name.meta.hmac").exists());
+
+        // Strict load against the new label must succeed — i.e. the
+        // sidecar was rewritten to authenticate the relabeled meta,
+        // not left over as the old-name HMAC.
+        let loaded = load_meta_with_hmac(
+            &dir,
+            "new-name",
+            hmac_key,
+            MetaIntegrityMode::RequireSidecar,
+        )
+        .unwrap();
+        assert_eq!(loaded.label, "new-name");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn rename_key_files_with_sidecar_requires_hmac_key() {
+        // If the .meta.hmac sidecar is present but the caller forgot
+        // to pass the hmac_key, refuse the rename rather than leaving
+        // a stale or orphaned sidecar.
+        let dir = test_dir();
+        let hmac_key = b"test-hmac-key-material-32-bytes!";
+        let meta = KeyMeta::new("old-name", KeyType::Signing, AccessPolicy::None);
+        save_meta_with_hmac(&dir, "old-name", &meta, hmac_key).unwrap();
+
+        let err = rename_key_files(&dir, "old-name", "new-name", None).unwrap_err();
+        match err {
+            Error::KeyOperation { operation, .. } => assert_eq!(operation, "rename_key_files"),
+            other => panic!("expected KeyOperation, got: {other}"),
+        }
+        // No partial rename left behind.
+        assert!(dir.join("old-name.meta").exists());
+        assert!(dir.join("old-name.meta.hmac").exists());
+        assert!(!dir.join("new-name.meta").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)] // File I/O (mkdir) not supported under Miri isolation
     fn rename_key_files_rejects_missing_source() {
         let dir = test_dir();
-        let err = rename_key_files(&dir, "missing", "new").unwrap_err();
+        let err = rename_key_files(&dir, "missing", "new", None).unwrap_err();
         match err {
             Error::KeyNotFound { label } => assert_eq!(label, "missing"),
             other => panic!("expected KeyNotFound, got: {other}"),

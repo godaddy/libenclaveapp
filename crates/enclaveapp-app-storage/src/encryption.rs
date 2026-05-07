@@ -268,16 +268,45 @@ impl AppEncryptionStorage {
             // (Linux / keyring backend only). A HMAC mismatch is a hard
             // failure: someone rewrote `.meta` after save, so we don't
             // trust any stored policy and refuse to proceed.
+            //
+            // A *missing* sidecar in strict mode is also a hard error
+            // — that's exactly the threat model promise the sidecar
+            // is making ("attacker without keyring access is caught").
+            // We do allow a one-shot upgrade for caches written by
+            // pre-strict-mode versions: if the sidecar is missing,
+            // log a warning and migrate it from the current meta so
+            // subsequent loads are strict. The migration "blesses"
+            // whatever meta is on disk at first load after upgrade,
+            // which is an inherent property of any HMAC migration.
             #[cfg(target_os = "linux")]
             if let Some(hmac_key) = enclaveapp_keyring::meta_hmac_key(&config.app_name) {
-                if let Err(e) =
-                    metadata::load_meta_with_hmac(keys_dir, &config.key_label, hmac_key.as_slice())
-                {
+                let strict = metadata::load_meta_with_hmac(
+                    keys_dir,
+                    &config.key_label,
+                    hmac_key.as_slice(),
+                    metadata::MetaIntegrityMode::RequireSidecar,
+                );
+                if let Err(e) = strict {
                     let msg = e.to_string();
-                    if msg.contains("meta_hmac_verify") {
+                    if msg.contains(metadata::META_HMAC_VERIFY_OP) {
                         return Err(StorageError::KeyInitFailed(msg));
                     }
-                    // Non-HMAC errors (missing file, deserialize, etc.)
+                    if msg.contains(metadata::META_HMAC_MISSING_OP) {
+                        warn!(
+                            label = %config.key_label,
+                            "`.meta.hmac` sidecar missing — migrating from existing meta. \
+                             If you did not just upgrade, treat this as suspicious and \
+                             regenerate the key."
+                        );
+                        if let Err(migrate_err) = metadata::migrate_meta_to_hmac(
+                            keys_dir,
+                            &config.key_label,
+                            hmac_key.as_slice(),
+                        ) {
+                            return Err(StorageError::KeyInitFailed(migrate_err.to_string()));
+                        }
+                    }
+                    // Other errors (deserialize failure, IO errors)
                     // fall through to the legacy handling below.
                 }
             }

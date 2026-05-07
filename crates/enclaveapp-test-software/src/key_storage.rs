@@ -163,7 +163,8 @@ pub fn rename_key(config: &SoftwareConfig, old_label: &str, new_label: &str) -> 
     if old_key_path.exists() {
         std::fs::rename(&old_key_path, &new_key_path)?;
     }
-    if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label) {
+    // Test-software backend does not use the `.meta.hmac` sidecar.
+    if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label, None) {
         // Roll back the .key rename if the metadata rename fails.
         if new_key_path.exists() {
             drop(std::fs::rename(&new_key_path, &old_key_path));
