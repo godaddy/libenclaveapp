@@ -1,7 +1,7 @@
 # Design: Cross-platform `.meta` HMAC integrity
 
-**Status:** PRs 1-5 implemented on `cross-platform-meta-hmac`
-branch. PRs 6-7 pending.
+**Status:** All 7 PRs implemented on `cross-platform-meta-hmac`
+branch. Ready for review.
 **Updated:** 2026-05-06
 **Branch:** `cross-platform-meta-hmac` (rebased onto
 `deep-review-fixes`)
@@ -18,8 +18,8 @@ load on the Linux keyring path.
 | 3  | Cross-platform `meta_hmac_key` dispatch + `verify_meta_integrity` helper | **DONE** | `22d210e` |
 | 4  | Encryption-side `ensure_key` strict-HMAC on all platforms | **DONE** | `9506185` |
 | 5  | Signing-side init paths wired through `verify_meta_integrity` | **DONE** | `9ff4b62` |
-| 6  | Hardware backends switch from `save_meta` to `save_meta_with_hmac` | **PENDING** | — |
-| 7  | Threat-model edits + design-doc final pass | **PENDING** | — |
+| 6  | Hardware backends switch from `save_meta` to `save_meta_with_hmac` | **DONE** | `ca35c05` |
+| 7  | Threat-model edits + design-doc final pass | **DONE** | (this commit) |
 
 ## Operational invariants enforced by the code
 
