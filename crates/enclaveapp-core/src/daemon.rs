@@ -333,10 +333,12 @@ fn drain_capped<R: std::io::Read>(mut reader: R, buf: std::sync::Arc<std::sync::
     let mut tmp = [0_u8; 1024];
     let mut truncation_marked = false;
     loop {
+        // EOF (Ok(0)) and any read error both mean the drain is
+        // done — the daemon either closed its stderr or the pipe
+        // died — so we collapse to a single arm.
         let n = match reader.read(&mut tmp) {
-            Ok(0) => return, // EOF — daemon closed stderr.
+            Ok(0) | Err(_) => return,
             Ok(n) => n,
-            Err(_) => return, // Pipe died; drain is done.
         };
         let mut guard = match buf.lock() {
             Ok(g) => g,
