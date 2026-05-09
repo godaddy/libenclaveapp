@@ -404,21 +404,35 @@ fn install_linux_release(
     // mktemp under `wsl bash -c` was observed to silently land in
     // `cd ""` on some distros, at which point `tar` extracted into
     // `$HOME` and collided with existing files.
+    // `set -e` is the FIRST statement so every subsequent failure
+    // aborts immediately. The previous structure stitched everything
+    // together with `&&` and put `set -e` mid-chain, then ended with
+    // `; pkill ... || true` — which made bash's exit code always 0
+    // regardless of whether curl / tar / cp actually succeeded. The
+    // wrapper saw `output.status.success() == true` and reported
+    // "Installed" even when nothing had been copied. Multiple v0.6.71
+    // installs reported success in 4 distros while leaving the
+    // binaries at v0.6.70.
+    //
+    // The pkill at the end is gated by `||true` so it doesn't trip
+    // `set -e` when no agent is running, but the install steps above
+    // it can no longer be silently masked.
     let bins = spec.binaries.join(" ");
     let script = format!(
-        "rm -rf /tmp/sshenc-install-$$ \
-         && mkdir -p /tmp/sshenc-install-$$ \
-         && cd /tmp/sshenc-install-$$ \
-         && set -e \
-         && trap 'rm -rf /tmp/sshenc-install-$$' EXIT \
-         && curl -fsSL '{url}' -o release.tar.gz \
-         && tar xzf release.tar.gz \
-         && for b in {bins}; do \
-              sudo cp \"$b\" \"/usr/local/bin/$b.new\" \
-              && sudo chmod +x \"/usr/local/bin/$b.new\" \
-              && sudo mv \"/usr/local/bin/$b.new\" \"/usr/local/bin/$b\"; \
-            done \
-         ; pkill -KILL -x sshenc-agent 2>/dev/null || true"
+        "set -e\n\
+         work=/tmp/sshenc-install-$$\n\
+         rm -rf \"$work\"\n\
+         mkdir -p \"$work\"\n\
+         cd \"$work\"\n\
+         trap 'rm -rf \"$work\"' EXIT\n\
+         curl -fsSL '{url}' -o release.tar.gz\n\
+         tar xzf release.tar.gz\n\
+         for b in {bins}; do\n\
+           sudo cp \"$b\" \"/usr/local/bin/$b.new\"\n\
+           sudo chmod +x \"/usr/local/bin/$b.new\"\n\
+           sudo mv \"/usr/local/bin/$b.new\" \"/usr/local/bin/$b\"\n\
+         done\n\
+         pkill -KILL -x sshenc-agent 2>/dev/null || true\n"
     );
     let mut cmd = std::process::Command::new("wsl");
     cmd.args(["-d", distro_name, "--", "bash", "-c", &script]);
