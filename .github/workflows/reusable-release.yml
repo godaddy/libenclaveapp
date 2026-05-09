@@ -876,46 +876,78 @@ jobs:
 
       - name: Update Scoop bucket
         if: inputs.scoop != ''
+        env:
+          APP: ${{ inputs.app_name }}
+          WINDOWS_BINARIES: ${{ inputs.windows_binaries }}
+          SCOOP_CFG: ${{ inputs.scoop }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
-          app="${{ inputs.app_name }}"
 
-          bucket_repo=$(echo '${{ inputs.scoop }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['bucket_repo'])")
-          scoop_desc=$(echo '${{ inputs.scoop }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['description'])")
-
-          win_sha=$(sha256sum "artifacts/${app}-x86_64-pc-windows-msvc/${app}-x86_64-pc-windows-msvc.zip" | cut -d' ' -f1)
+          bucket_repo=$(echo "$SCOOP_CFG" | python3 -c "import sys,json; print(json.load(sys.stdin)['bucket_repo'])")
+          win_sha=$(sha256sum "artifacts/${APP}-x86_64-pc-windows-msvc/${APP}-x86_64-pc-windows-msvc.zip" | cut -d' ' -f1)
 
           git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/${bucket_repo}.git" /tmp/bucket
 
-          bin_json=""
-          for bin in ${{ inputs.windows_binaries }}; do
-            [ -n "$bin_json" ] && bin_json="${bin_json},"
-            bin_json="${bin_json}\"${bin}\""
-          done
+          TAG="$tag" VERSION="$version" WIN_SHA="$win_sha" python3 <<'PY' > "/tmp/bucket/bucket/${APP}.json"
+          import json, os
 
-          cat > /tmp/bucket/bucket/${app}.json << SCOOP
-          {
-              "version": "${version}",
-              "description": "${scoop_desc}",
-              "homepage": "https://github.com/godaddy/${app}",
+          scoop_cfg = json.loads(os.environ["SCOOP_CFG"])
+          windows_binaries = os.environ["WINDOWS_BINARIES"].split()
+          app = os.environ["APP"]
+
+          manifest = {
+              "version": os.environ["VERSION"],
+              "description": scoop_cfg["description"],
+              "homepage": f"https://github.com/godaddy/{app}",
               "license": "MIT",
               "architecture": {
                   "64bit": {
-                      "url": "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-x86_64-pc-windows-msvc.zip",
-                      "hash": "${win_sha}"
+                      "url": f"https://github.com/godaddy/{app}/releases/download/{os.environ['TAG']}/{app}-x86_64-pc-windows-msvc.zip",
+                      "hash": os.environ["WIN_SHA"],
                   }
               },
-              "bin": [${bin_json}]
+              "bin": windows_binaries,
           }
-          SCOOP
-          sed -i 's/^          //' /tmp/bucket/bucket/${app}.json
+
+          # Optionally sync `<app>-tpm-bridge.exe` to `C:\ProgramData\<app>\`
+          # on install. WSL Linux callers auto-discover the bridge among
+          # admin-install paths only — `Program Files` and `ProgramData` —
+          # and intentionally exclude user-writable scoop directories
+          # (security: a writable PATH-like override would let a WSL-side
+          # attacker swap bridges). Without this hop, `scoop update`
+          # silently leaves a stale bridge under ProgramData and the WSL
+          # agent keeps using the old version, which manifests as
+          # "signing not initialized" / readiness timeouts on startup.
+          if scoop_cfg.get("bridge_to_programdata"):
+              bridge_name = f"{app}-tpm-bridge.exe"
+              if bridge_name in windows_binaries:
+                  env_var = f"{app.upper().replace('-', '_')}_BRIDGE_PATH"
+                  agent_name = f"{app}-agent"
+                  manifest["post_install"] = [
+                      f'$pd = Join-Path $env:ProgramData "{app}"',
+                      'if (-not (Test-Path $pd)) { New-Item -ItemType Directory -Path $pd -Force | Out-Null }',
+                      (
+                          f'try {{ Copy-Item (Join-Path $dir "{bridge_name}") '
+                          f'-Destination (Join-Path $pd "{bridge_name}") -Force -ErrorAction Stop; '
+                          f'Write-Host "{app}: bridge synced to $pd" }} '
+                          f'catch {{ Write-Warning "{app}: failed to copy bridge to $pd ($_); '
+                          f'WSL callers may pick up a stale bridge. If in use, stop '
+                          f'{agent_name} first (Stop-Process -Name {agent_name} on '
+                          f'Windows, pkill {agent_name} in WSL). If permission denied, '
+                          f're-run scoop from an elevated shell, or set {env_var} '
+                          f'to the scoop path." }}'
+                      ),
+                  ]
+
+          print(json.dumps(manifest, indent=4))
+          PY
 
           cd /tmp/bucket
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "Update ${app} to ${tag}"
+          git diff --cached --quiet || git commit -m "Update ${APP} to ${tag}"
           git push
 
       - name: Generate winget manifest
