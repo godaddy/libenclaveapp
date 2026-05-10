@@ -44,11 +44,8 @@ extern "C" {
     /// `localizedReason`. Returns the opaque token (always > 0) on success,
     /// or 0 on failure. Token 0 is a sentinel meaning "no context, prompt
     /// every sign."
-    pub fn enclaveapp_se_lacontext_create(
-        ttl_secs: f64,
-        reason: *const u8,
-        reason_len: i32,
-    ) -> u64;
+    pub fn enclaveapp_se_lacontext_create(ttl_secs: f64, reason: *const u8, reason_len: i32)
+        -> u64;
 
     /// Drop the `LAContext` referenced by `token`, invalidating any cached
     /// authentication. Idempotent; releasing token 0 is a no-op.
