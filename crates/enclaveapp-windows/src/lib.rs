@@ -14,6 +14,8 @@
 #[cfg(target_os = "windows")]
 mod export;
 #[cfg(target_os = "windows")]
+pub mod hello_gate;
+#[cfg(target_os = "windows")]
 mod key;
 #[cfg(target_os = "windows")]
 pub mod meta_hmac;
@@ -25,8 +27,6 @@ pub mod meta_tag;
 mod provider;
 #[cfg(target_os = "windows")]
 pub mod ui_policy;
-#[cfg(target_os = "windows")]
-pub mod hello_gate;
 
 #[cfg(all(target_os = "windows", feature = "encryption"))]
 mod encrypt;

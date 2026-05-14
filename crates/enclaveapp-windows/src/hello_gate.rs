@@ -36,9 +36,7 @@ use std::time::{Duration, Instant};
 
 use enclaveapp_core::{Error, Result};
 use windows::core::HSTRING;
-use windows::Security::Credentials::UI::{
-    UserConsentVerificationResult, UserConsentVerifier,
-};
+use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
 
 /// In-process cache of recent Windows Hello verifications, keyed on
 /// caller-supplied scope strings. Construct once per app/encryptor and
@@ -69,12 +67,7 @@ impl HelloGate {
     /// `reason` is the message shown in the Hello prompt; pick something
     /// the user can match to the action they're taking (e.g.
     /// "Unlock gocode-dev credentials").
-    pub fn ensure_verified(
-        &self,
-        scope: &str,
-        reason: &str,
-        ttl: Duration,
-    ) -> Result<()> {
+    pub fn ensure_verified(&self, scope: &str, reason: &str, ttl: Duration) -> Result<()> {
         if self.is_fresh(scope, ttl) {
             return Ok(());
         }

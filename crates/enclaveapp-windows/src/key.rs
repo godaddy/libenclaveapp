@@ -33,7 +33,14 @@ pub fn create_key(
     algorithm: &str,
     policy: AccessPolicy,
 ) -> Result<(NcryptHandle, Vec<u8>)> {
-    create_key_with_flags(provider, app_name, label, algorithm, policy, NCRYPT_FLAGS::default())
+    create_key_with_flags(
+        provider,
+        app_name,
+        label,
+        algorithm,
+        policy,
+        NCRYPT_FLAGS::default(),
+    )
 }
 
 /// Like [`create_key`] but with `NCRYPT_SILENT_FLAG` set on
@@ -51,7 +58,14 @@ pub fn create_key_silent(
     algorithm: &str,
     policy: AccessPolicy,
 ) -> Result<(NcryptHandle, Vec<u8>)> {
-    create_key_with_flags(provider, app_name, label, algorithm, policy, NCRYPT_SILENT_FLAG)
+    create_key_with_flags(
+        provider,
+        app_name,
+        label,
+        algorithm,
+        policy,
+        NCRYPT_SILENT_FLAG,
+    )
 }
 
 fn create_key_with_flags(
@@ -112,10 +126,8 @@ fn create_key_with_flags(
     // NCRYPT_SILENT_FLAG fail closed (NTE_SILENT_CONTEXT) rather than
     // let the KSP show its own dialog.
     unsafe {
-        NCryptFinalizeKey(key.as_key(), flags).map_err(|e| {
-            Error::GenerateFailed {
-                detail: format!("NCryptFinalizeKey: {e}"),
-            }
+        NCryptFinalizeKey(key.as_key(), flags).map_err(|e| Error::GenerateFailed {
+            detail: format!("NCryptFinalizeKey: {e}"),
         })?;
     }
 
@@ -130,7 +142,11 @@ pub fn open_key(provider: &NcryptHandle, app_name: &str, label: &str) -> Result<
 
 /// Like [`open_key`] but with `NCRYPT_SILENT_FLAG` set. See
 /// [`create_key_silent`] for rationale.
-pub fn open_key_silent(provider: &NcryptHandle, app_name: &str, label: &str) -> Result<NcryptHandle> {
+pub fn open_key_silent(
+    provider: &NcryptHandle,
+    app_name: &str,
+    label: &str,
+) -> Result<NcryptHandle> {
     open_key_with_flags(provider, app_name, label, NCRYPT_SILENT_FLAG)
 }
 
