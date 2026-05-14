@@ -25,6 +25,7 @@
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //!     keychain_access_group: None,
 //!     prefer_windows_hello_ux: false,
+//!     prefer_vbs_when_available: false,
 //! })?;
 //!
 //! let ciphertext = storage.encrypt(b"secret")?;
@@ -47,6 +48,7 @@
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //!     keychain_access_group: None,
 //!     prefer_windows_hello_ux: false,
+//!     prefer_vbs_when_available: false,
 //! })?;
 //!
 //! // Use the underlying signer/key_manager for operations.
@@ -174,6 +176,40 @@ pub struct StorageConfig {
     ///
     /// No-op on non-Windows platforms. Default: `false`.
     pub prefer_windows_hello_ux: bool,
+    /// (Windows only) Opt into the **VBS Enclave user-bound key**
+    /// backend when the host meets all prerequisites — Windows 11
+    /// 24H2 build 26100.2314+, VBS running, HVCI enforced, Windows
+    /// Hello enrolled, and the enclave DLL present alongside the
+    /// host binary. When prerequisites are not met, the storage
+    /// initializer transparently falls back to the
+    /// [`prefer_windows_hello_ux`](Self::prefer_windows_hello_ux)
+    /// soft-Hello path (if also enabled) or the legacy
+    /// `NCRYPT_UI_PROTECT_KEY_FLAG` path. The selection is logged at
+    /// `tracing::info` so users can audit the posture they got
+    /// without reading code.
+    ///
+    /// ## Auto-upgrade semantics
+    ///
+    /// `enclaveapp-windows-vbs::probe()` is called at every
+    /// `AppEncryptionStorage::init`, not just at first install. A
+    /// host that previously returned `Unavailable(BuildTooOld)` may
+    /// return `Available` after a Windows Update, at which point
+    /// the storage initializer triggers a migration: the on-disk
+    /// bundle is decrypted under the prior soft-Hello path and
+    /// re-encrypted under the new VBS-bound key on the next call.
+    /// Hello is gestured **twice** during that first post-upgrade
+    /// run (once to read the old bundle, once to commit the new).
+    /// Subsequent runs only fire Hello once via the VBS path. See
+    /// `gocode-dev/docs/vbs-enclave-plan.md` "Migration story" for
+    /// the UX contract.
+    ///
+    /// **Threat-model upgrade:** VBS user-bound keys close the
+    /// same-UID-code-execution gap that the soft Hello gate
+    /// accepts. Hello consent is OS-mediated inside VTL1; a user-
+    /// mode attacker cannot hook the Boolean.
+    ///
+    /// No-op on non-Windows platforms. Default: `false`.
+    pub prefer_vbs_when_available: bool,
 }
 
 /// Environment variable that, when the `mock` cargo feature is
@@ -238,6 +274,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            prefer_vbs_when_available: false,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("test"));
@@ -257,6 +294,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            prefer_vbs_when_available: false,
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, "test");

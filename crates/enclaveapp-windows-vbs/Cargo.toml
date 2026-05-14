@@ -1,0 +1,23 @@
+[package]
+name = "enclaveapp-windows-vbs"
+description = "Probe + host-side wrappers for the Windows VBS Enclave user-bound key path"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclaveapp-core = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_LibraryLoader",
+    "Security_Credentials_UI",
+] }

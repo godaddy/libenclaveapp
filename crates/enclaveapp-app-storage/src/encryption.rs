@@ -149,6 +149,37 @@ impl AppEncryptionStorage {
     fn init_windows(config: &StorageConfig) -> Result<Self> {
         let keys_dir = Self::resolved_keys_dir(config);
 
+        // VBS Enclave user-bound key path — prerequisite probe only.
+        // The actual enclave-backed encryptor is a follow-up PR
+        // (see `gocode-dev/docs/vbs-enclave-plan.md`). Until that
+        // lands, even when prerequisites are met we transparently
+        // fall back to the soft-Hello path documented below, but we
+        // log the probe outcome so users on VBS-capable hosts can
+        // confirm their host will pick up the enclave path the
+        // moment it ships.
+        if config.prefer_vbs_when_available {
+            match enclaveapp_windows_vbs::probe() {
+                enclaveapp_windows_vbs::Availability::Available => {
+                    tracing::info!(
+                        app = %config.app_name,
+                        "prefer_vbs_when_available: prerequisites met, but enclave DLL is not \
+                         yet implemented. Falling back to soft-Hello path. The migration to the \
+                         VBS-bound key will happen automatically on the first run after the \
+                         enclave DLL ships."
+                    );
+                }
+                enclaveapp_windows_vbs::Availability::Unavailable(reason) => {
+                    tracing::info!(
+                        app = %config.app_name,
+                        reason = %reason,
+                        "prefer_vbs_when_available: prerequisites not met; falling back to \
+                         soft-Hello path. Auto-upgrades will pick up VBS on the next run after \
+                         the host satisfies the missing prerequisite."
+                    );
+                }
+            }
+        }
+
         // When the app opts into `prefer_windows_hello_ux`, the TPM key
         // is created without `NCRYPT_UI_PROTECT_KEY_FLAG` (no CryptUI
         // password dialog) and the on-disk AccessPolicy is forced to
@@ -671,6 +702,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            prefer_vbs_when_available: false,
         }
     }
 
