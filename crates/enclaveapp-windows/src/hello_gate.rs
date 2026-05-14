@@ -242,13 +242,15 @@ mod tests {
         // The only output of the gate is `Result<()>`. That is, the
         // success channel is unit; no key material flows through.
         // A hard gate would necessarily produce key material to be
-        // useful. This shape pins the soft classification at the
-        // type level.
-        let _result_type_is_unit: Result<()> = Ok(());
+        // useful. The pin lives in the function signature of
+        // `HelloGate::ensure_verified` -- if its return type ever
+        // gains a payload it's a hard-gate upgrade and this test
+        // (along with the threat-model docs) needs updating.
+        //
         // Verifying the gate has the methods you'd expect of a
         // pure-software cache + UI helper (no TPM handle / no
         // NCryptKey / no shared-secret return).
         gate.invalidate_all();
-        let _ = gate.is_fresh("any", Duration::ZERO);
+        let _is_fresh: bool = gate.is_fresh("any", Duration::ZERO);
     }
 }
