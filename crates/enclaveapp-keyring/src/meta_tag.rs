@@ -344,10 +344,14 @@ mod tests {
         assert_ne!(VerifyOutcome::Legacy, VerifyOutcome::KeychainUnavailable);
     }
 
+    #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
     #[test]
     fn rename_with_no_source_tag_returns_ok() {
-        // On non-gnu or non-keyring targets, load() returns Ok(None),
-        // so rename of a nonexistent entry is a no-op success.
+        // On non-keyring targets the stub load() returns Ok(None), so
+        // rename of a nonexistent entry is a no-op success. On gnu +
+        // keyring-storage the real keyring may be unavailable in CI
+        // (no Secret Service daemon), so we only assert this on the
+        // stub path.
         let result = rename(&unique_app(), "ghost-src", "ghost-dst");
         assert!(result.is_ok());
     }
