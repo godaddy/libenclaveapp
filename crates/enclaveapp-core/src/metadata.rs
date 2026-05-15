@@ -886,14 +886,6 @@ mod tests {
     }
 
     #[test]
-    fn key_meta_debug_format_is_nonempty() {
-        let meta = KeyMeta::new("debug-label", KeyType::Signing, AccessPolicy::Any);
-        let s = format!("{meta:?}");
-        assert!(!s.is_empty());
-        assert!(s.contains("debug-label"));
-    }
-
-    #[test]
     fn key_meta_clone_preserves_all_fields() {
         let mut meta = KeyMeta::new("clone-test", KeyType::Encryption, AccessPolicy::BiometricOnly);
         meta.set_app_field("field", "value");

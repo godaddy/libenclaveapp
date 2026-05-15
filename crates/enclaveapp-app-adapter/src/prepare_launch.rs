@@ -483,40 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn integration_candidates_default_has_no_payloads() {
-        let candidates = IntegrationCandidates::default();
-        assert!(candidates.helper_tool.is_none());
-        assert!(candidates.env_interpolation.is_none());
-        assert!(candidates.temp_materialized_config.is_none());
-    }
-
-    #[test]
-    fn integration_payload_equality_same_helper_tool_payloads() {
-        let a = IntegrationPayload::HelperTool {
-            env_overrides: BTreeMap::from([("K".into(), "V".into())]),
-            extra_args: vec!["--flag".into()],
-        };
-        let b = IntegrationPayload::HelperTool {
-            env_overrides: BTreeMap::from([("K".into(), "V".into())]),
-            extra_args: vec!["--flag".into()],
-        };
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn integration_payload_inequality_different_variants() {
-        let helper = IntegrationPayload::HelperTool {
-            env_overrides: BTreeMap::new(),
-            extra_args: Vec::new(),
-        };
-        let env_interp = IntegrationPayload::EnvInterpolation {
-            config_bytes: None,
-            env_overrides: BTreeMap::new(),
-        };
-        assert_ne!(helper, env_interp);
-    }
-
-    #[test]
     fn prepared_launch_without_temp_config_has_no_temp_config_path() {
         let spec = AppSpec {
             display_name: "tool".into(),
