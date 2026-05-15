@@ -331,7 +331,10 @@ mod tests {
         assert_eq!(VerifyOutcome::Tamper, VerifyOutcome::Tamper);
         assert_eq!(VerifyOutcome::Legacy, VerifyOutcome::Legacy);
         assert_eq!(VerifyOutcome::NoMeta, VerifyOutcome::NoMeta);
-        assert_eq!(VerifyOutcome::KeychainUnavailable, VerifyOutcome::KeychainUnavailable);
+        assert_eq!(
+            VerifyOutcome::KeychainUnavailable,
+            VerifyOutcome::KeychainUnavailable
+        );
     }
 
     #[test]

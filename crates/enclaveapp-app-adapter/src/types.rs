@@ -153,7 +153,10 @@ mod tests {
     #[test]
     fn integration_type_all_variants_equal_to_themselves() {
         assert_eq!(IntegrationType::HelperTool, IntegrationType::HelperTool);
-        assert_eq!(IntegrationType::EnvInterpolation, IntegrationType::EnvInterpolation);
+        assert_eq!(
+            IntegrationType::EnvInterpolation,
+            IntegrationType::EnvInterpolation
+        );
         assert_eq!(
             IntegrationType::TempMaterializedConfig,
             IntegrationType::TempMaterializedConfig
@@ -162,8 +165,14 @@ mod tests {
 
     #[test]
     fn integration_type_all_variants_not_equal_to_others() {
-        assert_ne!(IntegrationType::HelperTool, IntegrationType::EnvInterpolation);
-        assert_ne!(IntegrationType::HelperTool, IntegrationType::TempMaterializedConfig);
+        assert_ne!(
+            IntegrationType::HelperTool,
+            IntegrationType::EnvInterpolation
+        );
+        assert_ne!(
+            IntegrationType::HelperTool,
+            IntegrationType::TempMaterializedConfig
+        );
         assert_ne!(
             IntegrationType::EnvInterpolation,
             IntegrationType::TempMaterializedConfig
@@ -183,15 +192,27 @@ mod tests {
 
     #[test]
     fn resolution_strategy_all_variants_equal_to_themselves() {
-        assert_eq!(ResolutionStrategy::ExplicitPath, ResolutionStrategy::ExplicitPath);
-        assert_eq!(ResolutionStrategy::PathLookup, ResolutionStrategy::PathLookup);
+        assert_eq!(
+            ResolutionStrategy::ExplicitPath,
+            ResolutionStrategy::ExplicitPath
+        );
+        assert_eq!(
+            ResolutionStrategy::PathLookup,
+            ResolutionStrategy::PathLookup
+        );
         assert_eq!(ResolutionStrategy::CommandV, ResolutionStrategy::CommandV);
     }
 
     #[test]
     fn resolution_strategy_distinct_variants_not_equal() {
-        assert_ne!(ResolutionStrategy::ExplicitPath, ResolutionStrategy::PathLookup);
-        assert_ne!(ResolutionStrategy::ExplicitPath, ResolutionStrategy::CommandV);
+        assert_ne!(
+            ResolutionStrategy::ExplicitPath,
+            ResolutionStrategy::PathLookup
+        );
+        assert_ne!(
+            ResolutionStrategy::ExplicitPath,
+            ResolutionStrategy::CommandV
+        );
         assert_ne!(ResolutionStrategy::PathLookup, ResolutionStrategy::CommandV);
     }
 

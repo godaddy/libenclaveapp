@@ -764,8 +764,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let secrets_dir = dir.path().join("secrets");
         let storage = enclaveapp_app_storage::mock::MockEncryptionStorage::new();
-        let store =
-            EncryptedFileSecretStore::with_storage_for_test(secrets_dir, Box::new(storage));
+        let store = EncryptedFileSecretStore::with_storage_for_test(secrets_dir, Box::new(storage));
         (dir, store)
     }
 
@@ -815,7 +814,10 @@ mod tests {
         let (_dir, store) = make_encrypted_store();
         let id = BindingId::new("test:get-read-present");
         store.set(&id, "data").expect("set");
-        assert!(matches!(store.get_read(&id).expect("get_read"), SecretRead::Present(_)));
+        assert!(matches!(
+            store.get_read(&id).expect("get_read"),
+            SecretRead::Present(_)
+        ));
     }
 
     #[test]
@@ -877,7 +879,10 @@ mod tests {
             secrets_dir.clone(),
             Box::new(MockEncryptionStorage::for_app("test")),
         );
-        assert_eq!(store2.get(&id).expect("get from fresh instance"), Some("persisted".to_string()));
+        assert_eq!(
+            store2.get(&id).expect("get from fresh instance"),
+            Some("persisted".to_string())
+        );
     }
 
     #[test]
@@ -898,10 +903,12 @@ mod tests {
         let id = BindingId::new("test:corrupt");
         store.set(&id, "some value").expect("set");
         // Random bytes that are not valid base64 → base64 decode error.
-        fs::write(store.path_for(&id), b"this is not valid ciphertext at all")
-            .expect("corrupt");
+        fs::write(store.path_for(&id), b"this is not valid ciphertext at all").expect("corrupt");
         let result = store.get(&id);
-        assert!(result.is_err(), "corrupt ciphertext must return Err, not panic");
+        assert!(
+            result.is_err(),
+            "corrupt ciphertext must return Err, not panic"
+        );
     }
 
     #[test]

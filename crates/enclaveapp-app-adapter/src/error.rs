@@ -58,7 +58,9 @@ mod tests {
     fn all_variants_display_nonempty_messages() {
         let variants: Vec<AdapterError> = vec![
             AdapterError::Io(std::io::Error::other("io")),
-            AdapterError::Json(serde_json::from_str::<()>("bad").expect_err("intentionally bad JSON")),
+            AdapterError::Json(
+                serde_json::from_str::<()>("bad").expect_err("intentionally bad JSON"),
+            ),
             AdapterError::MissingConfigDir,
             AdapterError::MissingHomeDir,
             AdapterError::ProgramNotFound("prog".into()),

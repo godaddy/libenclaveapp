@@ -360,7 +360,10 @@ mod tests {
     fn run_returns_err_when_binary_does_not_exist() {
         let req = make_request("/nonexistent-binary-for-test-xyzzy", &[]);
         let result = run(req);
-        assert!(result.is_err(), "spawning a nonexistent binary must return Err");
+        assert!(
+            result.is_err(),
+            "spawning a nonexistent binary must return Err"
+        );
     }
 
     /// Passing more than 1,000 arguments must not panic or silently truncate.

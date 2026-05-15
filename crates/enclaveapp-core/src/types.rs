@@ -310,7 +310,11 @@ mod tests {
 
     #[test]
     fn presence_mode_serde_roundtrip_all_variants() {
-        let variants = [PresenceMode::Cached, PresenceMode::Strict, PresenceMode::None];
+        let variants = [
+            PresenceMode::Cached,
+            PresenceMode::Strict,
+            PresenceMode::None,
+        ];
         for mode in &variants {
             let json = serde_json::to_string(mode).unwrap();
             let parsed: PresenceMode = serde_json::from_str(&json).unwrap();
@@ -320,9 +324,18 @@ mod tests {
 
     #[test]
     fn presence_mode_serde_wire_strings() {
-        assert_eq!(serde_json::to_string(&PresenceMode::Cached).unwrap(), "\"cached\"");
-        assert_eq!(serde_json::to_string(&PresenceMode::Strict).unwrap(), "\"strict\"");
-        assert_eq!(serde_json::to_string(&PresenceMode::None).unwrap(), "\"none\"");
+        assert_eq!(
+            serde_json::to_string(&PresenceMode::Cached).unwrap(),
+            "\"cached\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PresenceMode::Strict).unwrap(),
+            "\"strict\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PresenceMode::None).unwrap(),
+            "\"none\""
+        );
     }
 
     #[test]

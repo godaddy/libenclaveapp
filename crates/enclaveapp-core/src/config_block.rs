@@ -533,7 +533,10 @@ mod tests {
         let (start, end) = result.unwrap();
         // No newline to consume
         assert_eq!(end, content.len());
-        assert_eq!(&content[start..end], "# BEGIN app managed block -- do not edit\nstuff\n# END app managed block");
+        assert_eq!(
+            &content[start..end],
+            "# BEGIN app managed block -- do not edit\nstuff\n# END app managed block"
+        );
     }
 
     #[test]
@@ -608,7 +611,8 @@ mod tests {
         // A block with id "foo" should not be found when searching for id "bar"
         let m_foo = BlockMarkers::with_id("app", "foo");
         let m_bar = BlockMarkers::with_id("app", "bar");
-        let content = "# --- BEGIN app managed (foo) ---\ncontent\n# --- END app managed (foo) ---\n";
+        let content =
+            "# --- BEGIN app managed (foo) ---\ncontent\n# --- END app managed (foo) ---\n";
         assert!(has_block(content, &m_foo));
         assert!(!has_block(content, &m_bar));
     }

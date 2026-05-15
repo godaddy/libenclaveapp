@@ -847,7 +847,9 @@ mod tests {
         let sig_presence = backend
             .sign_with_presence("signing-key", data, PresenceMode::Cached, 30, "reason")
             .unwrap();
-        assert_eq!(sig_regular, sig_presence, "sign_with_presence must delegate to sign");
+        assert_eq!(
+            sig_regular, sig_presence,
+            "sign_with_presence must delegate to sign"
+        );
     }
-
 }

@@ -774,7 +774,10 @@ mod tests {
     fn bash_warning_lines_escapes_double_quotes() {
         let warning = vec!["say \"hello\"".to_string()];
         let result = bash_warning_lines(&warning);
-        assert!(result.contains("\\\"hello\\\""), "double quotes must be escaped: {result}");
+        assert!(
+            result.contains("\\\"hello\\\""),
+            "double quotes must be escaped: {result}"
+        );
     }
 
     #[test]
@@ -793,7 +796,10 @@ mod tests {
     fn fish_warning_lines_escapes_double_quotes() {
         let warning = vec!["say \"hello\"".to_string()];
         let result = fish_warning_lines(&warning);
-        assert!(result.contains("\\\"hello\\\""), "double quotes must be escaped: {result}");
+        assert!(
+            result.contains("\\\"hello\\\""),
+            "double quotes must be escaped: {result}"
+        );
     }
 
     #[test]
@@ -814,7 +820,10 @@ mod tests {
     fn powershell_warning_lines_escapes_double_quotes_with_backtick() {
         let warning = vec!["say \"hello\"".to_string()];
         let result = powershell_warning_lines(&warning);
-        assert!(result.contains("`\"hello`\""), "double quotes must use backtick escape: {result}");
+        assert!(
+            result.contains("`\"hello`\""),
+            "double quotes must use backtick escape: {result}"
+        );
     }
 
     #[test]

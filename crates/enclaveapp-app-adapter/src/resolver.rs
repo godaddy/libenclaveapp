@@ -375,7 +375,9 @@ mod tests {
             b"#!/bin/sh\ncmd=\"$2\"\ncase \"$cmd\" in\n  \"command -v -- 'cmd'\") printf 'cmd\\n' ;;\n  \"command -V -- 'cmd'\") printf 'cmd is an alias for cmd\\n' ;;\n  *) exit 1 ;;\nesac\n",
         )
         .expect("write fake shell");
-        let mut perms = std::fs::metadata(&shell_path).expect("metadata").permissions();
+        let mut perms = std::fs::metadata(&shell_path)
+            .expect("metadata")
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&shell_path, perms).expect("chmod");
 
@@ -880,11 +882,7 @@ mod tests {
 
     #[test]
     fn normalize_wrapper_tokens_env_with_assignment_stripped() {
-        let mut tokens = vec![
-            "env".to_string(),
-            "FOO=bar".to_string(),
-            "git".to_string(),
-        ];
+        let mut tokens = vec!["env".to_string(), "FOO=bar".to_string(), "git".to_string()];
         normalize_wrapper_tokens(&mut tokens);
         assert_eq!(tokens, vec!["git"]);
     }
@@ -985,8 +983,7 @@ mod tests {
 
     #[test]
     fn parse_command_string_raw_preserved() {
-        let result =
-            parse_command_string("git".to_string(), "original description".to_string());
+        let result = parse_command_string("git".to_string(), "original description".to_string());
         let parsed = result.expect("should parse");
         assert_eq!(parsed.raw, "original description");
     }

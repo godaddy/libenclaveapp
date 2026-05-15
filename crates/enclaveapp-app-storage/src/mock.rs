@@ -199,10 +199,16 @@ mod tests {
         // byte of the GCM authentication tag must be rejected cleanly.
         let storage = MockEncryptionStorage::new();
         let mut ciphertext = storage.encrypt(b"truncation test").unwrap();
-        assert!(ciphertext.len() > NONCE_SIZE, "ciphertext must exceed nonce");
+        assert!(
+            ciphertext.len() > NONCE_SIZE,
+            "ciphertext must exceed nonce"
+        );
         ciphertext.pop(); // remove last byte
         let result = storage.decrypt(&ciphertext);
-        assert!(result.is_err(), "truncated ciphertext must return Err, not panic");
+        assert!(
+            result.is_err(),
+            "truncated ciphertext must return Err, not panic"
+        );
     }
 
     #[test]

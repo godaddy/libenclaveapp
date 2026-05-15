@@ -41,7 +41,10 @@ mod tests {
 
     #[test]
     fn supports_returns_true_when_integration_is_in_list() {
-        let spec = spec_with(vec![IntegrationType::HelperTool, IntegrationType::EnvInterpolation]);
+        let spec = spec_with(vec![
+            IntegrationType::HelperTool,
+            IntegrationType::EnvInterpolation,
+        ]);
         assert!(spec.supports(IntegrationType::HelperTool));
         assert!(spec.supports(IntegrationType::EnvInterpolation));
     }
@@ -92,9 +95,7 @@ mod tests {
 
     #[test]
     fn config_override_different_variants_are_not_equal() {
-        let env_var = ConfigOverride::EnvironmentVariable {
-            name: "X".into(),
-        };
+        let env_var = ConfigOverride::EnvironmentVariable { name: "X".into() };
         let cli_flag = ConfigOverride::CommandLineFlag { flag: "--x".into() };
         assert_ne!(env_var, ConfigOverride::None);
         assert_ne!(cli_flag, ConfigOverride::None);

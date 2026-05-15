@@ -498,7 +498,10 @@ mod tests {
 
     #[test]
     fn envelope_error_rollback_display() {
-        let err = EnvelopeError::Rollback { observed: 3, expected_at_least: 10 };
+        let err = EnvelopeError::Rollback {
+            observed: 3,
+            expected_at_least: 10,
+        };
         let msg = format!("{err}");
         assert!(msg.contains('3') && msg.contains("10"));
     }

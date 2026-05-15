@@ -887,7 +887,11 @@ mod tests {
 
     #[test]
     fn key_meta_clone_preserves_all_fields() {
-        let mut meta = KeyMeta::new("clone-test", KeyType::Encryption, AccessPolicy::BiometricOnly);
+        let mut meta = KeyMeta::new(
+            "clone-test",
+            KeyType::Encryption,
+            AccessPolicy::BiometricOnly,
+        );
         meta.set_app_field("field", "value");
         let cloned = meta.clone();
         assert_eq!(cloned.label, meta.label);

@@ -306,8 +306,12 @@ mod tests {
         let config = test_config(&dir);
         let result = generate_and_save(&config, "", KeyType::Signing, AccessPolicy::None);
         assert!(result.is_err(), "empty label must be rejected");
-        let result2 = generate_and_save(&config, "bad label!", KeyType::Signing, AccessPolicy::None);
-        assert!(result2.is_err(), "label with spaces/punctuation must be rejected");
+        let result2 =
+            generate_and_save(&config, "bad label!", KeyType::Signing, AccessPolicy::None);
+        assert!(
+            result2.is_err(),
+            "label with spaces/punctuation must be rejected"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

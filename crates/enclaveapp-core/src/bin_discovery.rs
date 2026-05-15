@@ -397,8 +397,7 @@ mod tests {
             current_exe: None,
             home_dir: Some(root.clone()),
         };
-        let result =
-            find_trusted_binary_with_context("definitely-nonexistent-zz99", "myapp", &ctx);
+        let result = find_trusted_binary_with_context("definitely-nonexistent-zz99", "myapp", &ctx);
         assert!(result.is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }

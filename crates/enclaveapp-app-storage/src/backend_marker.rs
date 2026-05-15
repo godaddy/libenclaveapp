@@ -207,8 +207,10 @@ mod tests {
             BackendKind::Keyring,
         ] {
             let s = kind_str(kind);
-            assert!(s.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
-                "kind_str({kind:?}) = '{s}' contains unexpected characters");
+            assert!(
+                s.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "kind_str({kind:?}) = '{s}' contains unexpected characters"
+            );
         }
     }
 }

@@ -345,8 +345,14 @@ mod tests {
             keychain_access_group: Some("TEAMID.com.example".into()),
         };
         assert!(config.wrapping_key_user_presence);
-        assert_eq!(config.wrapping_key_cache_ttl, std::time::Duration::from_secs(30));
-        assert_eq!(config.keychain_access_group.as_deref(), Some("TEAMID.com.example"));
+        assert_eq!(
+            config.wrapping_key_cache_ttl,
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            config.keychain_access_group.as_deref(),
+            Some("TEAMID.com.example")
+        );
     }
 
     #[test]

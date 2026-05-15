@@ -282,5 +282,4 @@ mod tests {
             assert!(munlock_buffer(data.as_ptr(), data.len()));
         }
     }
-
 }

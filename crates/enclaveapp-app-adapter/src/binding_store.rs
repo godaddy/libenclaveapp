@@ -559,7 +559,10 @@ mod tests {
 
         // Mutate that searches for a non-existent id is a no-op, not an error.
         let result = store.mutate::<(), _>(|records| {
-            if let Some(r) = records.iter_mut().find(|r| r.id == BindingId::new("npm:ghost")) {
+            if let Some(r) = records
+                .iter_mut()
+                .find(|r| r.id == BindingId::new("npm:ghost"))
+            {
                 r.label = "changed".into();
             }
             Ok(())
@@ -606,7 +609,10 @@ mod tests {
         fs::write(store.path.clone(), b"{[broken json").expect("corrupt");
 
         // get / list / upsert must all return errors, not panic.
-        assert!(store.list().is_err(), "list on corrupt file must return Err");
+        assert!(
+            store.list().is_err(),
+            "list on corrupt file must return Err"
+        );
         assert!(
             store.get(&BindingId::new("npm:seed")).is_err(),
             "get on corrupt file must return Err"
@@ -618,7 +624,9 @@ mod tests {
 
         // After removing the corrupt file the store is fully operational.
         fs::remove_file(store.path.clone()).expect("remove corrupt file");
-        store.upsert(make_record("npm:fresh")).expect("upsert after removing corrupt file");
+        store
+            .upsert(make_record("npm:fresh"))
+            .expect("upsert after removing corrupt file");
         let list = store.list().expect("list after recovery");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, BindingId::new("npm:fresh"));
@@ -631,7 +639,9 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let store = file_store(&dir);
         for i in 0..1000_usize {
-            store.upsert(make_record(&format!("npm:bulk-{i}"))).expect("upsert");
+            store
+                .upsert(make_record(&format!("npm:bulk-{i}")))
+                .expect("upsert");
         }
         let list = store.list().expect("list");
         assert_eq!(list.len(), 1000, "all 1000 records must be present");
@@ -661,6 +671,10 @@ mod tests {
         t2.join().unwrap();
 
         let list = store1.list().expect("list");
-        assert_eq!(list.len(), 2, "both records must be present after concurrent upserts");
+        assert_eq!(
+            list.len(),
+            2,
+            "both records must be present after concurrent upserts"
+        );
     }
 }
