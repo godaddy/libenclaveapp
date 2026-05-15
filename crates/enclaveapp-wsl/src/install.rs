@@ -319,7 +319,7 @@ fn remove_linux_release_binaries(
 #[cfg(target_os = "windows")]
 fn remove_runtime_files_in_distro(
     distro_name: &str,
-    runtime_dir: &std::path::Path,
+    runtime_dir: &Path,
     app_name: &str,
     actions: &mut Vec<String>,
 ) {
