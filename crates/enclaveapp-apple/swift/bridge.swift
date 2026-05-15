@@ -41,6 +41,20 @@ let SE_ERR_KEYCHAIN_STORE: Int32 = 9
 let SE_ERR_KEYCHAIN_LOAD: Int32 = 10
 let SE_ERR_KEYCHAIN_DELETE: Int32 = 11
 let SE_ERR_KEYCHAIN_NOT_FOUND: Int32 = 12
+/// Returned when `SecItemCopyMatching` (or a store/delete) returns
+/// `errSecAuthFailed` (-25293) — the OS has a "Deny" ACL decision cached
+/// for this binary's code-signing identity.  Distinct from
+/// `SE_ERR_KEYCHAIN_LOAD` so Rust can surface an actionable message
+/// ("open Keychain Access and change Deny → Always Allow") rather than
+/// the generic "keychain load error".
+let SE_ERR_KEYCHAIN_AUTH_DENIED: Int32 = 13
+/// Returned when `SecItemCopyMatching` returns `errSecInteractionRequired`
+/// (-25308) — the item requires user presence but no authenticated LAContext
+/// was provided.  This happens when `lacontext_token=0` is passed and the
+/// keychain item was stored with `.userPresence` access control.  The screen
+/// may be locked or biometric auth was cancelled; the caller should retry
+/// after the user unlocks the screen.
+let SE_ERR_KEYCHAIN_INTERACTION_REQUIRED: Int32 = 14
 
 // MARK: - ECIES format constants
 
@@ -1016,6 +1030,12 @@ public func enclaveapp_keychain_load(
         )
         if status == errSecItemNotFound {
             return nil
+        }
+        if status == errSecAuthFailed {
+            return SE_ERR_KEYCHAIN_AUTH_DENIED
+        }
+        if status == errSecInteractionRequired {
+            return SE_ERR_KEYCHAIN_INTERACTION_REQUIRED
         }
         if status != errSecSuccess {
             return SE_ERR_KEYCHAIN_LOAD

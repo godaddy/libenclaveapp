@@ -447,6 +447,21 @@ pub(crate) fn keychain_load(
             Ok(Some(out))
         }
         12 => Ok(None), // SE_ERR_KEYCHAIN_NOT_FOUND
+        13 => Err(Error::KeychainAuthDenied {
+            // SE_ERR_KEYCHAIN_AUTH_DENIED: macOS returned errSecAuthFailed (-25293).
+            // The binary's code-signing identity has a "Deny" ACL decision cached
+            // in the keychain item.  Cannot auto-recover within this process;
+            // the user must open Keychain Access and change "Deny" → "Always Allow".
+            label: label.to_string(),
+        }),
+        14 => Err(Error::KeychainInteractionRequired {
+            // SE_ERR_KEYCHAIN_INTERACTION_REQUIRED: macOS returned
+            // errSecInteractionRequired (-25308). The item has .userPresence ACL
+            // but no authenticated LAContext was provided (lacontext_token=0).
+            // Transient: happens when the screen is locked or biometric auth was
+            // cancelled. Retry after the user unlocks the screen.
+            label: label.to_string(),
+        }),
         _ => Err(Error::KeyOperation {
             operation: "keychain_load".into(),
             detail: format!("Swift bridge returned error code {rc}"),

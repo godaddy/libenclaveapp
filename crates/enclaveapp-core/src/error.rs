@@ -35,6 +35,26 @@ pub enum Error {
     #[error("key operation failed: {operation}: {detail}")]
     KeyOperation { operation: String, detail: String },
 
+    /// The OS keychain refused access because the binary's code-signing
+    /// identity has a "Deny" ACL entry.  Recovery: open Keychain Access,
+    /// find the entry under "Passwords" and change "Deny" to "Always Allow".
+    #[error(
+        "keychain access denied for '{label}': the OS refused this binary's \
+         request (ACL set to Deny); open Keychain Access → Passwords and set \
+         'Always Allow' for sshenc-agent"
+    )]
+    KeychainAuthDenied { label: String },
+
+    /// The keychain item requires user presence but no authenticated LAContext
+    /// was provided — usually because `evaluatePolicy` was cancelled (screen
+    /// locked, biometric dismissed).  Transient: retry after unlocking.
+    #[error(
+        "keychain interaction required for '{label}': the item needs user \
+         authentication but none was provided (screen may be locked); \
+         unlock the screen and retry"
+    )]
+    KeychainInteractionRequired { label: String },
+
     #[error("config error: {0}")]
     Config(String),
 
@@ -135,6 +155,40 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("export"));
         assert!(msg.contains("not supported"));
+    }
+
+    #[test]
+    fn display_keychain_auth_denied() {
+        let e = Error::KeychainAuthDenied {
+            label: "mykey".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("mykey"), "message must name the label");
+        assert!(
+            msg.contains("denied") || msg.contains("Deny"),
+            "message must mention denial"
+        );
+        assert!(
+            msg.contains("Keychain Access") || msg.contains("Always Allow"),
+            "message must include remediation guidance"
+        );
+    }
+
+    #[test]
+    fn display_keychain_interaction_required() {
+        let e = Error::KeychainInteractionRequired {
+            label: "mykey".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("mykey"), "message must name the label");
+        assert!(
+            msg.contains("interaction") || msg.contains("authentication"),
+            "message must mention authentication"
+        );
+        assert!(
+            msg.contains("locked") || msg.contains("unlock") || msg.contains("retry"),
+            "message must include recovery guidance"
+        );
     }
 
     #[test]

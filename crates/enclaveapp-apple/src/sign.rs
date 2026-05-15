@@ -10,6 +10,23 @@ use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
 use enclaveapp_core::types::{validate_label, AccessPolicy, KeyType, PresenceMode};
 use enclaveapp_core::{Error, Result};
 
+fn should_evict_lacontext(e: &Error) -> bool {
+    // Don't evict for errors where the LAContext is not the cause:
+    //
+    // - KeychainAuthDenied: the OS denies based on the binary's cdhash,
+    //   not an expired/invalid LAContext. Evicting would just re-prompt
+    //   Touch ID on every retry with no recovery possible.
+    //
+    // - KeychainInteractionRequired: no LAContext was provided at all
+    //   (lacontext_token=0). Nothing is cached for this label, so evict
+    //   is a no-op. The cause is typically a locked screen; when the user
+    //   unlocks, the next acquire() will create a fresh context normally.
+    !matches!(
+        e,
+        Error::KeychainAuthDenied { .. } | Error::KeychainInteractionRequired { .. }
+    )
+}
+
 /// ECDSA P-256 signing backend using the macOS Secure Enclave.
 #[derive(Debug)]
 pub struct SecureEnclaveSigner {
@@ -139,7 +156,13 @@ impl EnclaveSigner for SecureEnclaveSigner {
                     lacontext::acquire(&self.config.app_name, label, cache_ttl_secs, reason)
                         .map(|h| h.token())
                         .unwrap_or(0);
-                self.sign_inner(label, data, token)
+                let result = self.sign_inner(label, data, token);
+                if let Err(ref e) = result {
+                    if should_evict_lacontext(e) {
+                        lacontext::evict(&self.config.app_name, label);
+                    }
+                }
+                result
             }
             PresenceMode::Strict => {
                 // Create a one-shot LAContext so the user sees a descriptive
