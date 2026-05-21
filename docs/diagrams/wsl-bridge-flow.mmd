@@ -1,33 +1,54 @@
 sequenceDiagram
     autonumber
-    participant App as WSL consuming app
-    participant Storage as enclaveapp-app-storage
-    participant Client as enclaveapp-bridge client
-    participant Bridge as Windows bridge executable
-    participant WinBackend as enclaveapp-windows
-    participant TPM as Windows TPM / CNG
+    participant App as WSL Linux App<br/>(e.g. gocode-dev)
+    participant Client as enclaveapp-wsl<br/>(bridge client)
+    participant Discovery as Bridge Discovery<br/>(/mnt/c path scan)
+    participant Bridge as enclaveapp-tpm-bridge<br/>(Windows host child process)
+    participant TPM as Windows TPM<br/>(CNG / Platform Crypto Provider)
 
-    App->>Storage: create storage/signing backend
-    Storage->>Storage: detect WSL
-    Storage->>Client: find_bridge(app_name)
-    Client-->>Storage: bridge path or none
-    Storage->>Client: init/app operation request
-    Client->>Bridge: single-line JSON-RPC over stdio
-    Bridge->>WinBackend: initialize TPM-backed backend
-    WinBackend->>TPM: create/load non-exportable key
+    App->>Client: request platform operation (sign/encrypt/decrypt)
 
-    alt encrypt/decrypt
-        Bridge->>WinBackend: encrypt or decrypt
-        WinBackend->>TPM: ECDH private-key operation
-    else signing / WebAuthn-style operations
-        Bridge->>WinBackend: sign or assertion operation
-        WinBackend->>TPM: signing operation
+    Note over Client,Discovery: Discovery uses /mnt/c fixed mount only<br/>Never searches user-writable PATH
+
+    Client->>Discovery: locate bridge binary
+    Discovery->>Discovery: scan /mnt/c/Program Files/... paths
+    Discovery-->>Client: bridge binary path (or error)
+
+    Client->>Bridge: spawn child process (stdin/stdout)
+
+    Note over Client,Bridge: Protocol: bounded JSON-RPC over stdio<br/>Max message size enforced<br/>Per-request timeout enforced
+
+    Client->>Bridge: JSON-RPC request (operation + key label)
+
+    alt Generate key
+        Bridge->>TPM: NCryptCreatePersistedKey (P-256, non-exportable)
+        TPM-->>Bridge: key handle
+        Bridge->>Bridge: serialize public key + handle metadata
+        Bridge-->>Client: JSON-RPC response (public key + handle)
+    else Sign
+        Bridge->>TPM: NCryptSignHash (ECDSA P-256)
+        TPM-->>Bridge: DER signature
+        Bridge-->>Client: JSON-RPC response (signature bytes)
+    else ECDH / Decrypt
+        Bridge->>TPM: NCryptSecretAgreement (ECDH P-256)
+        TPM-->>Bridge: shared secret
+        Bridge->>Bridge: HKDF + AES-256-GCM decrypt
+        Bridge-->>Client: JSON-RPC response (plaintext)
     end
 
-    WinBackend-->>Bridge: result bytes
-    Bridge-->>Client: JSON-RPC result
-    Client-->>Storage: decoded result
-    Storage-->>App: application-facing result
+    Client-->>App: operation result
 
-    Note over App,TPM: WSL never directly accesses Windows TPM key material.
+    Note over Client,Bridge: On timeout or oversized response:<br/>Client kills bridge child process<br/>Returns error to caller
 
+    opt Error handling
+        alt Bridge not found
+            Discovery-->>Client: Error: bridge binary not at expected path
+            Client-->>App: Error: WSL bridge unavailable
+        else Bridge crashes or times out
+            Client->>Bridge: SIGKILL after timeout
+            Client-->>App: Error: bridge operation timed out
+        else Invalid response
+            Client->>Client: validate response size + schema
+            Client-->>App: Error: malformed bridge response
+        end
+    end

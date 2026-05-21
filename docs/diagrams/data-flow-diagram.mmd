@@ -1,73 +1,103 @@
-flowchart LR
-    app["External entity\nConsuming enclave app"]
+%%{ init: { "theme": "base", "themeVariables": { "primaryColor": "#DBEAFE", "primaryTextColor": "#1E3A8A", "primaryBorderColor": "#2563EB", "lineColor": "#64748B" } } }%%
+flowchart TB
+    %% External entity
+    app(["fa:fa-cube Consuming Application\n(gocode-dev, sshenc, awsenc, npmenc, sso-jwt)"]):::external
 
-    subgraph process["Trust boundary: consuming process"]
-        harden["process hardening\ncalled before secret use"]
-        appstorage["enclaveapp-app-storage\nbackend selection"]
-        core["enclaveapp-core\ntraits, metadata, crypto helpers"]
-        adapter["enclaveapp-app-adapter\noptional delivery layer"]
-        cache["enclaveapp-cache\noptional cache envelope"]
+    subgraph libapi["libenclaveapp API Boundary"]
+        direction TB
+
+        subgraph coremod["Core Modules"]
+            direction LR
+            appstorage["enclaveapp-app-storage\n(backend selection, policy)"]:::coreprocess
+            core["enclaveapp-core\n(traits, metadata, crypto)"]:::coreprocess
+            harden["process::harden_process()\n(PR_SET_DUMPABLE, no cores)"]:::coreprocess
+        end
+
+        subgraph optional["Optional Layers"]
+            direction LR
+            adapter["enclaveapp-app-adapter\n(secret delivery)"]:::optprocess
+            cache["enclaveapp-cache\n(envelope, rollback counter)"]:::optprocess
+        end
+
+        subgraph backends["Platform Backends (compile-time selected)"]
+            direction LR
+            apple["enclaveapp-apple\n(Secure Enclave + Keychain)"]:::backend
+            windows["enclaveapp-windows\n(TPM / CNG)"]:::backend
+            webauthn["enclaveapp-windows-webauthn\n(Security Key)"]:::backend
+            linuxtpm["enclaveapp-linux-tpm\n(TPM2)"]:::backend
+            keyring["enclaveapp-keyring\n(Secret Service / software)"]:::weakbackend
+        end
     end
 
-    subgraph disk["Trust boundary: local user-writable disk"]
-        ciphertext["Credential ciphertext / cache file"]
-        counter["Rollback counter sidecar"]
-        meta["Key metadata\n<label>.meta"]
-        handle["Key handle / wrapped key file"]
-        publickey["Public key cache"]
+    subgraph hwsecure["Hardware Secure Element"]
+        direction LR
+        se["Apple Secure Enclave"]:::hw
+        tpm["TPM 2.0 chip"]:::hw
+        fido["FIDO2 / Security Key"]:::hw
     end
 
-    subgraph securestore["Trust boundary: platform secure storage"]
-        se["macOS Secure Enclave + Keychain"]
-        win["Windows TPM / CNG / WebAuthn"]
-        linuxtpm["Linux TPM"]
-        keyring["Linux Secret Service / keyring"]
-        metatag["Metadata HMAC tag store"]
+    subgraph wslbridge["WSL Bridge Path"]
+        direction LR
+        wslclient["enclaveapp-wsl\n(bridge client)"]:::bridge
+        wslserver["enclaveapp-tpm-bridge\n(Windows host process)"]:::bridge
     end
 
-    subgraph wsl["Trust boundary: WSL bridge path"]
-        bridgeclient["enclaveapp-bridge client"]
-        bridgeserver["Windows bridge child process\nenclaveapp-tpm-bridge"]
+    subgraph disk["On-Disk Artifacts (user-writable, 0600)"]
+        direction LR
+        ciphertext[("Ciphertext\n.enc")]:::securedisk
+        meta[("Key Metadata\n.meta")]:::neutraldisk
+        handles[("Key Handles\n.handle")]:::neutraldisk
+        pubkeys[("Public Keys\n.pub")]:::neutraldisk
+        hmac[("HMAC Tags\n(integrity)")]:::securedisk
+        counter[("Rollback Counter\n(monotonic)")]:::securedisk
     end
 
-    app -->|"generate/sign/encrypt/decrypt request"| harden
-    harden --> appstorage
-    appstorage -->|"validate labels and policy"| core
-    appstorage -->|"optional adapter launch/secret delivery"| adapter
+    %% Flows
+    app -->|"generate / sign / encrypt / decrypt"| appstorage
+    appstorage -->|"validate labels + policy"| core
+    appstorage -->|"optional delivery"| adapter
     appstorage -->|"optional cache header binding"| cache
+    core --> harden
 
-    appstorage -->|"read/write ciphertext"| ciphertext
-    cache -->|"read/write monotonic counter"| counter
-    core -->|"read/write metadata"| meta
-    core -->|"read/write public key cache"| publickey
-    appstorage -->|"read/write handle or wrapped key"| handle
-
-    appstorage -->|"platform operation"| se
-    appstorage -->|"platform operation"| win
+    appstorage -->|"platform operation"| apple
+    appstorage -->|"platform operation"| windows
+    appstorage -->|"platform operation"| webauthn
     appstorage -->|"platform operation"| linuxtpm
-    appstorage -->|"software/keyring operation"| keyring
-    core -->|"verify metadata tag"| metatag
+    appstorage -->|"software fallback"| keyring
 
-    appstorage -->|"WSL TPM request"| bridgeclient
-    bridgeclient -->|"bounded JSON-RPC over stdio"| bridgeserver
-    bridgeserver -->|"Windows TPM operation"| win
+    apple -->|"ECDH / Sign"| se
+    windows -->|"ECDH / Sign"| tpm
+    webauthn -->|"assertion"| fido
 
-    se -->|"signature / ECDH result"| appstorage
-    win -->|"signature / ECDH result"| appstorage
-    linuxtpm -->|"signature / ECDH result"| appstorage
-    keyring -->|"software signature / decrypted key"| appstorage
-    appstorage -->|"plaintext secret or signature"| app
+    appstorage -->|"WSL TPM request"| wslclient
+    wslclient -->|"bounded JSON-RPC\nover stdio"| wslserver
+    wslserver -->|"Windows TPM op"| tpm
 
-    classDef external fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
-    classDef processclass fill:#ecfeff,stroke:#0891b2,color:#164e63;
-    classDef datastore fill:#fff7ed,stroke:#f97316,color:#7c2d12;
-    classDef secure fill:#f0fdf4,stroke:#16a34a,color:#14532d;
-    classDef trust fill:#f8fafc,stroke:#64748b,color:#0f172a;
-    classDef weak fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
+    appstorage -->|"read/write"| ciphertext
+    core -->|"read/write"| meta
+    core -->|"read/write"| handles
+    core -->|"read/write"| pubkeys
+    core -->|"verify / write"| hmac
+    cache -->|"read/write"| counter
 
-    class app external;
-    class harden,appstorage,core,adapter,cache,bridgeclient,bridgeserver processclass;
-    class ciphertext,counter,meta,handle,publickey datastore;
-    class se,win,linuxtpm,metatag secure;
-    class keyring weak;
-    class process,disk,securestore,wsl trust;
+    se -->|"signature / ECDH result"| apple
+    tpm -->|"signature / ECDH result"| windows
+
+    %% Styles
+    classDef external fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,color:#1E3A8A,font-weight:bold
+    classDef coreprocess fill:#DBEAFE,stroke:#2563EB,stroke-width:1.5px,color:#1E3A8A,font-weight:bold
+    classDef optprocess fill:#E0F2FE,stroke:#0891B2,stroke-width:1.5px,color:#164E63
+    classDef backend fill:#E9D5FF,stroke:#7C3AED,stroke-width:1.5px,color:#5B21B6,font-weight:bold
+    classDef weakbackend fill:#FEE2E2,stroke:#DC2626,stroke-width:1.5px,stroke-dasharray:5 3,color:#7F1D1D
+    classDef hw fill:#DDD6FE,stroke:#7C3AED,stroke-width:2px,color:#5B21B6,font-weight:bold
+    classDef bridge fill:#FFEDD5,stroke:#EA580C,stroke-width:1.5px,color:#9A3412,font-weight:bold
+    classDef securedisk fill:#FDE68A,stroke:#D97706,stroke-width:1.5px,color:#78350F
+    classDef neutraldisk fill:#F1F5F9,stroke:#64748B,stroke-width:1px,color:#334155
+
+    style libapi fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,color:#14532D
+    style coremod fill:#DBEAFE22,stroke:#2563EB,stroke-width:1px,stroke-dasharray:3 3,color:#1E3A8A
+    style optional fill:#E0F2FE22,stroke:#0891B2,stroke-width:1px,stroke-dasharray:3 3,color:#164E63
+    style backends fill:#FEF3C7,stroke:#D97706,stroke-width:2px,stroke-dasharray:5 3,color:#78350F
+    style hwsecure fill:#F5F3FF,stroke:#7C3AED,stroke-width:2px,color:#5B21B6
+    style wslbridge fill:#FFF7ED,stroke:#EA580C,stroke-width:2px,stroke-dasharray:8 4,color:#9A3412
+    style disk fill:#F8FAFC,stroke:#64748B,stroke-width:1.5px,stroke-dasharray:5 3,color:#475569
