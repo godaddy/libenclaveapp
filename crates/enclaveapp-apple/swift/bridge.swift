@@ -276,9 +276,14 @@ func makeAccessControl(_ authPolicy: Int32) -> SecAccessControl? {
         setLastError("unsupported auth_policy value \(authPolicy)")
         return nil
     }
+    // SE key access control uses WhenUnlockedThisDeviceOnly — this is
+    // required for touchIDAuthenticationAllowableReuseDuration biometric
+    // caching to work in CryptoKit. The keychain wrapping key uses
+    // AfterFirstUnlockThisDeviceOnly separately (in keychain_store) so
+    // it survives sleep/wake.
     var error: Unmanaged<CFError>?
     let ac = SecAccessControlCreateWithFlags(
-        nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, flags, &error
+        nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &error
     )
     if ac == nil {
         let desc = error.map { $0.takeRetainedValue().localizedDescription } ?? "unknown"
