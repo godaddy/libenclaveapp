@@ -1,0 +1,103 @@
+%%{ init: { "theme": "base", "themeVariables": { "primaryColor": "#DBEAFE", "primaryTextColor": "#1E3A8A", "primaryBorderColor": "#2563EB", "lineColor": "#64748B" } } }%%
+flowchart TB
+    %% External entity
+    app(["fa:fa-cube Consuming Application\n(gocode-dev, sshenc, awsenc, npmenc, sso-jwt)"]):::external
+
+    subgraph libapi["libenclaveapp API Boundary"]
+        direction TB
+
+        subgraph coremod["Core Modules"]
+            direction LR
+            appstorage["enclaveapp-app-storage\n(backend selection, policy)"]:::coreprocess
+            core["enclaveapp-core\n(traits, metadata, crypto)"]:::coreprocess
+            harden["process::harden_process()\n(PR_SET_DUMPABLE, no cores)"]:::coreprocess
+        end
+
+        subgraph optional["Optional Layers"]
+            direction LR
+            adapter["enclaveapp-app-adapter\n(secret delivery)"]:::optprocess
+            cache["enclaveapp-cache\n(envelope, rollback counter)"]:::optprocess
+        end
+
+        subgraph backends["Platform Backends (compile-time selected)"]
+            direction LR
+            apple["enclaveapp-apple\n(Secure Enclave + Keychain)"]:::backend
+            windows["enclaveapp-windows\n(TPM / CNG)"]:::backend
+            webauthn["enclaveapp-windows-webauthn\n(Security Key)"]:::backend
+            linuxtpm["enclaveapp-linux-tpm\n(TPM2)"]:::backend
+            keyring["enclaveapp-keyring\n(Secret Service / software)"]:::weakbackend
+        end
+    end
+
+    subgraph hwsecure["Hardware Secure Element"]
+        direction LR
+        se["Apple Secure Enclave"]:::hw
+        tpm["TPM 2.0 chip"]:::hw
+        fido["FIDO2 / Security Key"]:::hw
+    end
+
+    subgraph wslbridge["WSL Bridge Path"]
+        direction LR
+        wslclient["enclaveapp-wsl\n(bridge client)"]:::bridge
+        wslserver["enclaveapp-tpm-bridge\n(Windows host process)"]:::bridge
+    end
+
+    subgraph disk["On-Disk Artifacts (user-writable, 0600)"]
+        direction LR
+        ciphertext[("Ciphertext\n.enc")]:::securedisk
+        meta[("Key Metadata\n.meta")]:::neutraldisk
+        handles[("Key Handles\n.handle")]:::neutraldisk
+        pubkeys[("Public Keys\n.pub")]:::neutraldisk
+        hmac[("HMAC Tags\n(integrity)")]:::securedisk
+        counter[("Rollback Counter\n(monotonic)")]:::securedisk
+    end
+
+    %% Flows
+    app -->|"generate / sign / encrypt / decrypt"| appstorage
+    appstorage -->|"validate labels + policy"| core
+    appstorage -->|"optional delivery"| adapter
+    appstorage -->|"optional cache header binding"| cache
+    core --> harden
+
+    appstorage -->|"platform operation"| apple
+    appstorage -->|"platform operation"| windows
+    appstorage -->|"platform operation"| webauthn
+    appstorage -->|"platform operation"| linuxtpm
+    appstorage -->|"software fallback"| keyring
+
+    apple -->|"ECDH / Sign"| se
+    windows -->|"ECDH / Sign"| tpm
+    webauthn -->|"assertion"| fido
+
+    appstorage -->|"WSL TPM request"| wslclient
+    wslclient -->|"bounded JSON-RPC\nover stdio"| wslserver
+    wslserver -->|"Windows TPM op"| tpm
+
+    appstorage -->|"read/write"| ciphertext
+    core -->|"read/write"| meta
+    core -->|"read/write"| handles
+    core -->|"read/write"| pubkeys
+    core -->|"verify / write"| hmac
+    cache -->|"read/write"| counter
+
+    se -->|"signature / ECDH result"| apple
+    tpm -->|"signature / ECDH result"| windows
+
+    %% Styles
+    classDef external fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,color:#1E3A8A,font-weight:bold
+    classDef coreprocess fill:#DBEAFE,stroke:#2563EB,stroke-width:1.5px,color:#1E3A8A,font-weight:bold
+    classDef optprocess fill:#E0F2FE,stroke:#0891B2,stroke-width:1.5px,color:#164E63
+    classDef backend fill:#E9D5FF,stroke:#7C3AED,stroke-width:1.5px,color:#5B21B6,font-weight:bold
+    classDef weakbackend fill:#FEE2E2,stroke:#DC2626,stroke-width:1.5px,stroke-dasharray:5 3,color:#7F1D1D
+    classDef hw fill:#DDD6FE,stroke:#7C3AED,stroke-width:2px,color:#5B21B6,font-weight:bold
+    classDef bridge fill:#FFEDD5,stroke:#EA580C,stroke-width:1.5px,color:#9A3412,font-weight:bold
+    classDef securedisk fill:#FDE68A,stroke:#D97706,stroke-width:1.5px,color:#78350F
+    classDef neutraldisk fill:#F1F5F9,stroke:#64748B,stroke-width:1px,color:#334155
+
+    style libapi fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,color:#14532D
+    style coremod fill:#DBEAFE22,stroke:#2563EB,stroke-width:1px,stroke-dasharray:3 3,color:#1E3A8A
+    style optional fill:#E0F2FE22,stroke:#0891B2,stroke-width:1px,stroke-dasharray:3 3,color:#164E63
+    style backends fill:#FEF3C7,stroke:#D97706,stroke-width:2px,stroke-dasharray:5 3,color:#78350F
+    style hwsecure fill:#F5F3FF,stroke:#7C3AED,stroke-width:2px,color:#5B21B6
+    style wslbridge fill:#FFF7ED,stroke:#EA580C,stroke-width:2px,stroke-dasharray:8 4,color:#9A3412
+    style disk fill:#F8FAFC,stroke:#64748B,stroke-width:1.5px,stroke-dasharray:5 3,color:#475569

@@ -1,0 +1,70 @@
+sequenceDiagram
+    autonumber
+    participant App as Consuming App
+    participant AS as enclaveapp-app-storage<br/>(backend selection)
+    participant Core as enclaveapp-core<br/>(traits + metadata)
+    participant Cache as enclaveapp-cache<br/>(envelope + counter)
+    participant Backend as Platform Backend<br/>(apple/windows/linux-tpm/keyring)
+    participant HW as Secure Element<br/>(SE / TPM / FIDO2)
+    participant Disk as On-Disk Artifacts
+
+    Note over App,Disk: ENCRYPT FLOW
+
+    App->>AS: store_secret(label, plaintext)
+    AS->>Core: validate label + resolve policy
+    Core->>Disk: read key metadata (.meta)
+    Disk-->>Core: metadata (access policy, backend type)
+    Core->>Core: verify metadata HMAC tag
+
+    AS->>Backend: encrypt(plaintext, key_handle)
+    Backend->>HW: ECDH key agreement (P-256)
+    HW-->>Backend: shared secret (never leaves hardware)
+    Backend->>Backend: HKDF-SHA256 → AES-256-GCM key
+    Backend->>Backend: AES-256-GCM encrypt
+
+    opt Cache enabled
+        Backend->>Cache: wrap with cache envelope
+        Cache->>Disk: update rollback counter (monotonic)
+    end
+
+    Backend-->>AS: ciphertext + nonce + tag
+    AS->>Disk: write ciphertext (.enc)
+    AS-->>App: success
+
+    Note over App,Disk: DECRYPT FLOW
+
+    App->>AS: load_secret(label)
+    AS->>Core: validate label + resolve policy
+    Core->>Disk: read key metadata (.meta)
+    Core->>Core: verify metadata HMAC tag
+
+    AS->>Disk: read ciphertext (.enc)
+    Disk-->>AS: ciphertext + nonce + tag
+
+    opt Cache enabled
+        AS->>Cache: verify cache envelope
+        Cache->>Disk: verify rollback counter
+        alt Counter mismatch
+            Cache-->>AS: Error: rollback detected
+            AS-->>App: Error
+        end
+    end
+
+    AS->>Backend: decrypt(ciphertext, key_handle)
+    Backend->>HW: ECDH key agreement (P-256)
+
+    opt User presence required (biometric policy)
+        HW->>HW: Touch ID / Hello / PIN prompt
+    end
+
+    HW-->>Backend: shared secret
+    Backend->>Backend: HKDF-SHA256 → AES-256-GCM key
+    Backend->>Backend: AES-256-GCM decrypt + verify tag
+
+    alt Tag verification fails
+        Backend-->>AS: Error: tampered ciphertext
+        AS-->>App: Error
+    else Success
+        Backend-->>AS: plaintext
+        AS-->>App: plaintext (caller must zeroize when done)
+    end
