@@ -53,6 +53,29 @@ Rust workspace under `crates/`:
 - **enclaveapp-build-support** — Shared build.rs helper for Windows PE resource compilation.
 - **enclaveapp-test-support** — `MockKeyBackend` implementing all three traits with deterministic in-memory operations. XOR-based mock crypto for testing control flow without hardware.
 
+### macOS Keychain Protection Classes — CRITICAL
+
+There are **two separate protection class decisions** in the Apple backend, and
+they **MUST use different values**. Mixing them up causes catastrophic user
+impact (broken biometric caching → Touch ID on every sign → key regeneration
+required, because the SE key's access control is immutable after creation).
+
+| What | Function | Protection class | Why |
+|------|----------|-----------------|-----|
+| **SE key access control** | `makeAccessControl()` in `bridge.swift` | `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` | Required for `touchIDAuthenticationAllowableReuseDuration` biometric caching in CryptoKit. Using `AfterFirstUnlock` silently breaks LAContext reuse — every sign requires Touch ID. |
+| **Keychain wrapping key** | `keychain_store()` in `bridge.swift` | `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` | Must survive sleep/wake. `WhenUnlocked` purges the keybag class key on device lock, making the wrapping key inaccessible to background agents. |
+
+**NEVER do a blanket find-and-replace of protection class constants.** These two
+use sites have different requirements for different reasons. If you change one,
+verify you are not changing the other.
+
+**The SE key access control is immutable.** Once a key is generated with a given
+`SecAccessControl`, that access control is baked into the Secure Enclave
+Processor. There is no migration path — the key must be deleted and
+regenerated. This means getting `makeAccessControl()` wrong forces every user
+to regenerate all their keys. This has already happened once (PR #158) and
+must never happen again.
+
 ### Key Patterns
 
 - `EnclaveKeyManager` trait is the base — `EnclaveSigner` and `EnclaveEncryptor` extend it.
