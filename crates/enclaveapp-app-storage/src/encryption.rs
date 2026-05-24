@@ -256,8 +256,11 @@ impl AppEncryptionStorage {
             );
         }
         let effective_policy = AccessPolicy::None;
-        let encryptor =
+        let mut encryptor =
             enclaveapp_windows::DpapiEncryptor::with_keys_dir(&config.app_name, keys_dir.clone());
+        if let Some(ak) = config.dpapi_app_key {
+            encryptor = encryptor.with_app_key(ak);
+        }
         Self::ensure_key(&encryptor, config, &keys_dir, effective_policy)?;
         Ok(Self {
             kind: BackendKind::WindowsDpapi,
@@ -746,6 +749,7 @@ mod tests {
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
             windows_software_fallback: crate::WindowsSoftwareFallback::Disabled,
+            dpapi_app_key: None,
         }
     }
 

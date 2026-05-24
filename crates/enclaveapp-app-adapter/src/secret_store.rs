@@ -199,6 +199,7 @@ impl EncryptedFileSecretStore {
                 prefer_windows_hello_ux: false,
                 windows_software_fallback:
                     enclaveapp_app_storage::WindowsSoftwareFallback::Disabled,
+                dpapi_app_key: None,
             })
             .map_err(|error| error.to_string())
         }) {

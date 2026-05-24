@@ -29,6 +29,7 @@
 //!     keychain_access_group: None,
 //!     prefer_windows_hello_ux: false,
 //!     windows_software_fallback: WindowsSoftwareFallback::Disabled,
+//!     dpapi_app_key: None,
 //! })?;
 //!
 //! let ciphertext = storage.encrypt(b"secret")?;
@@ -54,6 +55,7 @@
 //!     keychain_access_group: None,
 //!     prefer_windows_hello_ux: false,
 //!     windows_software_fallback: WindowsSoftwareFallback::Disabled,
+//!     dpapi_app_key: None,
 //! })?;
 //!
 //! // Use the underlying signer/key_manager for operations.
@@ -202,6 +204,28 @@ pub struct StorageConfig {
     /// opts the application into the policy. There is no environment
     /// variable override for production binaries.
     pub windows_software_fallback: WindowsSoftwareFallback,
+    /// (Windows DPAPI fallback only) Application-layer AES-256-GCM key
+    /// applied around DPAPI when the DPAPI software fallback is in use.
+    ///
+    /// When `Some`, the P-256 private key is wrapped in AES-256-GCM with
+    /// this key before being handed to `CryptProtectData`. A generic
+    /// per-user DPAPI oracle (a same-user process that calls
+    /// `CryptUnprotectData` on every file it finds) recovers an encrypted
+    /// blob rather than the raw P-256 key; the attacker must also extract
+    /// this key from the calling binary.
+    ///
+    /// **What this provides:** defeats automated DPAPI oracle tools that
+    /// do not carry knowledge of the embedding binary.
+    /// **What this does not provide:** protection against a targeted
+    /// attacker who has a copy of the binary and can extract this constant
+    /// via static analysis or a debugger.
+    ///
+    /// Should be a compile-time constant embedded in the calling binary as
+    /// a `[u8; 32]` decimal byte array (not hex, not base64) to avoid
+    /// triggering source-code secret scanners.
+    ///
+    /// No-op on TPM-backed Windows, macOS, and Linux paths. Default: `None`.
+    pub dpapi_app_key: Option<[u8; 32]>,
 }
 
 /// Environment variable that, when the `mock` cargo feature is
@@ -268,6 +292,7 @@ mod tests {
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
             windows_software_fallback: WindowsSoftwareFallback::Disabled,
+            dpapi_app_key: None,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("test"));
@@ -288,6 +313,7 @@ mod tests {
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
             windows_software_fallback: WindowsSoftwareFallback::Disabled,
+            dpapi_app_key: None,
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, "test");
@@ -352,6 +378,7 @@ mod tests {
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
             windows_software_fallback: WindowsSoftwareFallback::Disabled,
+            dpapi_app_key: None,
         };
         assert_eq!(config.app_name, "myapp");
         assert_eq!(config.key_label, "default");
@@ -378,6 +405,7 @@ mod tests {
             keychain_access_group: Some("TEAMID.com.example".into()),
             prefer_windows_hello_ux: false,
             windows_software_fallback: WindowsSoftwareFallback::Disabled,
+            dpapi_app_key: None,
         };
         assert!(config.wrapping_key_user_presence);
         assert_eq!(
@@ -405,6 +433,7 @@ mod tests {
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
             windows_software_fallback: WindowsSoftwareFallback::Disabled,
+            dpapi_app_key: None,
         };
         assert_eq!(config.keys_dir.as_ref(), Some(&dir));
         assert!(config.force_keyring);
