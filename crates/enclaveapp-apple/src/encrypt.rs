@@ -47,15 +47,19 @@ impl SecureEnclaveEncryptor {
     /// CryptoKit for the SE operation, so one prompt covers both the
     /// wrapping-key load and the hardware decrypt.
     fn load_handle(&self, label: &str) -> Result<(Zeroizing<Vec<u8>>, u64)> {
-        let reason = format!("{}: decrypt ({})", self.config.app_name, label);
-        let token = lacontext::acquire(
-            &self.config.app_name,
-            label,
-            self.config.wrapping_key_cache_ttl.as_secs(),
-            &reason,
-        )
-        .map(|h| h.token())
-        .unwrap_or(0);
+        let token = if self.config.wrapping_key_user_presence {
+            let reason = format!("{}: decrypt ({})", self.config.app_name, label);
+            lacontext::acquire(
+                &self.config.app_name,
+                label,
+                self.config.wrapping_key_cache_ttl.as_secs(),
+                &reason,
+            )
+            .map(|h| h.token())
+            .unwrap_or(0)
+        } else {
+            0
+        };
         Ok((
             keychain::load_handle_with_context(&self.config, label, token)?,
             token,
