@@ -177,11 +177,17 @@ impl Drop for MemoryEnclave {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::memory::pool::coffer_view;
 
+    /// Serializes tests that touch the global TieredPool to prevent interference.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn seal_and_open_roundtrip() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = b"my secret data 1234";
         let enc = MemoryEnclave::seal(secret).unwrap();
         let slot = enc.open().unwrap();
@@ -190,6 +196,7 @@ mod tests {
 
     #[test]
     fn open_twice_uses_hot_cache() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = b"cached secret";
         let enc = MemoryEnclave::seal(secret).unwrap();
         let s1 = enc.open().unwrap();
@@ -200,6 +207,7 @@ mod tests {
 
     #[test]
     fn drop_evicts_hot_cache() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = b"evicted secret";
         let id = {
             let enc = MemoryEnclave::seal(secret).unwrap();
@@ -211,6 +219,7 @@ mod tests {
 
     #[test]
     fn different_enclaves_are_independent() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let enc1 = MemoryEnclave::seal(b"secret one").unwrap();
         let enc2 = MemoryEnclave::seal(b"secret two").unwrap();
         assert_ne!(enc1.id(), enc2.id());
@@ -222,6 +231,7 @@ mod tests {
 
     #[test]
     fn seal_empty_slice() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let enc = MemoryEnclave::seal(b"").unwrap();
         assert_eq!(enc.plaintext_len(), 0);
         let slot = enc.open().unwrap();
@@ -230,12 +240,14 @@ mod tests {
 
     #[test]
     fn coffer_view_returns_key_sized_slot() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let slot = coffer_view().unwrap();
         assert_eq!(slot.size(), 32);
     }
 
     #[test]
     fn pool_acquire_small_uses_slab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use crate::memory::pool::pool_acquire;
         let slot = pool_acquire(16).unwrap();
         assert!(slot.slab_index().is_some());
@@ -243,6 +255,7 @@ mod tests {
 
     #[test]
     fn pool_acquire_large_uses_standalone() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use crate::memory::pool::pool_acquire;
         let slot = pool_acquire(8192).unwrap();
         assert!(slot.slab_index().is_none());
@@ -250,6 +263,7 @@ mod tests {
 
     #[test]
     fn seal_open_large() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let plaintext = vec![0xAB_u8; 4096];
         let enc = MemoryEnclave::seal(&plaintext).unwrap();
         let slot = enc.open().unwrap();
@@ -258,6 +272,7 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_fails() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let plaintext = b"tamper test";
         let mut enc = MemoryEnclave::seal(plaintext).unwrap();
         enc.ciphertext[NONCE_LEN] ^= 0xFF;
@@ -270,6 +285,7 @@ mod tests {
 
     #[test]
     fn truncated_ciphertext_fails() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let enc = MemoryEnclave::seal(b"short").unwrap();
         let truncated = MemoryEnclave {
             id: enc.id,
@@ -285,6 +301,7 @@ mod tests {
 
     #[test]
     fn unique_ids() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let a = MemoryEnclave::seal(b"a").unwrap();
         let b = MemoryEnclave::seal(b"b").unwrap();
         assert_ne!(a.id(), b.id());
@@ -292,6 +309,7 @@ mod tests {
 
     #[test]
     fn seal_buffer_roundtrip() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = b"buffered secret";
         let mut sbuf = SecureBuffer::new(secret.len()).unwrap();
         sbuf.bytes().copy_from_slice(secret);
@@ -303,6 +321,7 @@ mod tests {
 
     #[test]
     fn seal_slot_roundtrip() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = b"slot secret data";
         let mut slot = pool_acquire(secret.len()).unwrap();
         // slot.size() may be larger than secret.len() (slab slot is DEFAULT_SLOT_SIZE).
@@ -317,6 +336,7 @@ mod tests {
 
     #[test]
     fn debug_does_not_leak_plaintext() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let enc = MemoryEnclave::seal(b"top secret").unwrap();
         let debug = format!("{enc:?}");
         assert!(!debug.contains("top secret"));
@@ -325,6 +345,7 @@ mod tests {
 
     #[test]
     fn same_plaintext_different_nonces() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let a = MemoryEnclave::seal(b"same").unwrap();
         let b = MemoryEnclave::seal(b"same").unwrap();
         assert_ne!(a.ciphertext, b.ciphertext);

@@ -36,8 +36,8 @@ pub struct SecureBuffer {
     /// Requested data length.
     inner_len: usize,
     /// Copy of canary bytes placed in guard pages.
-    _pre_canary: [u8; CANARY_LEN],
-    _post_canary: [u8; CANARY_LEN],
+    pre_canary: [u8; CANARY_LEN],
+    post_canary: [u8; CANARY_LEN],
     page_size: usize,
     pub(super) state: State,
     mlocked: bool,
@@ -105,8 +105,8 @@ impl SecureBuffer {
             alloc_len,
             inner_ptr,
             inner_len: size,
-            _pre_canary: pre_canary,
-            _post_canary: post_canary,
+            pre_canary,
+            post_canary,
             page_size: ps,
             state: State::Mutable,
             mlocked,
@@ -173,27 +173,41 @@ impl SecureBuffer {
         Ok(())
     }
 
-    /// Fill with random bytes (stays mutable).
-    pub fn scramble(&mut self) -> crate::error::Result<()> {
-        if self.state != State::Mutable {
-            self.melt()?;
-        }
-        let buf = self.bytes();
-        rand::rngs::OsRng
-            .try_fill_bytes(buf)
-            .map_err(|e| Error::Memory(format!("scramble OsRng: {e}")))
-    }
-}
-
-impl Drop for SecureBuffer {
-    fn drop(&mut self) {
+    /// Verify guard-page canaries, zeroize, unlock, and free the allocation.
+    ///
+    /// Idempotent — returns `Ok(())` immediately if already `Dead`.
+    pub fn destroy(&mut self) -> crate::error::Result<()> {
         if self.state == State::Dead {
-            return;
+            return Ok(());
         }
+
         let ps = self.page_size;
         let inner_rounded = self.alloc_len - 2 * ps;
 
-        // Restore write access to inner region so we can zeroize.
+        // Temporarily make guard pages readable for canary verification.
+        let pre_guard = self.alloc_ptr.as_ptr();
+        let post_guard = unsafe { self.alloc_ptr.as_ptr().add(ps + inner_rounded) };
+
+        drop(unsafe { os_protect(pre_guard, ps, Protection::ReadOnly) });
+        drop(unsafe { os_protect(post_guard, ps, Protection::ReadOnly) });
+
+        // Read canaries from guard pages.
+        let pre_guard_slice = unsafe { std::slice::from_raw_parts(pre_guard, CANARY_LEN) };
+        let post_guard_slice = unsafe { std::slice::from_raw_parts(post_guard, CANARY_LEN) };
+
+        // Constant-time comparison.
+        let pre_ok = pre_guard_slice
+            .iter()
+            .zip(self.pre_canary.iter())
+            .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+        let post_ok = post_guard_slice
+            .iter()
+            .zip(self.post_canary.iter())
+            .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+
+        // Restore write access to inner region for zeroization.
         drop(unsafe {
             os_protect(
                 self.inner_ptr.as_ptr(),
@@ -208,14 +222,128 @@ impl Drop for SecureBuffer {
             s.zeroize();
         }
 
-        // Unlock.
+        // Unlock inner region.
         if self.mlocked {
             drop(unsafe { os_unlock(self.inner_ptr.as_ptr(), inner_rounded) });
         }
 
-        // Free the entire allocation.
+        // Restore guard pages to writable before freeing the whole mapping.
+        drop(unsafe { os_protect(pre_guard, ps, Protection::ReadWrite) });
+        drop(unsafe { os_protect(post_guard, ps, Protection::ReadWrite) });
+
+        // Free entire allocation.
         drop(unsafe { os_free(self.alloc_ptr.as_ptr(), self.alloc_len) });
 
         self.state = State::Dead;
+
+        if !pre_ok || !post_ok {
+            return Err(Error::Memory(
+                "SecureBuffer: guard page canary corrupted — buffer overflow detected".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fill with random bytes (stays mutable).
+    pub fn scramble(&mut self) -> crate::error::Result<()> {
+        if self.state != State::Mutable {
+            self.melt()?;
+        }
+        let buf = self.bytes();
+        rand::rngs::OsRng
+            .try_fill_bytes(buf)
+            .map_err(|e| Error::Memory(format!("scramble OsRng: {e}")))
+    }
+}
+
+impl Drop for SecureBuffer {
+    fn drop(&mut self) {
+        if let Err(e) = self.destroy() {
+            tracing::warn!(error = %e, "SecureBuffer::drop: destroy failed");
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    // Tests ported from asherah-ffi (godaddy/asherah-ffi/asherah/src/memguard.rs)
+
+    #[test]
+    fn canary_corruption_detected() {
+        let mut buf = SecureBuffer::new(64).unwrap();
+
+        // Temporarily enable write access on the post-guard page and corrupt the canary.
+        let ps = page_size();
+        let inner_rounded = 64_usize.div_ceil(ps) * ps;
+        let post_guard = unsafe { buf.alloc_ptr.as_ptr().add(ps + inner_rounded) };
+
+        unsafe {
+            os_protect(post_guard, ps, Protection::ReadWrite).unwrap();
+            *post_guard = !*post_guard; // flip first byte
+        }
+
+        // destroy() should detect the canary mismatch.
+        let result = buf.destroy();
+        assert!(
+            result.is_err(),
+            "destroy should report canary failure but returned Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("canary"),
+            "error should mention canary, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn new_buffer_is_mutable() {
+        let buf = SecureBuffer::new(32).unwrap();
+        assert!(buf.is_mutable());
+        assert!(buf.is_alive());
+    }
+
+    #[test]
+    fn freeze_and_melt() {
+        let mut buf = SecureBuffer::new(32).unwrap();
+        buf.freeze().unwrap();
+        assert!(!buf.is_mutable());
+        buf.melt().unwrap();
+        assert!(buf.is_mutable());
+    }
+
+    #[test]
+    fn bytes_writes_and_reads_back() {
+        let mut buf = SecureBuffer::new(64).unwrap();
+        buf.bytes()[0] = 0xAA_u8;
+        buf.bytes()[63] = 0xBB_u8;
+        assert_eq!(buf.as_slice()[0], 0xAA_u8);
+        assert_eq!(buf.as_slice()[63], 0xBB_u8);
+    }
+
+    #[test]
+    fn scramble_produces_non_zero() {
+        let mut buf = SecureBuffer::new(64).unwrap();
+        buf.scramble().unwrap();
+        // After OsRng fill, extremely unlikely all bytes are zero.
+        let all_zero = buf.as_slice().iter().all(|&b| b == 0_u8);
+        assert!(!all_zero, "scramble should produce non-zero bytes");
+    }
+
+    #[test]
+    fn destroy_returns_ok_on_clean_buffer() {
+        let mut buf = SecureBuffer::new(32).unwrap();
+        buf.destroy().unwrap();
+        assert!(!buf.is_alive());
+    }
+
+    #[test]
+    fn drop_without_explicit_destroy_does_not_panic() {
+        // Should not leak or panic.
+        let mut buf = SecureBuffer::new(128).unwrap();
+        buf.bytes()[0] = 1_u8;
+        drop(buf);
     }
 }

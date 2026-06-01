@@ -53,10 +53,10 @@ impl SecureSlab {
     /// Slots 0 and 1 are reserved for the Coffer.
     pub fn new(slot_size: usize) -> Result<Self> {
         let ps = page_size();
-        if slot_size == 0 || slot_size > ps / 4 {
+        if slot_size == 0 || slot_size > ps / 3 {
             return Err(Error::Memory(format!(
                 "SecureSlab: slot_size {slot_size} is invalid (must be 1..={})",
-                ps / 4
+                ps / 3
             )));
         }
         let total_slots = ps / slot_size;
@@ -129,6 +129,7 @@ impl SecureSlab {
         (2..self.total_slots).find(|i| !self.transient.contains(i))
     }
 
+    #[allow(dead_code)]
     pub fn slot_size(&self) -> usize {
         self.slot_size
     }
@@ -184,7 +185,7 @@ mod tests {
     #[test]
     fn slot_size_too_large_rejected() {
         let ps = page_size();
-        assert!(SecureSlab::new(ps / 4 + 1).is_err());
+        assert!(SecureSlab::new(ps / 3 + 1).is_err());
     }
 
     #[test]

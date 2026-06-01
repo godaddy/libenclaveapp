@@ -26,7 +26,7 @@ impl std::fmt::Display for MemError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Protection {
     NoAccess,
     ReadOnly,
@@ -190,4 +190,98 @@ pub unsafe fn os_free(ptr: *mut u8, len: usize) -> Result<(), MemError> {
     let layout = Layout::from_size_align(len, 1).map_err(|e| MemError::Free(e.to_string()))?;
     dealloc(ptr, layout);
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    // Tests ported from asherah-ffi (godaddy/asherah-ffi/asherah/src/memcall.rs)
+
+    #[test]
+    fn alloc_and_free_basic() {
+        let len = 4096;
+        let ptr = unsafe { os_alloc(len) }.unwrap();
+        let slice = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
+        assert_eq!(slice.len(), len);
+        assert!(unsafe { os_free(ptr.as_ptr(), len) }.is_ok());
+    }
+
+    #[test]
+    fn read_write_basic() {
+        let len = 64;
+        let ptr = unsafe { os_alloc(len) }.unwrap();
+        unsafe {
+            *ptr.as_ptr() = 0xAA_u8;
+        }
+        unsafe {
+            *ptr.as_ptr().add(63) = 0xBB_u8;
+        }
+        assert_eq!(unsafe { *ptr.as_ptr() }, 0xAA_u8);
+        assert_eq!(unsafe { *ptr.as_ptr().add(63) }, 0xBB_u8);
+        unsafe { os_free(ptr.as_ptr(), len) }.unwrap();
+    }
+
+    #[test]
+    fn lock_and_unlock() {
+        let len = page_size();
+        let ptr = unsafe { os_alloc(len) }.unwrap();
+        unsafe { os_lock(ptr.as_ptr(), len) }.unwrap();
+        unsafe { os_unlock(ptr.as_ptr(), len) }.unwrap();
+        unsafe { os_free(ptr.as_ptr(), len) }.unwrap();
+    }
+
+    #[test]
+    fn protect_read_write() {
+        let len = page_size();
+        let ptr = unsafe { os_alloc(len) }.unwrap();
+        unsafe { os_protect(ptr.as_ptr(), len, Protection::ReadOnly) }.unwrap();
+        unsafe { os_protect(ptr.as_ptr(), len, Protection::ReadWrite) }.unwrap();
+        unsafe {
+            *ptr.as_ptr() = 42_u8;
+        }
+        assert_eq!(unsafe { *ptr.as_ptr() }, 42_u8);
+        unsafe { os_free(ptr.as_ptr(), len) }.unwrap();
+    }
+
+    #[test]
+    fn protect_no_access_and_restore() {
+        let len = page_size();
+        let ptr = unsafe { os_alloc(len) }.unwrap();
+        unsafe { os_protect(ptr.as_ptr(), len, Protection::NoAccess) }.unwrap();
+        // Restore so we can free
+        unsafe { os_protect(ptr.as_ptr(), len, Protection::ReadWrite) }.unwrap();
+        unsafe { os_free(ptr.as_ptr(), len) }.unwrap();
+    }
+
+    #[test]
+    fn various_sizes_are_zero_initialized() {
+        for &size in &[1_usize, 16, 256, 4096, 8192] {
+            let ptr = unsafe { os_alloc(size) }.unwrap();
+            let slice = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), size) };
+            assert!(
+                slice.iter().all(|&b| b == 0_u8),
+                "size {size}: not zero-initialized"
+            );
+            unsafe { os_free(ptr.as_ptr(), size) }.unwrap();
+        }
+    }
+
+    #[test]
+    fn protection_flags_are_distinct() {
+        let na = format!("{:?}", Protection::NoAccess);
+        let ro = format!("{:?}", Protection::ReadOnly);
+        let rw = format!("{:?}", Protection::ReadWrite);
+        assert_ne!(na, ro);
+        assert_ne!(ro, rw);
+        assert_ne!(na, rw);
+    }
+
+    #[test]
+    fn harden_process_succeeds() {
+        // Ported from asherah-ffi disable_core_dumps_succeeds.
+        // Should not panic or error.
+        enclaveapp_core::process::harden_process();
+    }
 }
