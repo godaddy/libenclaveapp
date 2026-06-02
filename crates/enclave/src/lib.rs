@@ -31,6 +31,7 @@ pub mod exec;
 pub mod factory;
 pub mod integrity;
 pub mod memory;
+pub mod security_key;
 pub mod signing;
 pub mod types;
 
@@ -44,11 +45,16 @@ pub use credential::{classify_credential, CredentialState, LifecyclePolicy};
 pub use encryption::EncryptorHandle;
 pub use error::{Error, Result};
 pub use exec::{IntegrationType, SecureProcess, TempSecretFile};
-pub use factory::{create_auth, create_encryptor, create_signer, create_tamper_evident};
+pub use factory::{
+    create_auth, create_encryptor, create_security_key, create_signer, create_tamper_evident,
+};
 pub use integrity::{IntegrityMode, TamperEvidentHandle, VerifyOutcome};
 pub use memory::{
     coffer_view, init_pool, pool_acquire, pool_release, zeroize_all_registered_at_shutdown,
     LockedBuffer, MemoryEnclave, PoolSlot, SecureBuffer, TieredPool, TieredPoolConfig,
+};
+pub use security_key::{
+    rp_id_for, user_id_for, SecurityKeyHandle, SecurityKeyInfo, SecurityKeySignature,
 };
 pub use signing::SignerHandle;
 pub use types::{AccessPolicy, BackendKind, KeyInfo, KeyType, PresenceMode, PresenceOptions};

@@ -6,6 +6,8 @@ use enclaveapp_app_storage::BackendKind;
 use crate::auth::AuthHandle;
 #[cfg(target_os = "macos")]
 use crate::capabilities::has_keychain_entitlement;
+use crate::security_key::SecurityKeyHandle;
+
 use crate::config::EnclaveConfig;
 use crate::encryption::EncryptorHandle;
 use crate::error::{Error, Result};
@@ -44,6 +46,16 @@ pub fn create_auth(config: &EnclaveConfig) -> Result<AuthHandle> {
     let _ = config; // reserved for Phase 2 entitlement validation
     let kind = resolve_backend_kind();
     Ok(AuthHandle::new(kind))
+}
+
+/// Create a hardware security key handle.
+///
+/// The handle is valid on all platforms; check
+/// [`SecurityKeyHandle::is_available()`] before generating or signing since
+/// the underlying WebAuthn platform authenticator is only present on
+/// Windows and WSL2.
+pub fn create_security_key(config: &EnclaveConfig) -> SecurityKeyHandle {
+    crate::security_key::make_security_key_handle(config)
 }
 
 /// Create a tamper-evident handle for the given app.

@@ -19,17 +19,20 @@ libc      = { workspace = true }
 rand      = { workspace = true }
 tracing   = { workspace = true }
 subtle    = { workspace = true }
+base64    = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 enclaveapp-apple = { workspace = true, features = ["signing", "encryption"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 enclaveapp-windows = { workspace = true, features = ["signing", "encryption"] }
+enclaveapp-windows-webauthn = { workspace = true }
 windows = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 enclaveapp-keyring = { workspace = true }
 enclaveapp-wsl = { workspace = true }
+enclaveapp-bridge = { workspace = true }
 
 [features]
 mock = ["enclaveapp-app-storage/mock"]

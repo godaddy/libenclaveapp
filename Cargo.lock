@@ -337,12 +337,15 @@ name = "enclave"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "base64 0.22.1",
  "enclaveapp-app-adapter",
  "enclaveapp-app-storage",
  "enclaveapp-apple",
+ "enclaveapp-bridge",
  "enclaveapp-core",
  "enclaveapp-keyring",
  "enclaveapp-windows",
+ "enclaveapp-windows-webauthn",
  "enclaveapp-wsl",
  "libc",
  "rand",
