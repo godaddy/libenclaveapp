@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/enclave",
     "crates/enclaveapp-core",
     "crates/enclaveapp-apple",
     "crates/enclaveapp-windows",
@@ -23,10 +24,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
-repository = "https://github.com/godaddy/libenclaveapp"
+repository = "https://github.com/godaddy/enclave"
 
 [workspace.dependencies]
 # Internal crates
+enclave = { path = "crates/enclave" }
 enclaveapp-core = { path = "crates/enclaveapp-core" }
 enclaveapp-apple = { path = "crates/enclaveapp-apple" }
 enclaveapp-windows = { path = "crates/enclaveapp-windows" }
@@ -62,11 +64,11 @@ ciborium = "0.2"
 # Crypto
 sha2 = "0.10"
 p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 elliptic-curve = { version = "0.13", features = ["sec1"] }
 
 # Windows
-windows = { version = "0.58", features = ["Win32_Security", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemServices", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Com", "Win32_Graphics_Gdi", "Foundation", "Security_Credentials_UI", "Win32_UI_WindowsAndMessaging", "Win32_System_Console"] }
+windows = { version = "0.58", features = ["Win32_Security", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemServices", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Com", "Win32_Graphics_Gdi", "Foundation", "Security_Credentials_UI", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_System_SystemInformation"] }
 
 # Linux TPM
 tss-esapi = "7"
@@ -83,9 +85,13 @@ keyring = { version = "3", features = ["sync-secret-service", "apple-native", "w
 
 # Security
 zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
 
 # Testing
 rand = "0.9"
+
+# Tracing
+tracing = "0.1"
 
 # Build support
 winresource = "0.1"

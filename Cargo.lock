@@ -35,6 +35,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -328,6 +329,29 @@ dependencies = [
  "rand_core 0.6.4",
  "sec1",
  "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "enclave"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "enclaveapp-app-adapter",
+ "enclaveapp-app-storage",
+ "enclaveapp-apple",
+ "enclaveapp-core",
+ "enclaveapp-keyring",
+ "enclaveapp-windows",
+ "enclaveapp-wsl",
+ "libc",
+ "rand",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "windows",
  "zeroize",
 ]
 

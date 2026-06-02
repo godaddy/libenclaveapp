@@ -308,6 +308,91 @@ pub fn check_meta_integrity(
     }
 }
 
+/// Store an HMAC trust anchor for an arbitrary file in the platform
+/// secure store.
+///
+/// `path_label` is a stable identifier derived from the file path
+/// (e.g. a hex SHA-256 of the path bytes from
+/// `enclave::integrity::path_to_label`). On platforms where the
+/// native secure store is unavailable the call silently succeeds
+/// (fail-open) so callers don't need conditional logic.
+pub fn store_file_tag(
+    app_name: &str,
+    path_label: &str,
+    tag: &[u8; 32],
+) -> enclaveapp_core::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        enclaveapp_apple::meta_tag::store(app_name, path_label, tag)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        enclaveapp_windows::meta_tag::store(app_name, path_label, tag)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        enclaveapp_keyring::meta_tag::store(app_name, path_label, tag)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (app_name, path_label, tag);
+        Ok(())
+    }
+}
+
+/// Load an HMAC trust anchor for an arbitrary file from the platform
+/// secure store.
+///
+/// Returns `Ok(Some(tag))` when the trust anchor is present,
+/// `Ok(None)` when no anchor was found (new file or pre-migration),
+/// and `Err` only for hard platform-store failures. Callers should
+/// treat `Ok(None)` as the legacy / pre-migration path and
+/// `Err` as store unavailable (fail-open).
+pub fn load_file_tag(
+    app_name: &str,
+    path_label: &str,
+) -> enclaveapp_core::Result<Option<[u8; 32]>> {
+    #[cfg(target_os = "macos")]
+    {
+        enclaveapp_apple::meta_tag::load(app_name, path_label)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        enclaveapp_windows::meta_tag::load(app_name, path_label)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        enclaveapp_keyring::meta_tag::load(app_name, path_label)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (app_name, path_label);
+        Ok(None)
+    }
+}
+
+/// Delete the HMAC trust anchor for an arbitrary file from the
+/// platform secure store. Idempotent: missing-entry is success.
+pub fn delete_file_tag(app_name: &str, path_label: &str) -> enclaveapp_core::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        enclaveapp_apple::meta_tag::delete(app_name, path_label)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        enclaveapp_windows::meta_tag::delete(app_name, path_label)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        enclaveapp_keyring::meta_tag::delete(app_name, path_label)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (app_name, path_label);
+        Ok(())
+    }
+}
+
 /// Remove the per-app meta-HMAC key from the platform's secure
 /// store. Used by the uninstall flow so a clean reinstall doesn't
 /// reuse a stale key. Idempotent: missing-entry is success.

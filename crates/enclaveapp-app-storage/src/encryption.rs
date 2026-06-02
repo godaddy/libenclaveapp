@@ -55,8 +55,102 @@ enum StorageInner {
     Software(enclaveapp_keyring::SoftwareEncryptor),
 
     #[cfg(target_os = "linux")]
-    WslBridge { bridge_path: std::path::PathBuf },
+    WslBridge(BridgeEncryptorWrapper),
 }
+
+/// Wrapper that implements `EnclaveEncryptor` + `EnclaveKeyManager` by calling
+/// the WSL TPM bridge for encryption operations.
+#[cfg(target_os = "linux")]
+struct BridgeEncryptorWrapper {
+    bridge_path: std::path::PathBuf,
+    app_name: String,
+    key_label: String,
+    access_policy: AccessPolicy,
+}
+
+#[cfg(target_os = "linux")]
+impl EnclaveKeyManager for BridgeEncryptorWrapper {
+    fn generate(
+        &self,
+        label: &str,
+        _key_type: KeyType,
+        policy: AccessPolicy,
+    ) -> enclaveapp_core::Result<Vec<u8>> {
+        // bridge_init has load-or-create semantics, then read the public key.
+        enclaveapp_bridge::bridge_init(&self.bridge_path, &self.app_name, label, policy)?;
+        self.public_key(label)
+    }
+
+    fn public_key(&self, label: &str) -> enclaveapp_core::Result<Vec<u8>> {
+        enclaveapp_bridge::bridge_public_key(
+            &self.bridge_path,
+            &self.app_name,
+            label,
+            self.access_policy,
+        )
+    }
+
+    fn list_keys(&self) -> enclaveapp_core::Result<Vec<String>> {
+        enclaveapp_bridge::bridge_list_keys(
+            &self.bridge_path,
+            &self.app_name,
+            &self.key_label,
+            self.access_policy,
+        )
+    }
+
+    fn delete_key(&self, label: &str) -> enclaveapp_core::Result<()> {
+        enclaveapp_bridge::bridge_destroy(&self.bridge_path, &self.app_name, label)
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn key_exists(&self, label: &str) -> enclaveapp_core::Result<bool> {
+        // Use public_key as a non-destructive probe. bridge_init has
+        // load-or-create semantics, so we cannot use it here without
+        // creating the key as a side effect. Unlike the signing path,
+        // there is no bridge_key_exists helper for encryption keys; a
+        // public_key lookup is the least-invasive probe available.
+        match self.public_key(label) {
+            Ok(_) => Ok(true),
+            Err(enclaveapp_core::Error::KeyNotFound { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl EnclaveEncryptor for BridgeEncryptorWrapper {
+    fn encrypt(&self, label: &str, plaintext: &[u8]) -> enclaveapp_core::Result<Vec<u8>> {
+        enclaveapp_bridge::bridge_encrypt(
+            &self.bridge_path,
+            &self.app_name,
+            label,
+            plaintext,
+            self.access_policy,
+        )
+    }
+
+    fn decrypt(&self, label: &str, ciphertext: &[u8]) -> enclaveapp_core::Result<Vec<u8>> {
+        enclaveapp_bridge::bridge_decrypt(
+            &self.bridge_path,
+            &self.app_name,
+            label,
+            ciphertext,
+            self.access_policy,
+        )
+    }
+}
+
+// BridgeEncryptorWrapper holds only paths and strings — safe to send between threads.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+unsafe impl Send for BridgeEncryptorWrapper {}
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+unsafe impl Sync for BridgeEncryptorWrapper {}
 
 impl std::fmt::Debug for AppEncryptionStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -354,13 +448,20 @@ impl AppEncryptionStorage {
         )
         .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
 
+        let wrapper = BridgeEncryptorWrapper {
+            bridge_path,
+            app_name: config.app_name.clone(),
+            key_label: config.key_label.clone(),
+            access_policy: config.access_policy,
+        };
+
         Ok(Self {
             kind: BackendKind::TpmBridge,
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
             access_policy: config.access_policy,
             keys_dir: Self::resolved_keys_dir(config),
-            inner: StorageInner::WslBridge { bridge_path },
+            inner: StorageInner::WslBridge(wrapper),
         })
     }
 
@@ -550,6 +651,64 @@ impl AppEncryptionStorage {
         #[cfg(test)]
         let _ = (app_name, label, keys_dir);
     }
+
+    /// Returns the underlying encryptor for multi-key operations.
+    ///
+    /// Allows callers to drive multi-key workflows (generate, public_key,
+    /// encrypt, decrypt, list_keys, delete_key, etc.) directly against
+    /// the platform encryptor without going through the single-label
+    /// `EncryptionStorage` trait.
+    pub fn encryptor(&self) -> &dyn EnclaveEncryptor {
+        match &self.inner {
+            #[cfg(target_os = "macos")]
+            StorageInner::SecureEnclave(e) => e,
+
+            #[cfg(target_os = "windows")]
+            StorageInner::Tpm(e) => e,
+
+            #[cfg(target_os = "windows")]
+            StorageInner::WindowsDpapi(e) => e,
+
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            StorageInner::LinuxTpm(e) => e,
+
+            #[cfg(target_os = "linux")]
+            StorageInner::Software(e) => e,
+
+            #[cfg(target_os = "linux")]
+            StorageInner::WslBridge(w) => w,
+        }
+    }
+
+    /// Returns the underlying key manager for multi-key lifecycle operations.
+    ///
+    /// Since `EnclaveEncryptor` extends `EnclaveKeyManager`, this is a
+    /// convenience accessor that names the capability more clearly at call
+    /// sites that only need key-management methods (generate, list, delete,
+    /// rename, exists).
+    pub fn key_manager(&self) -> &dyn EnclaveKeyManager {
+        // Dispatch to the same inner type as encryptor(); EnclaveEncryptor
+        // extends EnclaveKeyManager so all encryptors are key managers.
+        match &self.inner {
+            #[cfg(target_os = "macos")]
+            StorageInner::SecureEnclave(e) => e,
+
+            #[cfg(target_os = "windows")]
+            StorageInner::Tpm(e) => e,
+
+            #[cfg(target_os = "windows")]
+            StorageInner::WindowsDpapi(e) => e,
+
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            StorageInner::LinuxTpm(e) => e,
+
+            #[cfg(target_os = "linux")]
+            StorageInner::Software(e) => e,
+
+            #[cfg(target_os = "linux")]
+            StorageInner::WslBridge(w) => w,
+        }
+    }
 }
 
 /// Encryption storage trait for dynamic dispatch (used with mock backend).
@@ -597,14 +756,9 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .map_err(|e| StorageError::EncryptionFailed(e.to_string())),
 
             #[cfg(target_os = "linux")]
-            StorageInner::WslBridge { bridge_path } => enclaveapp_bridge::bridge_encrypt(
-                bridge_path,
-                &self.app_name,
-                &self.key_label,
-                plaintext,
-                self.access_policy,
-            )
-            .map_err(|e| StorageError::EncryptionFailed(e.to_string())),
+            StorageInner::WslBridge(w) => w
+                .encrypt(&self.key_label, plaintext)
+                .map_err(|e| StorageError::EncryptionFailed(e.to_string())),
         }
     }
 
@@ -647,14 +801,9 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .map_err(|e| StorageError::DecryptionFailed(e.to_string())),
 
             #[cfg(target_os = "linux")]
-            StorageInner::WslBridge { bridge_path } => enclaveapp_bridge::bridge_decrypt(
-                bridge_path,
-                &self.app_name,
-                &self.key_label,
-                ciphertext,
-                self.access_policy,
-            )
-            .map_err(|e| StorageError::DecryptionFailed(e.to_string())),
+            StorageInner::WslBridge(w) => w
+                .decrypt(&self.key_label, ciphertext)
+                .map_err(|e| StorageError::DecryptionFailed(e.to_string())),
         }
     }
 
@@ -686,10 +835,9 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .map_err(|e| StorageError::KeyNotFound(e.to_string())),
 
             #[cfg(target_os = "linux")]
-            StorageInner::WslBridge { bridge_path } => {
-                enclaveapp_bridge::bridge_destroy(bridge_path, &self.app_name, &self.key_label)
-                    .map_err(|e| StorageError::KeyNotFound(e.to_string()))
-            }
+            StorageInner::WslBridge(w) => w
+                .delete_key(&self.key_label)
+                .map_err(|e| StorageError::KeyNotFound(e.to_string())),
         }
     }
 

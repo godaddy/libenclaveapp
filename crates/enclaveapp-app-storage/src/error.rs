@@ -6,6 +6,7 @@
 use thiserror::Error;
 
 /// Errors from application storage initialization and operations.
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum StorageError {
     #[error("hardware security module not available")]
