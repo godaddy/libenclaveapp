@@ -1,4 +1,4 @@
-# Publishes the `enclave` crate to crates.io on version tag push.
+# Publishes the `hardware-enclave` crate to crates.io on version tag push.
 # CARGO_REGISTRY_TOKEN must be set in GitHub repo secrets before this workflow
 # will succeed. Generate a token at https://crates.io/settings/tokens and add
 # it as a repository secret named CARGO_REGISTRY_TOKEN.
@@ -70,5 +70,5 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
-      - name: Publish enclave crate
-        run: cargo publish -p enclave --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish hardware-enclave crate
+        run: cargo publish -p hardware-enclave --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
