@@ -1,6 +1,9 @@
 [package]
 name = "enclave"
 description = "Hardware-backed key management — macOS Secure Enclave, Windows TPM 2.0, Linux TPM/keyring"
+keywords   = ["security", "tpm", "secure-enclave", "cryptography", "memory-protection"]
+categories = ["cryptography", "os", "hardware-support"]
+documentation = "https://docs.rs/enclave"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,23 +22,29 @@ libc      = { workspace = true }
 rand      = { workspace = true }
 tracing   = { workspace = true }
 subtle    = { workspace = true }
+base64    = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 enclaveapp-apple = { workspace = true, features = ["signing", "encryption"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 enclaveapp-windows = { workspace = true, features = ["signing", "encryption"] }
+enclaveapp-windows-webauthn = { workspace = true }
 windows = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 enclaveapp-keyring = { workspace = true }
 enclaveapp-wsl = { workspace = true }
+enclaveapp-bridge = { workspace = true }
 
 [features]
 mock = ["enclaveapp-app-storage/mock"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+enclaveapp-test-software = { workspace = true, features = ["signing", "encryption"] }
+tracing-subscriber = { workspace = true }
+p256 = { workspace = true }
 
 [lints]
 workspace = true
