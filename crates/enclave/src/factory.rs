@@ -30,7 +30,7 @@ pub fn create_encryptor(config: &EnclaveConfig) -> Result<EncryptorHandle> {
     let storage_config = validate_and_resolve_config(config)?;
     let kind = resolve_backend_kind();
     let storage =
-        enclaveapp_app_storage::create_encryption_storage(storage_config).map_err(Error::from)?;
+        enclaveapp_app_storage::AppEncryptionStorage::init(storage_config).map_err(Error::from)?;
     Ok(EncryptorHandle::new(storage, kind))
 }
 
