@@ -266,12 +266,17 @@ impl SecurityKeyHandle {
 
     // ── private helpers ──────────────────────────────────────────────────────
 
+    // Parameters used only in platform-specific cfg arms; suppress "unused" on other platforms.
     #[allow(clippy::needless_return, unreachable_code)]
+    #[cfg_attr(
+        not(any(target_os = "windows", target_os = "linux")),
+        allow(unused_variables)
+    )]
     fn do_make_credential(
         &self,
-        _rp_id: &str,
-        _label: &str,
-        _user_id: &[u8],
+        rp_id: &str,
+        label: &str,
+        user_id: &[u8],
     ) -> Result<(Vec<u8>, [u8; 32], [u8; 32])> {
         match &self.backend {
             #[cfg(target_os = "windows")]
@@ -334,11 +339,15 @@ impl SecurityKeyHandle {
     }
 
     #[allow(clippy::needless_return, unreachable_code)]
+    #[cfg_attr(
+        not(any(target_os = "windows", target_os = "linux")),
+        allow(unused_variables)
+    )]
     fn do_get_assertion(
         &self,
-        _rp_id: &str,
-        _credential_id: &[u8],
-        _client_data: &[u8],
+        rp_id: &str,
+        credential_id: &[u8],
+        client_data: &[u8],
     ) -> Result<(Vec<u8>, u8, u32)> {
         match &self.backend {
             #[cfg(target_os = "windows")]
