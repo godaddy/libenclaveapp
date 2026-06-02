@@ -1,0 +1,513 @@
+// Copyright 2026 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! `LinuxTpmSigner` -- ECDSA P-256 signing backend using Linux TPM 2.0.
+#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
+#![allow(unused_qualifications, let_underscore_drop)]
+
+use super::tpm::{self, TpmConfig};
+use crate::internal::core::metadata::{self, DirLock};
+use crate::internal::core::traits::{EnclaveKeyManager, EnclaveSigner};
+use crate::internal::core::types::validate_label;
+use crate::internal::core::{AccessPolicy, Error, KeyType, Result};
+use sha2::{Digest as _, Sha256};
+use tss_esapi::structures::{
+    Digest as TpmDigest, Public, Signature as TpmSignature, SignatureScheme,
+};
+use tss_esapi::traits::{Marshall, UnMarshall};
+
+/// Linux TPM 2.0-backed ECDSA P-256 signer.
+#[derive(Debug)]
+pub struct LinuxTpmSigner {
+    config: TpmConfig,
+}
+
+impl LinuxTpmSigner {
+    /// Create a new signer for the given application.
+    pub fn new(app_name: &str) -> Self {
+        Self {
+            config: TpmConfig::new(app_name),
+        }
+    }
+
+    /// Create a signer with a custom keys directory path.
+    pub fn with_keys_dir(app_name: &str, keys_dir: std::path::PathBuf) -> Self {
+        Self {
+            config: TpmConfig::with_keys_dir(app_name, keys_dir),
+        }
+    }
+
+    /// Load a child key into the TPM and return its handle along with the context.
+    fn load_key(&self, label: &str) -> Result<(tss_esapi::Context, tss_esapi::handles::KeyHandle)> {
+        let dir = self.config.keys_dir();
+        let (pub_blob, priv_blob) = tpm::load_key_blobs(&dir, label)?;
+
+        let mut ctx = tpm::open_context()?;
+        let primary_handle = tpm::create_primary(&mut ctx)?;
+
+        let private = tss_esapi::structures::Private::try_from(priv_blob).map_err(|e| {
+            Error::KeyOperation {
+                operation: "load_private".into(),
+                detail: e.to_string(),
+            }
+        })?;
+        let public = Public::unmarshall(&pub_blob).map_err(|e| Error::KeyOperation {
+            operation: "load_public".into(),
+            detail: e.to_string(),
+        })?;
+
+        let key_handle =
+            ctx.load(primary_handle, private, public)
+                .map_err(|e| Error::KeyOperation {
+                    operation: "load_key".into(),
+                    detail: e.to_string(),
+                })?;
+
+        Ok((ctx, key_handle))
+    }
+}
+
+impl EnclaveKeyManager for LinuxTpmSigner {
+    fn generate(&self, label: &str, key_type: KeyType, policy: AccessPolicy) -> Result<Vec<u8>> {
+        validate_label(label)?;
+        if key_type != KeyType::Signing {
+            return Err(Error::KeyOperation {
+                operation: "generate".into(),
+                detail: "LinuxTpmSigner only supports signing keys".into(),
+            });
+        }
+
+        let dir = self.config.keys_dir();
+        metadata::ensure_dir(&dir)?;
+        let _lock = DirLock::acquire(&dir)?;
+
+        tpm::ensure_label_available(&dir, label)?;
+
+        let mut ctx = tpm::open_context()?;
+        let primary_handle = tpm::create_primary(&mut ctx)?;
+        let template = tpm::signing_key_template()?;
+
+        let result = ctx
+            .create(primary_handle, template, None, None, None, None)
+            .map_err(|e| Error::GenerateFailed {
+                detail: format!("TPM create: {e}"),
+            })?;
+
+        // Extract the public key as SEC1 uncompressed point
+        let pub_key = tpm::extract_public_key(&result.out_public)?;
+
+        // Serialize and save TPM blobs
+        let pub_blob = result
+            .out_public
+            .marshall()
+            .map_err(|e| Error::KeyOperation {
+                operation: "marshall_public".into(),
+                detail: e.to_string(),
+            })?;
+        let priv_blob: Vec<u8> = result.out_private.to_vec();
+        tpm::persist_generated_key(
+            &dir, label, key_type, policy, &pub_key, &pub_blob, &priv_blob,
+        )?;
+
+        // Layer the HMAC sidecar on top of the persisted meta, then
+        // stamp the per-key trust-anchor tag against the resulting
+        // `.meta`. Best-effort: a Secret Service failure here
+        // doesn't fail keygen — the next strict-mode load runs the
+        // migration step, and the user can recover via
+        // `<app> migrate-meta`. Same threshold as the keyring
+        // backend's HMAC path. The trust-anchor tag store is the
+        // same Secret Service entry shape the keyring backend uses
+        // (`(<app>, __meta_tag_<label>__)`); both Linux backends
+        // share the same trust domain.
+        if let Some(hmac_key) = crate::internal::keyring::meta_hmac_key(&self.config.app_name) {
+            let meta = crate::internal::core::KeyMeta::new(label, key_type, policy);
+            if let Err(e) = crate::internal::core::metadata::save_meta_with_hmac(
+                &dir,
+                label,
+                &meta,
+                hmac_key.as_slice(),
+            ) {
+                tracing::warn!(
+                    label = label,
+                    error = %e,
+                    "linux-tpm: post-persist meta-HMAC sidecar write failed; \
+                     next load's auto-migrate will retry"
+                );
+            }
+            if let Err(e) = crate::internal::keyring::meta_tag::stamp_from_disk(
+                &self.config.app_name,
+                label,
+                &dir,
+                hmac_key.as_slice(),
+            ) {
+                tracing::warn!(
+                    label = label,
+                    error = %e,
+                    "linux-tpm: post-persist meta-tag stamp failed; \
+                     first sign will refuse with Legacy until \
+                     `<app> migrate-meta` runs"
+                );
+            }
+        }
+
+        Ok(pub_key)
+    }
+
+    fn public_key(&self, label: &str) -> Result<Vec<u8>> {
+        validate_label(label)?;
+        let dir = self.config.keys_dir();
+        tpm::load_public_key(&dir, label)
+    }
+
+    fn list_keys(&self) -> Result<Vec<String>> {
+        tpm::list_labels(&self.config.keys_dir())
+    }
+
+    fn rename_key(&self, old_label: &str, new_label: &str) -> Result<()> {
+        validate_label(old_label)?;
+        validate_label(new_label)?;
+        if old_label == new_label {
+            return Ok(());
+        }
+        let dir = self.config.keys_dir();
+        if !dir.exists() {
+            return Err(Error::KeyNotFound {
+                label: old_label.to_string(),
+            });
+        }
+        let _lock = DirLock::acquire(&dir)?;
+        tpm::rename_key_blobs(&dir, old_label, new_label)?;
+        // Linux TPM-backed keys do not write a `.meta.hmac` sidecar
+        // on this branch (the strict-mode HMAC discipline ships only
+        // on the keyring/software backend). Pass `None` for the
+        // hmac_key.
+        if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label, None) {
+            // Roll the blob rename back so state stays consistent.
+            drop(tpm::rename_key_blobs(&dir, new_label, old_label));
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn delete_key(&self, label: &str) -> Result<()> {
+        validate_label(label)?;
+        let dir = self.config.keys_dir();
+        if !dir.exists() {
+            return Err(Error::KeyNotFound {
+                label: label.to_string(),
+            });
+        }
+        let _lock = DirLock::acquire(&dir)?;
+        let blob_existed = tpm::key_blobs_exist(&dir, label)?;
+        let metadata_existed = metadata::key_files_exist(&dir, label)?;
+        if !blob_existed && !metadata_existed {
+            return Err(Error::KeyNotFound {
+                label: label.to_string(),
+            });
+        }
+        match tpm::delete_key_blobs(&dir, label) {
+            Ok(()) => {}
+            Err(Error::KeyNotFound { .. }) if metadata_existed => {}
+            Err(err) => return Err(err),
+        }
+        match metadata::delete_key_files(&dir, label) {
+            Ok(()) => Ok(()),
+            Err(Error::KeyNotFound { .. }) if blob_existed => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        tpm::is_available()
+    }
+}
+
+/// Run the per-op meta-integrity check against the Secret-Service-
+/// stored tag. Returns `Ok(())` on a clean verify, on a missing meta
+/// file (`NoMeta`), and on `KeychainUnavailable` (fail-open). Returns
+/// `Err` on tamper / legacy. Mirrors the keyring backend's verify
+/// (same module powers both); both Linux backends share the same
+/// Secret Service trust domain so the verify shape is identical.
+///
+/// **Linux TPM specifics:** the TPM key uses empty authorization
+/// (no UI prompt at sign time, the documented design caveat), so the
+/// meta-integrity tag is the only protection against same-UID
+/// rewriting of policy fields in `.meta`. This makes the trust
+/// anchor doubly important on this backend — it's not just a
+/// belt-and-suspenders check, it's the only enforcement.
+fn ensure_meta_integrity(app_name: &str, label: &str, dir: &std::path::Path) -> Result<()> {
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    let hmac_key = match crate::internal::keyring::meta_hmac_key_existing(app_name) {
+        Ok(Some(k)) => k,
+        Ok(None) | Err(_) => return Ok(()),
+    };
+
+    match crate::internal::keyring::meta_tag::verify(app_name, label, dir, hmac_key.as_slice())? {
+        crate::internal::keyring::meta_tag::VerifyOutcome::Match
+        | crate::internal::keyring::meta_tag::VerifyOutcome::NoMeta
+        | crate::internal::keyring::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+        crate::internal::keyring::meta_tag::VerifyOutcome::Tamper => Err(Error::KeyOperation {
+            operation: "meta_tag_verify".into(),
+            detail: format!(
+                "key '{label}': metadata integrity check failed. The on-disk meta \
+                 does not match the keychain-stored tag — meta may have been \
+                 tampered with. Refusing to proceed. Regenerate the key to restore \
+                 a known-good state."
+            ),
+        }),
+        crate::internal::keyring::meta_tag::VerifyOutcome::Legacy => {
+            let marker_set =
+                crate::internal::keyring::meta_migration_marker::is_set(app_name).unwrap_or(false);
+            if marker_set {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy_post_migration".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag, but `{app_name} migrate-meta` \
+                         has already completed on this install. This is a strong tamper \
+                         signal — legitimate operation should not produce a missing tag \
+                         after the marker is set. Recommended: regenerate the affected \
+                         key with `{app_name} keygen`. Do NOT run migrate-meta again \
+                         unless you can independently explain why this key's tag is \
+                         missing (e.g., manual restore from a backup of an unrelated \
+                         machine), in which case pass \
+                         `--force-rerun-i-understand` to override."
+                    ),
+                })
+            } else {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag. This is the one-time \
+                         migration required by upgrading to a build that introduces meta \
+                         integrity tags, and is not something future upgrades will repeat. \
+                         Before migrating, verify the key's current policy looks correct: \
+                         `{app_name} inspect {label}`. To migrate: `{app_name} \
+                         migrate-meta`."
+                    ),
+                })
+            }
+        }
+    }
+}
+
+impl EnclaveSigner for LinuxTpmSigner {
+    fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
+        // AccessPolicy is stored in key metadata but is not enforced here.
+        // The TPM key uses empty authorization; no user prompt occurs regardless
+        // of the policy recorded at generation time. The trust-anchor check
+        // below is the ONLY defense against same-UID rewriting of policy
+        // fields in `.meta` on this backend.
+        validate_label(label)?;
+
+        let dir = self.config.keys_dir();
+        ensure_meta_integrity(&self.config.app_name, label, &dir)?;
+
+        let (mut ctx, key_handle) = self.load_key(label)?;
+
+        // Pre-hash with SHA-256 (TPM takes a digest, not raw data)
+        let hash = Sha256::digest(data);
+        let digest = TpmDigest::try_from(hash.as_slice()).map_err(|e| Error::SignFailed {
+            detail: format!("digest conversion: {e}"),
+        })?;
+
+        // Sign with the TPM -- unrestricted key needs a null hierarchy ticket
+        let ticket = tss_esapi::structures::HashcheckTicket::try_from(
+            tss_esapi::tss2_esys::TPMT_TK_HASHCHECK {
+                tag: tss_esapi::constants::tss::TPM2_ST_HASHCHECK,
+                hierarchy: tss_esapi::constants::tss::TPM2_RH_NULL,
+                digest: Default::default(),
+            },
+        )
+        .map_err(|e| Error::SignFailed {
+            detail: format!("ticket: {e}"),
+        })?;
+        let signature = ctx
+            .sign(key_handle, digest, SignatureScheme::Null, ticket)
+            .map_err(|e| Error::SignFailed {
+                detail: format!("TPM sign: {e}"),
+            })?;
+
+        // Convert TPM signature to DER-encoded ECDSA signature
+        tpm_signature_to_der(&signature)
+    }
+}
+
+/// Convert a TPM ECDSA signature to DER-encoded format.
+fn tpm_signature_to_der(sig: &TpmSignature) -> Result<Vec<u8>> {
+    match sig {
+        TpmSignature::EcDsa(ecc_sig) => {
+            let r_bytes = ecc_sig.signature_r().value();
+            let s_bytes = ecc_sig.signature_s().value();
+
+            // Encode as DER SEQUENCE { INTEGER r, INTEGER s }
+            let r_der = encode_der_integer(r_bytes);
+            let s_der = encode_der_integer(s_bytes);
+
+            let inner_len = r_der.len() + s_der.len();
+            let mut der = Vec::with_capacity(2 + inner_len);
+            der.push(0x30); // SEQUENCE tag
+            encode_der_length(&mut der, inner_len);
+            der.extend_from_slice(&r_der);
+            der.extend_from_slice(&s_der);
+            Ok(der)
+        }
+        _ => Err(Error::SignFailed {
+            detail: "unexpected signature type from TPM (expected ECDSA)".into(),
+        }),
+    }
+}
+
+/// Encode a big-endian unsigned integer as DER INTEGER.
+fn encode_der_integer(bytes: &[u8]) -> Vec<u8> {
+    // Strip leading zeros but keep at least one byte
+    let mut start = 0;
+    while start < bytes.len() - 1 && bytes[start] == 0 {
+        start += 1;
+    }
+    let significant = &bytes[start..];
+
+    // If the high bit is set, prepend a 0x00 byte (positive integer)
+    let needs_pad = significant[0] & 0x80 != 0;
+    let len = significant.len() + usize::from(needs_pad);
+
+    let mut out = Vec::with_capacity(2 + len);
+    out.push(0x02); // INTEGER tag
+    encode_der_length(&mut out, len);
+    if needs_pad {
+        out.push(0x00);
+    }
+    out.extend_from_slice(significant);
+    out
+}
+
+/// Encode a DER length field.
+fn encode_der_length(out: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len < 0x100 {
+        out.push(0x81);
+        out.push(len as u8);
+    } else {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push(len as u8);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::internal::core::KeyMeta;
+
+    #[test]
+    fn encode_der_integer_no_padding() {
+        let bytes = [0x01, 0x02, 0x03];
+        let der = encode_der_integer(&bytes);
+        assert_eq!(der, vec![0x02, 0x03, 0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn encode_der_integer_with_high_bit_padding() {
+        let bytes = [0x80, 0x01];
+        let der = encode_der_integer(&bytes);
+        assert_eq!(der, vec![0x02, 0x03, 0x00, 0x80, 0x01]);
+    }
+
+    #[test]
+    fn encode_der_integer_strips_leading_zeros() {
+        let bytes = [0x00, 0x00, 0x42];
+        let der = encode_der_integer(&bytes);
+        assert_eq!(der, vec![0x02, 0x01, 0x42]);
+    }
+
+    #[test]
+    fn encode_der_integer_single_zero() {
+        let bytes = [0x00];
+        let der = encode_der_integer(&bytes);
+        assert_eq!(der, vec![0x02, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn tpm_signer_rejects_encryption_key_type() {
+        // This test doesn't need a TPM -- it validates the key_type check
+        let signer = LinuxTpmSigner::with_keys_dir(
+            "test",
+            std::env::temp_dir().join("enclaveapp-tpm-test-reject"),
+        );
+        let err = signer
+            .generate("test", KeyType::Encryption, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::KeyOperation { .. } => {}
+            other => panic!("expected KeyOperation, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn generate_rejects_duplicate_metadata_without_blob() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-tpm-test-sign-dup-{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let signer = LinuxTpmSigner::with_keys_dir("test", dir.clone());
+        let meta = KeyMeta::new("stray-sign", KeyType::Signing, AccessPolicy::None);
+        metadata::save_meta(&dir, "stray-sign", &meta).unwrap();
+
+        let err = signer
+            .generate("stray-sign", KeyType::Signing, AccessPolicy::None)
+            .unwrap_err();
+        match err {
+            Error::DuplicateLabel { label } => assert_eq!(label, "stray-sign"),
+            other => panic!("expected DuplicateLabel, got: {other}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Integration tests that require actual TPM hardware.
+    // Run with: ENCLAVEAPP_TEST_TPM=1 cargo test -p enclaveapp-linux-tpm --features signing
+    #[test]
+    fn tpm_sign_roundtrip() {
+        if std::env::var("ENCLAVEAPP_TEST_TPM").is_err() {
+            eprintln!("skipping TPM test (set ENCLAVEAPP_TEST_TPM=1 to run)");
+            return;
+        }
+
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("enclaveapp-tpm-sign-test-{pid}-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let signer = LinuxTpmSigner::with_keys_dir("test", dir.clone());
+
+        let pub_key = signer
+            .generate("tpm-sign-test", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        assert_eq!(pub_key.len(), 65);
+        assert_eq!(pub_key[0], 0x04);
+
+        let sig = signer.sign("tpm-sign-test", b"hello world").unwrap();
+        // DER signature starts with SEQUENCE tag
+        assert_eq!(sig[0], 0x30);
+
+        let retrieved = signer.public_key("tpm-sign-test").unwrap();
+        assert_eq!(retrieved, pub_key);
+
+        let keys = signer.list_keys().unwrap();
+        assert!(keys.contains(&"tpm-sign-test".to_string()));
+
+        signer.delete_key("tpm-sign-test").unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

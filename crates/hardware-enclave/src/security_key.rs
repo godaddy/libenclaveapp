@@ -32,9 +32,9 @@
 
 use std::path::PathBuf;
 
+use crate::internal::core::metadata::{self, KeyMeta};
+use crate::internal::core::types::{validate_label, KeyType};
 use base64::prelude::*;
-use enclaveapp_core::metadata::{self, KeyMeta};
-use enclaveapp_core::types::{validate_label, KeyType};
 use sha2::{Digest, Sha256};
 
 use crate::config::EnclaveConfig;
@@ -127,10 +127,12 @@ impl SecurityKeyHandle {
     pub fn is_available(&self) -> bool {
         match &self.backend {
             #[cfg(target_os = "windows")]
-            SkBackend::Native => enclaveapp_windows_webauthn::is_platform_authenticator_available(),
+            SkBackend::Native => {
+                crate::internal::windows_webauthn::is_platform_authenticator_available()
+            }
             #[cfg(target_os = "linux")]
             SkBackend::Bridge { bridge_path } => {
-                enclaveapp_bridge::bridge_webauthn_is_available(bridge_path).unwrap_or(false)
+                crate::internal::bridge::bridge_webauthn_is_available(bridge_path).unwrap_or(false)
             }
             SkBackend::Unavailable => false,
         }
@@ -281,7 +283,7 @@ impl SecurityKeyHandle {
         match &self.backend {
             #[cfg(target_os = "windows")]
             SkBackend::Native => {
-                let params = enclaveapp_windows_webauthn::MakeCredentialParams {
+                let params = crate::internal::windows_webauthn::MakeCredentialParams {
                     rp_id,
                     rp_name: &self.app_name,
                     user_id,
@@ -290,17 +292,18 @@ impl SecurityKeyHandle {
                     timeout_ms: 60_000,
                     hwnd: None,
                 };
-                let cred = enclaveapp_windows_webauthn::make_credential(params).map_err(|e| {
-                    Error::KeyOperation {
-                        operation: "sk_make_credential".into(),
-                        detail: e.to_string(),
-                    }
-                })?;
+                let cred =
+                    crate::internal::windows_webauthn::make_credential(params).map_err(|e| {
+                        Error::KeyOperation {
+                            operation: "sk_make_credential".into(),
+                            detail: e.to_string(),
+                        }
+                    })?;
                 return Ok((cred.credential_id, cred.public_key_x, cred.public_key_y));
             }
             #[cfg(target_os = "linux")]
             SkBackend::Bridge { bridge_path } => {
-                let result = enclaveapp_bridge::bridge_webauthn_make_credential(
+                let result = crate::internal::bridge::bridge_webauthn_make_credential(
                     bridge_path,
                     rp_id,
                     &self.app_name,
@@ -352,7 +355,7 @@ impl SecurityKeyHandle {
         match &self.backend {
             #[cfg(target_os = "windows")]
             SkBackend::Native => {
-                let params = enclaveapp_windows_webauthn::GetAssertionParams {
+                let params = crate::internal::windows_webauthn::GetAssertionParams {
                     rp_id,
                     credential_id,
                     client_data,
@@ -360,7 +363,7 @@ impl SecurityKeyHandle {
                     hwnd: None,
                 };
                 let assertion =
-                    enclaveapp_windows_webauthn::get_assertion(params).map_err(|e| {
+                    crate::internal::windows_webauthn::get_assertion(params).map_err(|e| {
                         Error::SignFailed {
                             detail: e.to_string(),
                         }
@@ -369,7 +372,7 @@ impl SecurityKeyHandle {
             }
             #[cfg(target_os = "linux")]
             SkBackend::Bridge { bridge_path } => {
-                let result = enclaveapp_bridge::bridge_webauthn_get_assertion(
+                let result = crate::internal::bridge::bridge_webauthn_get_assertion(
                     bridge_path,
                     rp_id,
                     credential_id,
@@ -402,15 +405,17 @@ impl SecurityKeyHandle {
         match &self.backend {
             #[cfg(target_os = "windows")]
             SkBackend::Native => {
-                return enclaveapp_windows_webauthn::delete_platform_credential(credential_id)
-                    .map_err(|e| Error::KeyOperation {
-                        operation: "sk_delete".into(),
-                        detail: e.to_string(),
-                    });
+                return crate::internal::windows_webauthn::delete_platform_credential(
+                    credential_id,
+                )
+                .map_err(|e| Error::KeyOperation {
+                    operation: "sk_delete".into(),
+                    detail: e.to_string(),
+                });
             }
             #[cfg(target_os = "linux")]
             SkBackend::Bridge { bridge_path } => {
-                return enclaveapp_bridge::bridge_webauthn_delete_platform_credential(
+                return crate::internal::bridge::bridge_webauthn_delete_platform_credential(
                     bridge_path,
                     credential_id,
                 )
@@ -537,7 +542,7 @@ pub(crate) fn make_security_key_handle(config: &EnclaveConfig) -> SecurityKeyHan
             _ => Vec::new(),
         };
         if let Some(bridge_path) =
-            enclaveapp_app_storage::platform::find_bridge_executable(&app_name, &extra_paths)
+            crate::internal::app_storage::platform::find_bridge_executable(&app_name, &extra_paths)
         {
             return SecurityKeyHandle::new(app_name, keys_dir, SkBackend::Bridge { bridge_path });
         }

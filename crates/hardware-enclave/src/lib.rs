@@ -37,6 +37,8 @@
 //! error reporting, call [`init_pool()`] explicitly before using any [`MemoryEnclave`] or
 //! [`pool_acquire()`] operations.
 
+pub(crate) mod internal;
+
 pub mod auth;
 pub mod capabilities;
 pub mod config;

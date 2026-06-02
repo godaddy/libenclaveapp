@@ -241,7 +241,7 @@ impl TieredPool {
         // and ProcessExtensionPointDisablePolicy can interfere with the test runner
         // and spawned threads, causing hangs on Windows CI.
         #[cfg(not(test))]
-        enclaveapp_core::process::harden_process();
+        crate::internal::core::process::harden_process();
 
         let ps = page_size();
         let max_slot = ps / 3;

@@ -81,9 +81,10 @@ pub enum Error {
 /// Shorthand `Result` type for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl From<enclaveapp_core::Error> for Error {
-    fn from(e: enclaveapp_core::Error) -> Self {
-        use enclaveapp_core::Error as CE;
+impl From<crate::internal::core::Error> for Error {
+    #[allow(unreachable_patterns)]
+    fn from(e: crate::internal::core::Error) -> Self {
+        use crate::internal::core::Error as CE;
         match e {
             CE::NotAvailable => Error::NotAvailable,
             CE::KeyNotFound { label } => Error::KeyNotFound { label },
@@ -109,7 +110,7 @@ impl From<enclaveapp_core::Error> for Error {
             },
             CE::Config(s) | CE::Serialization(s) => Error::Config(s),
             CE::Io(e) => Error::Io(e),
-            // non_exhaustive fallback — add explicit arms for new enclaveapp_core::Error
+            // non_exhaustive fallback — add explicit arms for new crate::internal::core::Error
             // variants as they are introduced
             other => Error::KeyOperation {
                 operation: "unknown".into(),
@@ -119,9 +120,10 @@ impl From<enclaveapp_core::Error> for Error {
     }
 }
 
-impl From<enclaveapp_app_storage::StorageError> for Error {
-    fn from(e: enclaveapp_app_storage::StorageError) -> Self {
-        use enclaveapp_app_storage::StorageError as SE;
+impl From<crate::internal::app_storage::StorageError> for Error {
+    #[allow(unreachable_patterns)]
+    fn from(e: crate::internal::app_storage::StorageError) -> Self {
+        use crate::internal::app_storage::StorageError as SE;
         match e {
             SE::NotAvailable => Error::NotAvailable,
             SE::EncryptionFailed(s) => Error::EncryptFailed { detail: s },
@@ -151,7 +153,7 @@ impl From<enclaveapp_app_storage::StorageError> for Error {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use enclaveapp_app_storage::StorageError;
+    use crate::internal::app_storage::StorageError;
 
     #[test]
     fn from_storage_error_policy_mismatch_preserves_detail() {

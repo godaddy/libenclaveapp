@@ -6,11 +6,11 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
-use enclaveapp_app_adapter::{launcher, LaunchRequest, ResolutionStrategy, ResolvedProgram};
+use crate::internal::app_adapter::{launcher, LaunchRequest, ResolutionStrategy, ResolvedProgram};
 
 use crate::error::{Error, Result};
 
-pub use enclaveapp_app_adapter::IntegrationType;
+pub use crate::internal::app_adapter::IntegrationType;
 
 /// Launch a child process with hardware-backed secrets injected.
 ///
@@ -174,7 +174,7 @@ pub struct TempSecretFile {
     #[cfg(target_os = "linux")]
     _inner: TempSecretInner,
     #[cfg(not(target_os = "linux"))]
-    _inner: enclaveapp_app_adapter::TempConfig,
+    _inner: crate::internal::app_adapter::TempConfig,
     path_str: String,
 }
 
@@ -182,8 +182,8 @@ pub struct TempSecretFile {
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 enum TempSecretInner {
-    Memfd(enclaveapp_app_adapter::MemfdConfig),
-    Fallback(enclaveapp_app_adapter::TempConfig),
+    Memfd(crate::internal::app_adapter::MemfdConfig),
+    Fallback(crate::internal::app_adapter::TempConfig),
 }
 
 impl std::fmt::Debug for TempSecretFile {
@@ -204,7 +204,11 @@ impl TempSecretFile {
     pub fn create_bytes(content: &[u8]) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
-            match enclaveapp_app_adapter::create_memfd_config("enclave-secret", "secret", content) {
+            match crate::internal::app_adapter::create_memfd_config(
+                "enclave-secret",
+                "secret",
+                content,
+            ) {
                 Ok(memfd) => {
                     let path_str = memfd.path().to_string_lossy().into_owned();
                     Ok(Self {
@@ -214,7 +218,7 @@ impl TempSecretFile {
                 }
                 Err(_) => {
                     // memfd not available (e.g. older kernel); fall back to temp file.
-                    let tc = enclaveapp_app_adapter::TempConfig::write(
+                    let tc = crate::internal::app_adapter::TempConfig::write(
                         "enclave-secret",
                         "secret",
                         content,
@@ -233,11 +237,15 @@ impl TempSecretFile {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let tc = enclaveapp_app_adapter::TempConfig::write("enclave-secret", "secret", content)
-                .map_err(|e| Error::KeyOperation {
-                    operation: "temp_secret".into(),
-                    detail: e.to_string(),
-                })?;
+            let tc = crate::internal::app_adapter::TempConfig::write(
+                "enclave-secret",
+                "secret",
+                content,
+            )
+            .map_err(|e| Error::KeyOperation {
+                operation: "temp_secret".into(),
+                detail: e.to_string(),
+            })?;
             let path_str = tc.path().to_string_lossy().into_owned();
             Ok(Self {
                 _inner: tc,

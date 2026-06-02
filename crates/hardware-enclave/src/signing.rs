@@ -1,9 +1,9 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-use enclaveapp_app_storage::{AppSigningBackend, BackendKind};
+use crate::internal::app_storage::{AppSigningBackend, BackendKind};
 
-use enclaveapp_core::types::{AccessPolicy, KeyType};
+use crate::internal::core::types::{AccessPolicy, KeyType};
 
 use crate::error::{Error, Result};
 use crate::types::{KeyInfo, PresenceOptions};
@@ -97,7 +97,7 @@ impl SignerHandle {
         data: &[u8],
         opts: &PresenceOptions,
     ) -> Result<Vec<u8>> {
-        use enclaveapp_core::types::PresenceMode;
+        use crate::internal::core::types::PresenceMode;
         if opts.mode == PresenceMode::Strict && !self.presence_available() {
             return Err(Error::PresenceNotAvailable);
         }
@@ -110,7 +110,7 @@ impl SignerHandle {
     /// True when the current platform supports presence prompting.
     pub fn presence_available(&self) -> bool {
         #[cfg(target_os = "macos")]
-        return enclaveapp_apple::touch_id_available();
+        return crate::internal::apple::touch_id_available();
         #[cfg(not(target_os = "macos"))]
         false
     }

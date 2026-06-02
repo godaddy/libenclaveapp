@@ -1,8 +1,8 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-pub use enclaveapp_app_storage::BackendKind;
-pub use enclaveapp_core::types::{AccessPolicy, KeyType, PresenceMode};
+pub use crate::internal::app_storage::BackendKind;
+pub use crate::internal::core::types::{AccessPolicy, KeyType, PresenceMode};
 
 /// Public projection of key metadata. Does not expose serde_json::Value.
 #[derive(Debug, Clone)]
