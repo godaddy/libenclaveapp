@@ -23,13 +23,13 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use enclave::{EnclaveConfig, create_signer, AccessPolicy};
+//! use hardware_enclave::{EnclaveConfig, create_signer, AccessPolicy};
 //!
 //! let config = EnclaveConfig::new("myapp", "default");
 //! let signer = create_signer(&config)?;
 //! let pubkey = signer.generate_key("default", AccessPolicy::Any)?;
 //! let sig = signer.sign("default", b"hello world")?;
-//! # Ok::<(), enclave::Error>(())
+//! # Ok::<(), hardware_enclave::Error>(())
 //! ```
 //!
 //! # Memory pool initialization
