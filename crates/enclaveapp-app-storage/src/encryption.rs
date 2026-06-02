@@ -73,8 +73,8 @@ impl EnclaveKeyManager for BridgeEncryptorWrapper {
     fn generate(
         &self,
         label: &str,
-        _key_type: enclaveapp_core::types::KeyType,
-        policy: enclaveapp_core::types::AccessPolicy,
+        _key_type: KeyType,
+        policy: AccessPolicy,
     ) -> enclaveapp_core::Result<Vec<u8>> {
         // bridge_init has load-or-create semantics, then read the public key.
         enclaveapp_bridge::bridge_init(&self.bridge_path, &self.app_name, label, policy)?;
