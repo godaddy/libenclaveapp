@@ -42,3 +42,7 @@ pub use sign::SecureEnclaveSigner;
 // wrapping-key user-presence and cache-TTL before constructing a signer.
 #[cfg(target_os = "macos")]
 pub use keychain::KeychainConfig;
+
+// Standalone presence evaluation for enclave::AuthHandle.
+#[cfg(all(target_os = "macos", any(feature = "signing", feature = "encryption")))]
+pub use lacontext::{evaluate_presence, evict_all_contexts};

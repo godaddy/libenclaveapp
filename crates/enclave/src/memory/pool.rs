@@ -424,9 +424,8 @@ pub fn coffer_view() -> Result<PoolSlot> {
 /// Only caches if `data.len() == tier-0 slot_size` (exact fit).
 pub(super) fn hot_cache_insert(id: u64, data: &[u8]) {
     let pool = global_pool();
-    if let Ok(mut slab) = pool.tiers[0].slab.lock() {
-        slab.cache_insert(id, data);
-    }
+    let mut slab = pool.tiers[0].slab.lock().unwrap_or_else(|e| e.into_inner());
+    slab.cache_insert(id, data);
 }
 
 /// Look up plaintext from the slab hot cache.
@@ -444,7 +443,8 @@ pub(super) fn hot_cache_get(id: u64) -> Option<PoolSlot> {
 /// Evict an entry from the slab hot cache and notify waiters.
 pub(super) fn hot_cache_evict(id: u64) {
     let pool = global_pool();
-    if let Ok(mut slab) = pool.tiers[0].slab.lock() {
+    {
+        let mut slab = pool.tiers[0].slab.lock().unwrap_or_else(|e| e.into_inner());
         slab.cache_evict(id);
     }
     pool.tiers[0].cv.notify_one();

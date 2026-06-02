@@ -161,13 +161,50 @@ pub(crate) fn evict(app_name: &str, label: &str) {
 
 /// Drop every cached `LaContextHandle`. Intended for tests and for
 /// wrapping-key full-cache evict paths.
-#[allow(dead_code)]
 pub(crate) fn evict_all() {
     let mut guard = match registry().lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
     guard.clear();
+}
+
+/// Evaluate user presence by firing the Touch ID / passcode prompt synchronously.
+///
+/// - `Ok(())` — user authenticated successfully.
+/// - `Err(Error::NotAvailable)` — device has no enrolled biometric or passcode.
+/// - `Err(Error::UserCancelled)` — user dismissed or failed the prompt.
+///
+/// Used by `enclave::AuthHandle::request_presence()` for standalone presence
+/// checks. The resulting `LAContext` is a one-shot handle that is dropped
+/// immediately; it is not cached in the registry.
+pub fn evaluate_presence(reason: &str) -> enclaveapp_core::Result<()> {
+    // Check device availability before prompting to distinguish
+    // "device not configured" from "user cancelled".
+    // SAFETY: FFI to Swift bridge. Returns 1 if .deviceOwnerAuthentication
+    // is evaluable in this process, 0 otherwise. No mutable state accessed.
+    #[allow(unsafe_code)]
+    let available = unsafe { ffi::enclaveapp_se_touch_id_available() };
+    if available == 0 {
+        return Err(enclaveapp_core::Error::NotAvailable);
+    }
+    // create_once fires evaluatePolicy synchronously — the Touch ID /
+    // passcode dialog appears here and blocks until the user responds.
+    if create_once(reason).is_some() {
+        Ok(())
+    } else {
+        Err(enclaveapp_core::Error::UserCancelled {
+            label: "request_presence".into(),
+        })
+    }
+}
+
+/// Evict all cached `LAContext` handles from the global registry.
+///
+/// Forces re-authentication on the next signing or decryption operation
+/// that uses `PresenceMode::Cached`. Used by `enclave::AuthHandle::evict_presence_cache()`.
+pub fn evict_all_contexts() {
+    evict_all();
 }
 
 #[cfg(test)]

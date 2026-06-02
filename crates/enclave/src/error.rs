@@ -114,6 +114,12 @@ impl From<enclaveapp_app_storage::StorageError> for Error {
                 operation: "platform".into(),
                 detail: s,
             },
+            // non_exhaustive fallback — add explicit arms for new StorageError
+            // variants as they are introduced
+            other => Error::KeyOperation {
+                operation: "unknown".into(),
+                detail: other.to_string(),
+            },
         }
     }
 }

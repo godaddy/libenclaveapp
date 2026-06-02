@@ -19,46 +19,105 @@ pub struct AuthCapabilities {
 
 /// Handle to the platform authentication subsystem.
 /// Obtained from `create_auth()`.
-#[derive(Debug)]
 pub struct AuthHandle {
     backend_kind: BackendKind,
+    /// Windows Hello verification cache. Each `AuthHandle` owns its own gate
+    /// so that `evict_presence_cache()` only clears verifications acquired
+    /// through this handle and does not affect other handles or the key
+    /// sign/decrypt paths (which manage their own Hello state).
+    #[cfg(target_os = "windows")]
+    hello_gate: enclaveapp_windows::hello_gate::HelloGate,
+}
+
+impl std::fmt::Debug for AuthHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthHandle")
+            .field("backend_kind", &self.backend_kind)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AuthHandle {
     pub(crate) fn new(backend_kind: BackendKind) -> Self {
-        Self { backend_kind }
+        Self {
+            backend_kind,
+            #[cfg(target_os = "windows")]
+            hello_gate: enclaveapp_windows::hello_gate::HelloGate::new(),
+        }
     }
 
     pub fn capabilities(&self) -> AuthCapabilities {
         platform_auth_capabilities()
     }
 
-    /// Request user-presence verification. Returns `Ok(())` if granted.
-    /// `reason` is shown in the OS prompt.
+    /// Request user-presence verification. Returns `Ok(())` if the user
+    /// authenticated successfully.
     ///
-    /// **Phase 2 stub.** Standalone presence acquisition (separate from
-    /// per-operation `sign_with_presence`) requires LAContext/UserConsentVerifier
-    /// integration not yet implemented. Returns `Error::NotImplemented` so that
-    /// callers cannot silently treat this as a success.
-    pub fn request_presence(&self, _reason: &str) -> Result<()> {
-        if !self.capabilities().biometric_available {
+    /// Platform behavior:
+    /// - **macOS**: Fires the Touch ID / passcode dialog synchronously via
+    ///   `LAContext.evaluatePolicy(.deviceOwnerAuthentication)`. Blocks until
+    ///   the user responds. Returns `Err(PresenceNotAvailable)` if no
+    ///   biometric or passcode is enrolled, or `Err(UserCancelled)` if the
+    ///   user dismisses the prompt.
+    /// - **Windows**: Calls `UserConsentVerifier.RequestVerificationAsync(reason)`.
+    ///   Falls back to a password gate when Windows Hello is not enrolled.
+    ///   Gracefully degrades to `Ok(())` on headless sessions where neither
+    ///   Hello nor a verifiable password is available (credentials remain
+    ///   TPM-encrypted regardless).
+    /// - **Linux / other**: Always returns `Err(PresenceNotAvailable)`.
+    #[allow(clippy::needless_return, unreachable_code)]
+    pub fn request_presence(&self, reason: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            return enclaveapp_apple::evaluate_presence(reason).map_err(|e| {
+                use enclaveapp_core::Error as CE;
+                match e {
+                    CE::NotAvailable => Error::PresenceNotAvailable,
+                    CE::UserCancelled { label } => Error::UserCancelled { label },
+                    other => Error::from(other),
+                }
+            });
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return self
+                .hello_gate
+                .ensure_verified("__standalone_presence__", reason, std::time::Duration::ZERO)
+                .map_err(Error::from);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = reason;
             return Err(Error::PresenceNotAvailable);
         }
-        // Standalone presence acquisition (separate from per-operation sign_with_presence)
-        // requires LAContext/UserConsentVerifier integration, implemented in Phase 2.
-        // Return a distinct error so callers cannot accidentally treat this as success.
-        Err(Error::NotImplemented {
-            feature:
-                "standalone request_presence — use sign_with_presence for per-operation presence"
-                    .into(),
-        })
     }
 
-    /// Evict any cached presence token.
+    /// Evict any cached presence token, forcing re-authentication on the
+    /// next signing or decryption operation that uses a cached presence mode.
     ///
-    /// **Phase 2 stub.** This is a no-op until standalone LAContext/UserConsentVerifier
-    /// integration is complete. Callers should not rely on this method for security enforcement.
-    pub fn evict_presence_cache(&self) {}
+    /// Platform behavior:
+    /// - **macOS**: Clears all cached `LAContext` handles from the global
+    ///   registry. The next `sign_with_presence(Cached, ...)` call will fire
+    ///   a fresh Touch ID prompt.
+    /// - **Windows**: Clears all Windows Hello verifications cached in this
+    ///   `AuthHandle`. The sign/decrypt paths manage their own `HelloGate`
+    ///   state and are unaffected.
+    /// - **Linux / other**: No-op.
+    #[allow(clippy::needless_return, unreachable_code)]
+    pub fn evict_presence_cache(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            enclaveapp_apple::evict_all_contexts();
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.hello_gate.invalidate_all();
+            return;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {}
+    }
 
     pub fn backend_kind(&self) -> BackendKind {
         self.backend_kind
@@ -69,11 +128,8 @@ impl AuthHandle {
 #[allow(clippy::needless_return, unreachable_code)]
 pub fn platform_auth_capabilities() -> AuthCapabilities {
     #[cfg(target_os = "macos")]
-    let available = enclaveapp_apple::touch_id_available();
-
-    #[cfg(target_os = "macos")]
     return AuthCapabilities {
-        biometric_available: available,
+        biometric_available: enclaveapp_apple::touch_id_available(),
         password_available: true,
         presence_caching: true,
         authenticator_name: Some("Touch ID".into()),
@@ -81,10 +137,8 @@ pub fn platform_auth_capabilities() -> AuthCapabilities {
 
     #[cfg(target_os = "windows")]
     return AuthCapabilities {
-        // biometric_available: true is a conservative estimate; actual Windows Hello
-        // availability is determined at operation time. Some machines may not have
-        // Hello enrolled.
-        biometric_available: true,
+        // Checked at runtime via UserConsentVerifier::CheckAvailabilityAsync.
+        biometric_available: enclaveapp_windows::hello_gate::is_available(),
         password_available: true,
         presence_caching: false,
         authenticator_name: Some("Windows Hello".into()),
@@ -103,28 +157,75 @@ pub fn platform_auth_capabilities() -> AuthCapabilities {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::types::BackendKind;
+    use crate::config::EnclaveConfig;
+    use crate::factory::create_auth;
 
     #[test]
-    fn request_presence_returns_not_implemented_when_available() {
-        // On macOS in test env, biometric_available may be false (no Touch ID in CI).
-        // Either way, request_presence must NOT return Ok(()).
-        let handle = AuthHandle::new(BackendKind::SecureEnclave);
-        let result = handle.request_presence("test reason");
-        // Must return an error — either PresenceNotAvailable or NotImplemented.
-        // Must never return Ok(()) (which would be a false success).
+    fn request_presence_never_panics() {
+        // Skip if biometrics are available — calling request_presence would block
+        // waiting for the user to respond to a Touch ID / Windows Hello prompt.
+        // On CI (no enrolled biometrics), this path always takes the fast error return.
+        if platform_auth_capabilities().biometric_available {
+            return;
+        }
+        let config = EnclaveConfig::new("testapp", "key");
+        let handle = create_auth(&config).unwrap();
+        drop(handle.request_presence("test reason"));
+    }
+
+    #[test]
+    fn evict_presence_cache_never_panics() {
+        let config = EnclaveConfig::new("testapp", "key");
+        let handle = create_auth(&config).unwrap();
+        handle.evict_presence_cache(); // Must not panic.
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn request_presence_returns_not_available_on_linux() {
+        let config = EnclaveConfig::new("testapp", "key");
+        let handle = create_auth(&config).unwrap();
+        let result = handle.request_presence("test");
         assert!(
-            result.is_err(),
-            "request_presence must not return Ok(()) — it is a stub"
+            matches!(result, Err(Error::PresenceNotAvailable)),
+            "Linux must return PresenceNotAvailable, got {result:?}"
         );
     }
 
     #[test]
-    fn platform_auth_capabilities_does_not_panic() {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn evict_presence_cache_is_noop_on_linux() {
+        let config = EnclaveConfig::new("testapp", "key");
+        let handle = create_auth(&config).unwrap();
+        handle.evict_presence_cache(); // Explicit no-op path; verify no panic.
+                                       // Call twice to confirm idempotency.
+        handle.evict_presence_cache();
+    }
+
+    #[test]
+    fn platform_capabilities_does_not_panic() {
         let caps = platform_auth_capabilities();
-        // Just verify it returns without panicking
         let _ = caps.biometric_available;
         let _ = caps.password_available;
         let _ = caps.presence_caching;
+    }
+
+    #[test]
+    fn request_presence_returns_not_available_when_no_biometric() {
+        // Only runs when the current platform reports no biometric/passcode.
+        // On macOS CI (no enrolled Touch ID), this verifies the fast error path.
+        // On a dev machine with Touch ID enrolled, this test is skipped to avoid
+        // blocking on the biometric prompt.
+        if platform_auth_capabilities().biometric_available {
+            // Touch ID / Windows Hello is enrolled — skip to avoid interactive prompt.
+            return;
+        }
+        let config = EnclaveConfig::new("testapp", "key");
+        let handle = create_auth(&config).unwrap();
+        let result = handle.request_presence("ci test");
+        assert!(
+            matches!(result, Err(Error::PresenceNotAvailable)),
+            "platform without biometric must return PresenceNotAvailable, got {result:?}"
+        );
     }
 }

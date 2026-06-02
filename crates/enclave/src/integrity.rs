@@ -47,6 +47,13 @@ impl TamperEvidentHandle {
     }
 
     /// Write `content` to `path` atomically and update the HMAC sidecar.
+    ///
+    /// **Crash-consistency note:** this method performs two separate atomic
+    /// writes — first the file, then the sidecar. If the process crashes
+    /// between the two writes, the file will contain new content but the
+    /// sidecar will still reflect the old HMAC, causing the next `verify()`
+    /// call to return `VerifyOutcome::Tamper`. Call `migrate()` to rebuild
+    /// the sidecar from the current file content after an unclean shutdown.
     pub fn write(&self, path: &Path, content: &[u8]) -> Result<()> {
         atomic_write(path, content).map_err(Error::from)?;
 
