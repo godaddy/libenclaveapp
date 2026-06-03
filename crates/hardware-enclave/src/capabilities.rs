@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::types::{AccessPolicy, BackendKind};
 
-pub use enclaveapp_core::signing::is_binary_signed;
+pub use crate::internal::core::signing::is_binary_signed;
 
 /// True iff the running binary has the named keychain-access-groups entitlement.
 /// On macOS, runs `codesign -d --entitlements -` and checks for the group string.
@@ -43,7 +43,7 @@ fn check_entitlement_macos(group: &str) -> bool {
         Err(_) => return false,
     };
     // Use absolute path to avoid PATH manipulation.
-    // NOTE: `is_binary_signed()` in enclaveapp_core::signing also invokes
+    // NOTE: `is_binary_signed()` in crate::internal::core::signing also invokes
     // `codesign --verify` but in a different crate. That invocation should
     // similarly be updated to use an absolute path — tracked as a follow-up
     // in enclaveapp-core (out of scope here per constraint 4).
@@ -89,11 +89,11 @@ pub struct SecurityCapabilities {
 /// Query capabilities without creating any handles.
 pub fn security_capabilities(app_name: &str) -> SecurityCapabilities {
     let signed = is_binary_signed();
-    let effective_app_name = enclaveapp_core::signing::ensure_safe_app_name(app_name);
+    let effective_app_name = crate::internal::core::signing::ensure_safe_app_name(app_name);
     let backend = detect_backend();
 
     #[cfg(target_os = "macos")]
-    let hardware_presence = enclaveapp_apple::touch_id_available();
+    let hardware_presence = crate::internal::apple::touch_id_available();
     #[cfg(target_os = "windows")]
     let hardware_presence = true;
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -133,7 +133,7 @@ fn detect_backend() -> BackendKind {
     }
     #[cfg(target_os = "linux")]
     {
-        if enclaveapp_wsl::is_wsl() {
+        if crate::internal::wsl::is_wsl() {
             return BackendKind::TpmBridge;
         }
         return BackendKind::Keyring;

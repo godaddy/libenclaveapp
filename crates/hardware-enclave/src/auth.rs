@@ -26,7 +26,7 @@ pub struct AuthHandle {
     /// through this handle and does not affect other handles or the key
     /// sign/decrypt paths (which manage their own Hello state).
     #[cfg(target_os = "windows")]
-    hello_gate: enclaveapp_windows::hello_gate::HelloGate,
+    hello_gate: crate::internal::windows::hello_gate::HelloGate,
 }
 
 impl std::fmt::Debug for AuthHandle {
@@ -42,7 +42,7 @@ impl AuthHandle {
         Self {
             backend_kind,
             #[cfg(target_os = "windows")]
-            hello_gate: enclaveapp_windows::hello_gate::HelloGate::new(),
+            hello_gate: crate::internal::windows::hello_gate::HelloGate::new(),
         }
     }
 
@@ -71,8 +71,8 @@ impl AuthHandle {
     pub fn request_presence(&self, reason: &str) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            return enclaveapp_apple::evaluate_presence(reason).map_err(|e| {
-                use enclaveapp_core::Error as CE;
+            return crate::internal::apple::evaluate_presence(reason).map_err(|e| {
+                use crate::internal::core::Error as CE;
                 match e {
                     CE::NotAvailable => Error::PresenceNotAvailable,
                     CE::UserCancelled { label } => Error::UserCancelled { label },
@@ -109,7 +109,7 @@ impl AuthHandle {
     pub fn evict_presence_cache(&self) {
         #[cfg(target_os = "macos")]
         {
-            enclaveapp_apple::evict_all_contexts();
+            crate::internal::apple::evict_all_contexts();
             return;
         }
         #[cfg(target_os = "windows")]
@@ -132,7 +132,7 @@ impl AuthHandle {
 pub fn platform_auth_capabilities() -> AuthCapabilities {
     #[cfg(target_os = "macos")]
     return AuthCapabilities {
-        biometric_available: enclaveapp_apple::touch_id_available(),
+        biometric_available: crate::internal::apple::touch_id_available(),
         password_available: true,
         presence_caching: true,
         authenticator_name: Some("Touch ID".into()),
@@ -141,7 +141,7 @@ pub fn platform_auth_capabilities() -> AuthCapabilities {
     #[cfg(target_os = "windows")]
     return AuthCapabilities {
         // Checked at runtime via UserConsentVerifier::CheckAvailabilityAsync.
-        biometric_available: enclaveapp_windows::hello_gate::is_available(),
+        biometric_available: crate::internal::windows::hello_gate::is_available(),
         password_available: true,
         presence_caching: false,
         authenticator_name: Some("Windows Hello".into()),

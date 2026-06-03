@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use enclaveapp_core::metadata::{atomic_write, compute_meta_hmac_bytes};
+use crate::internal::core::metadata::{atomic_write, compute_meta_hmac_bytes};
 use rand::TryRngCore;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -71,7 +71,7 @@ impl std::fmt::Debug for TamperEvidentHandle {
 
 impl TamperEvidentHandle {
     pub(crate) fn new(app_name: String) -> Self {
-        let hmac_key = enclaveapp_app_storage::platform::meta_hmac_key(&app_name);
+        let hmac_key = crate::internal::app_storage::platform::meta_hmac_key(&app_name);
         Self {
             app_name,
             hmac_key,
@@ -140,11 +140,15 @@ impl TamperEvidentHandle {
         #[cfg(not(test))]
         if self.mode == IntegrityMode::TrustAnchor {
             let path_label = path_to_label(path);
-            enclaveapp_app_storage::platform::store_file_tag(&self.app_name, &path_label, &tag)
-                .map_err(|e| Error::KeyOperation {
-                    operation: "store_file_tag".into(),
-                    detail: e.to_string(),
-                })?;
+            crate::internal::app_storage::platform::store_file_tag(
+                &self.app_name,
+                &path_label,
+                &tag,
+            )
+            .map_err(|e| Error::KeyOperation {
+                operation: "store_file_tag".into(),
+                detail: e.to_string(),
+            })?;
         }
         Ok(())
     }
@@ -230,7 +234,7 @@ impl TamperEvidentHandle {
         #[cfg(not(test))]
         {
             let path_label = path_to_label(path);
-            let stored_tag: [u8; 32] = match enclaveapp_app_storage::platform::load_file_tag(
+            let stored_tag: [u8; 32] = match crate::internal::app_storage::platform::load_file_tag(
                 &self.app_name,
                 &path_label,
             ) {
@@ -270,11 +274,15 @@ impl TamperEvidentHandle {
 
         if self.mode == IntegrityMode::TrustAnchor {
             let path_label = path_to_label(path);
-            enclaveapp_app_storage::platform::store_file_tag(&self.app_name, &path_label, &tag)
-                .map_err(|e| Error::KeyOperation {
-                    operation: "migrate_file_tag".into(),
-                    detail: e.to_string(),
-                })?;
+            crate::internal::app_storage::platform::store_file_tag(
+                &self.app_name,
+                &path_label,
+                &tag,
+            )
+            .map_err(|e| Error::KeyOperation {
+                operation: "migrate_file_tag".into(),
+                detail: e.to_string(),
+            })?;
         }
         Ok(())
     }
@@ -292,7 +300,7 @@ impl TamperEvidentHandle {
         if self.mode == IntegrityMode::TrustAnchor {
             let path_label = path_to_label(path);
             // Best-effort: if the store is unavailable, that's acceptable.
-            drop(enclaveapp_app_storage::platform::delete_file_tag(
+            drop(crate::internal::app_storage::platform::delete_file_tag(
                 &self.app_name,
                 &path_label,
             ));

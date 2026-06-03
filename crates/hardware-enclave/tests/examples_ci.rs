@@ -41,12 +41,19 @@ use std::process::Command;
 /// Never sets ENCLAVE_INTERACTIVE.
 fn run_example_with_env(name: &str, extra_env: &[(&str, &str)]) -> bool {
     let mut cmd = Command::new(env!("CARGO"));
-    cmd.args(["run", "--example", name, "--quiet"])
-        // Clean logging — avoid tracing noise that looks like failures.
-        .env("RUST_LOG", "warn")
-        // Explicitly UNSET ENCLAVE_INTERACTIVE to ensure no interactive prompts fire.
-        .env_remove("ENCLAVE_INTERACTIVE")
-        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    cmd.args([
+        "run",
+        "--example",
+        name,
+        "--quiet",
+        "--features",
+        "signing,encryption,mock",
+    ])
+    // Clean logging — avoid tracing noise that looks like failures.
+    .env("RUST_LOG", "warn")
+    // Explicitly UNSET ENCLAVE_INTERACTIVE to ensure no interactive prompts fire.
+    .env_remove("ENCLAVE_INTERACTIVE")
+    .current_dir(env!("CARGO_MANIFEST_DIR"));
 
     for (k, v) in extra_env {
         cmd.env(k, v);

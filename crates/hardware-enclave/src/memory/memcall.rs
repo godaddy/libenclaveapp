@@ -282,6 +282,6 @@ mod tests {
     fn harden_process_succeeds() {
         // Ported from asherah-ffi disable_core_dumps_succeeds.
         // Should not panic or error.
-        enclaveapp_core::process::harden_process();
+        crate::internal::core::process::harden_process();
     }
 }

@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::internal::app_storage::StorageConfig;
+pub use crate::internal::app_storage::WindowsSoftwareFallback;
 use crate::types::AccessPolicy;
-use enclaveapp_app_storage::StorageConfig;
-pub use enclaveapp_app_storage::WindowsSoftwareFallback;
 
 /// Platform-specific escape hatches. Use `PlatformConfig::Default` for the common case.
 #[derive(Debug, Clone, Default)]
@@ -123,13 +123,13 @@ impl EnclaveConfig {
 
     /// Resolved effective app name (with -unsigned applied if needed).
     pub fn effective_app_name(&self) -> String {
-        enclaveapp_core::signing::ensure_safe_app_name(&self.app_name)
+        crate::internal::core::signing::ensure_safe_app_name(&self.app_name)
     }
 
     /// Resolved access policy: explicit override, or signed->None / unsigned->Any.
     pub fn resolved_access_policy(&self) -> AccessPolicy {
         self.access_policy.unwrap_or_else(|| {
-            if enclaveapp_core::signing::is_binary_signed() {
+            if crate::internal::core::signing::is_binary_signed() {
                 AccessPolicy::None
             } else {
                 AccessPolicy::Any

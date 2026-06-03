@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-use enclaveapp_app_storage::BackendKind;
+use crate::internal::app_storage::BackendKind;
 
 use crate::auth::AuthHandle;
 #[cfg(target_os = "macos")]
@@ -21,8 +21,8 @@ use crate::signing::SignerHandle;
 /// - `keychain_access_group` set but entitlement absent -> downgrade (no error)
 pub fn create_signer(config: &EnclaveConfig) -> Result<SignerHandle> {
     let storage_config = validate_and_resolve_config(config)?;
-    let backend =
-        enclaveapp_app_storage::AppSigningBackend::init(storage_config).map_err(Error::from)?;
+    let backend = crate::internal::app_storage::AppSigningBackend::init(storage_config)
+        .map_err(Error::from)?;
     let kind = backend.backend_kind();
     Ok(SignerHandle::new(backend, kind))
 }
@@ -31,8 +31,8 @@ pub fn create_signer(config: &EnclaveConfig) -> Result<SignerHandle> {
 pub fn create_encryptor(config: &EnclaveConfig) -> Result<EncryptorHandle> {
     let storage_config = validate_and_resolve_config(config)?;
     let kind = resolve_backend_kind();
-    let storage =
-        enclaveapp_app_storage::AppEncryptionStorage::init(storage_config).map_err(Error::from)?;
+    let storage = crate::internal::app_storage::AppEncryptionStorage::init(storage_config)
+        .map_err(Error::from)?;
     Ok(EncryptorHandle::new(storage, kind))
 }
 
@@ -73,7 +73,7 @@ pub fn create_security_key(config: &EnclaveConfig) -> SecurityKeyHandle {
 /// use [`create_tamper_evident_ephemeral`] instead, which uses a random
 /// in-memory key and never touches the platform secure store.
 pub fn create_tamper_evident(app_name: &str) -> Result<TamperEvidentHandle> {
-    let effective = enclaveapp_core::signing::ensure_safe_app_name(app_name);
+    let effective = crate::internal::core::signing::ensure_safe_app_name(app_name);
     Ok(TamperEvidentHandle::new(effective))
 }
 
@@ -90,7 +90,7 @@ pub fn create_tamper_evident(app_name: &str) -> Result<TamperEvidentHandle> {
 /// Suitable for: automated tests, CI pipelines, development examples, and
 /// any non-production scenario where prompt-free operation is required.
 pub fn create_tamper_evident_ephemeral(app_name: &str) -> TamperEvidentHandle {
-    let effective = enclaveapp_core::signing::ensure_safe_app_name(app_name);
+    let effective = crate::internal::core::signing::ensure_safe_app_name(app_name);
     TamperEvidentHandle::new_ephemeral(effective)
 }
 
@@ -98,7 +98,7 @@ pub fn create_tamper_evident_ephemeral(app_name: &str) -> TamperEvidentHandle {
 
 fn validate_and_resolve_config(
     config: &EnclaveConfig,
-) -> Result<enclaveapp_app_storage::StorageConfig> {
+) -> Result<crate::internal::app_storage::StorageConfig> {
     // `mut` is only used by the macOS cfg block below; suppress the lint
     // on platforms where the mutation code is compiled out.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
@@ -109,7 +109,7 @@ fn validate_and_resolve_config(
     #[cfg(target_os = "macos")]
     if sc.wrapping_key_user_presence
         && sc.keychain_access_group.is_none()
-        && !enclaveapp_core::signing::is_binary_signed()
+        && !crate::internal::core::signing::is_binary_signed()
     {
         return Err(Error::RequiresSigning {
             feature: "wrapping_key_user_presence (requires keychain_access_group + entitlement)"
@@ -158,7 +158,7 @@ fn resolve_backend_kind() -> BackendKind {
     }
     #[cfg(target_os = "linux")]
     {
-        if enclaveapp_wsl::is_wsl() {
+        if crate::internal::wsl::is_wsl() {
             return BackendKind::TpmBridge;
         }
         return BackendKind::Keyring;

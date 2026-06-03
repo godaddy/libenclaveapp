@@ -1,13 +1,13 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-use enclaveapp_app_storage::{AppEncryptionStorage, BackendKind};
-use enclaveapp_core::types::KeyType;
+use crate::internal::app_storage::{AppEncryptionStorage, BackendKind};
+use crate::internal::core::types::KeyType;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::internal::core::types::AccessPolicy;
 use crate::types::KeyInfo;
-use enclaveapp_core::types::AccessPolicy;
 
 /// Handle to an encryption backend. Supports per-label multi-key operations.
 /// Obtained from `create_encryptor()`.
