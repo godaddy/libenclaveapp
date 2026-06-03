@@ -7,12 +7,14 @@
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
 // `mem_forget` is used intentionally in `delete_key` because NCryptDeleteKey
 // takes ownership of the handle.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
 #![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
     unsafe_code,
     clippy::mem_forget,
     clippy::ptr_as_ptr,
-    unused_qualifications,
     let_underscore_drop
 )]
 

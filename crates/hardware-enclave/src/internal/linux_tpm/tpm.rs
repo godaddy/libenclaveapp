@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 //! Core TPM 2.0 operations shared between signing and encryption backends.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unused_qualifications, let_underscore_drop)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    let_underscore_drop
+)]
 
 use crate::internal::core::metadata;
 use crate::internal::core::{AccessPolicy, Error, KeyMeta, KeyType, Result};

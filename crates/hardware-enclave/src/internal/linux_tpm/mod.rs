@@ -4,8 +4,15 @@
 // The p256/elliptic-curve ecosystem uses deprecated generic-array APIs.
 // The TPM FFI modules also need unseparated literal suffixes (tss-esapi constants)
 // and eprintln for user-facing warnings.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(deprecated, clippy::unseparated_literal_suffix, clippy::print_stderr)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    deprecated,
+    clippy::unseparated_literal_suffix,
+    clippy::print_stderr
+)]
 
 //! Linux TPM 2.0 backend via tss-esapi.
 //!

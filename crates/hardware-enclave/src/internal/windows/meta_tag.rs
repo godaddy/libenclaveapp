@@ -56,8 +56,14 @@
 
 // This module wraps Win32 Credential Manager APIs which require unsafe
 // FFI calls.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unsafe_code, clippy::ptr_as_ptr, unused_qualifications)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    unsafe_code,
+    clippy::ptr_as_ptr
+)]
 
 use crate::internal::core::{Error, Result};
 use std::path::Path;

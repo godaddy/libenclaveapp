@@ -41,8 +41,13 @@
 //! `scope -> Instant_last_verified`. When `ensure_verified` is called
 //! and the cached verification is within `ttl`, the prompt is skipped.
 //! `Duration::ZERO` disables caching (prompt on every call).
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unsafe_code)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    unsafe_code
+)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;

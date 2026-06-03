@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 //! `LinuxTpmSigner` -- ECDSA P-256 signing backend using Linux TPM 2.0.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unused_qualifications, let_underscore_drop)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    let_underscore_drop
+)]
 
 use super::tpm::{self, TpmConfig};
 use crate::internal::core::metadata::{self, DirLock};

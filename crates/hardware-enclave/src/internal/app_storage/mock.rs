@@ -9,8 +9,13 @@
 // aes-gcm 0.10 still uses generic-array 0.14 internally and emits a
 // deprecation notice on `Nonce::from_slice` — the 1.x migration is
 // upstream work, silence here so `-D warnings` doesn't trip.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(deprecated)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    deprecated
+)]
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};

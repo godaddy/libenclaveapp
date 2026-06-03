@@ -1,4 +1,10 @@
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    unsafe_code
+)]
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
@@ -56,8 +62,6 @@
 //!   domain controller, logon-type not granted). The caller degrades to
 //!   no presence prompt; the bundle remains TPM-encrypted. A *wrong
 //!   password* is `Denied`, not `Unavailable`.
-
-#![allow(unsafe_code)]
 
 use std::iter::once;
 use std::mem::size_of;

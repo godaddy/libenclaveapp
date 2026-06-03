@@ -7,8 +7,13 @@
 //! rather than by application string matching. A caller can opt into the
 //! policy, but cannot bypass the local "TPM failed + VM detected"
 //! checks with an environment variable or app-level flag.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unsafe_code, unused_qualifications)]
+#![allow(
+    dead_code,
+    unsafe_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns
+)]
 
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Registry::{

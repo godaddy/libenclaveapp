@@ -3,8 +3,13 @@
 
 // The p256/elliptic-curve ecosystem uses deprecated generic-array APIs
 // during the 0.14 -> 1.0 transition. Allow until upstream resolves this.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(deprecated)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    deprecated
+)]
 
 //! Software-only key backend for Linux systems without hardware security.
 //!

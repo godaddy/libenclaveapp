@@ -43,8 +43,13 @@
 // the transitively-pulled generic-array 0.14; the 1.x migration is
 // upstream work in aes-gcm. Silence the warning here so we don't
 // block the workspace.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(deprecated)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    deprecated
+)]
 
 use crate::internal::core::{Error, Result};
 use aes_gcm::aead::Aead;

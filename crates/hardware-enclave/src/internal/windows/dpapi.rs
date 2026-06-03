@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 //! Small DPAPI helpers shared by Windows software fallback code.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unsafe_code, unused_qualifications)]
+#![allow(
+    dead_code,
+    unsafe_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns
+)]
 
 use crate::internal::core::{Error, Result};
 use windows::Win32::Foundation::{LocalFree, HLOCAL};

@@ -19,8 +19,14 @@
 //! without requiring NGC-resident keys. See [`crate::internal::windows::hello`].
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unsafe_code, unused_qualifications, let_underscore_drop)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    unsafe_code,
+    let_underscore_drop
+)]
 
 use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::*;

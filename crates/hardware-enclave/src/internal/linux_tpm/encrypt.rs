@@ -3,8 +3,13 @@
 
 //! `LinuxTpmEncryptor` -- ECDH P-256 / ECIES encryption backend using Linux TPM 2.0.
 //!
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unused_qualifications, let_underscore_drop)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    let_underscore_drop
+)]
 //! ## ECIES Wire Format
 //!
 //! ```text

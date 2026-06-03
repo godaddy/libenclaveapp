@@ -4,8 +4,15 @@
 //! Windows Hello UI policy setup for TPM key operations.
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unsafe_code, trivial_casts, clippy::ptr_as_ptr, unused_qualifications)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns,
+    unsafe_code,
+    trivial_casts,
+    clippy::ptr_as_ptr
+)]
 
 use super::provider::NcryptHandle;
 use crate::internal::core::AccessPolicy;

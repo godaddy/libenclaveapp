@@ -4,8 +4,13 @@
 //! Public key export from NCrypt key handles.
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
-#![allow(dead_code, unused_imports, unused_qualifications, unreachable_patterns)]
-#![allow(unsafe_code, unused_qualifications)]
+#![allow(
+    dead_code,
+    unsafe_code,
+    unused_imports,
+    unused_qualifications,
+    unreachable_patterns
+)]
 
 use super::convert::eccpublic_blob_to_sec1;
 use super::provider::NcryptHandle;
