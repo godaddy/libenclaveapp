@@ -97,9 +97,10 @@ fn example_integrity_ephemeral() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // Mock signing uses keyring::SoftwareSigner which is Linux-only.
 fn example_signing_mock() {
-    // ENCLAVE_MOCK=1 causes the signing example to use the software P-256 backend
-    // (enclaveapp-test-software) via a TempDir. No Keychain access, no HSM.
+    // ENCLAVE_MOCK=1 sets ENCLAVEAPP_MOCK_STORAGE=1, routing create_signer() through a
+    // keyring-based software signer backed by a tempdir. No Keychain, no HSM.
     assert!(
         run_example_with_env("signing", &[("ENCLAVE_MOCK", "1")]),
         "signing example (mock mode) failed"

@@ -100,11 +100,11 @@ mock = []
 
 [[example]]
 name = "signing"
-required-features = ["signing"]
+required-features = ["signing", "mock"]
 
 [[example]]
 name = "encryption"
-required-features = ["encryption"]
+required-features = ["encryption", "mock"]
 
 [[example]]
 name = "integrity"
@@ -116,9 +116,6 @@ required-features = ["signing", "encryption"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
-enclaveapp-core = { workspace = true }
-enclaveapp-test-software = { workspace = true, features = ["signing", "encryption"] }
-enclaveapp-test-support = { workspace = true }
 tracing-subscriber = { workspace = true }
 p256 = { workspace = true }
 

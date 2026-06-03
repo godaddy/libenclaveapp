@@ -141,9 +141,41 @@ impl std::fmt::Debug for AppSigningBackend {
 impl AppSigningBackend {
     /// Initialize signing backend with automatic platform detection.
     /// Does NOT generate keys — the consumer app manages key lifecycle.
+    ///
+    /// When the `mock` feature is compiled in and `ENCLAVEAPP_MOCK_STORAGE` is set
+    /// to a non-empty value, returns a keyring-based software signer backed by a
+    /// temporary directory — no HSM, no Secure Enclave, no TPM accessed.
     #[allow(clippy::needless_return, unreachable_code)]
     pub fn init(mut config: StorageConfig) -> Result<Self> {
         config.app_name = crate::internal::core::signing::ensure_safe_app_name(&config.app_name);
+
+        // Mock signing backend (Linux only — keyring::SoftwareSigner is Linux-specific).
+        // On macOS and Windows the real hardware backend is used even in mock mode.
+        #[cfg(all(feature = "mock", target_os = "linux"))]
+        {
+            use super::MOCK_STORAGE_ENV;
+            if let Ok(val) = std::env::var(MOCK_STORAGE_ENV) {
+                if !val.is_empty() {
+                    tracing::warn!(
+                        app = %config.app_name,
+                        "{MOCK_STORAGE_ENV} is set — returning software signer (no hardware backing)"
+                    );
+                    let keys_dir = config.keys_dir.clone().unwrap_or_else(|| {
+                        std::env::temp_dir()
+                            .join(format!("hardware-enclave-mock-signing-{}", config.app_name))
+                    });
+                    let _ = std::fs::create_dir_all(&keys_dir);
+                    let signer = crate::internal::keyring::SoftwareSigner::with_keys_dir(
+                        &config.app_name,
+                        keys_dir.clone(),
+                    );
+                    return Ok(Self {
+                        kind: BackendKind::Keyring,
+                        inner: SigningInner::Software(signer),
+                    });
+                }
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             return Self::init_macos(&config);
