@@ -260,7 +260,7 @@ impl AppSigningBackend {
         // error far away from the real cause.
         let prior = backend_marker::read(&config.app_name).ok().flatten();
 
-        #[cfg(target_env = "gnu")]
+        #[cfg(all(target_env = "gnu", feature = "linux-tpm"))]
         if crate::internal::linux_tpm::is_available() {
             let keys_dir = config
                 .keys_dir

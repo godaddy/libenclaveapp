@@ -764,6 +764,7 @@ mod tests {
 
     // --- EncryptedFileSecretStore tests ---
 
+    #[cfg(feature = "mock")]
     fn make_encrypted_store() -> (tempfile::TempDir, EncryptedFileSecretStore) {
         let dir = tempfile::tempdir().expect("temp dir");
         let secrets_dir = dir.path().join("secrets");
@@ -772,6 +773,7 @@ mod tests {
         (dir, store)
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_round_trip_same_instance() {
         let (_dir, store) = make_encrypted_store();
@@ -781,6 +783,7 @@ mod tests {
         assert_eq!(result, Some("secret-value".to_string()));
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_get_nonexistent_returns_none() {
         let (_dir, store) = make_encrypted_store();
@@ -788,6 +791,7 @@ mod tests {
         assert_eq!(store.get(&id).expect("get"), None);
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_delete_removes_entry() {
         let (_dir, store) = make_encrypted_store();
@@ -797,6 +801,7 @@ mod tests {
         assert_eq!(store.get(&id).expect("get after delete"), None);
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_delete_nonexistent_returns_false() {
         let (_dir, store) = make_encrypted_store();
@@ -804,6 +809,7 @@ mod tests {
         assert!(!store.delete(&id).expect("delete non-existent"));
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_overwrite_returns_latest_value() {
         let (_dir, store) = make_encrypted_store();
@@ -813,6 +819,7 @@ mod tests {
         assert_eq!(store.get(&id).expect("get"), Some("v2".to_string()));
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_get_read_present() {
         let (_dir, store) = make_encrypted_store();
@@ -824,6 +831,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_get_read_absent() {
         let (_dir, store) = make_encrypted_store();
@@ -831,6 +839,7 @@ mod tests {
         assert_eq!(store.get_read(&id).expect("get_read"), SecretRead::Absent);
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     #[cfg(unix)]
     fn encrypted_store_creates_dir_with_restricted_permissions() {
@@ -846,6 +855,7 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o700);
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     #[cfg(unix)]
     fn encrypted_store_creates_file_with_restricted_permissions() {
@@ -862,6 +872,7 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_persistence_across_fresh_instance() {
         // Write via one store instance; read back via a fresh instance that
@@ -889,6 +900,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_get_returns_error_for_truncated_file() {
         let (_dir, store) = make_encrypted_store();
@@ -901,6 +913,7 @@ mod tests {
         assert!(result.is_err(), "truncated file must return Err, not panic");
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_get_returns_error_for_corrupt_ciphertext() {
         let (_dir, store) = make_encrypted_store();
@@ -915,6 +928,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mock")]
     #[test]
     fn encrypted_store_concurrent_writes_leave_file_valid() {
         use crate::internal::app_storage::mock::MockEncryptionStorage;

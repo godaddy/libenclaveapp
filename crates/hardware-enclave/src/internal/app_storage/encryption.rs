@@ -378,7 +378,7 @@ impl AppEncryptionStorage {
 
     #[cfg(target_os = "linux")]
     fn init_linux(config: &StorageConfig) -> Result<Self> {
-        #[cfg(target_env = "gnu")]
+        #[cfg(all(target_env = "gnu", feature = "linux-tpm"))]
         if crate::internal::linux_tpm::is_available() {
             let keys_dir = Self::resolved_keys_dir(config);
             let encryptor = crate::internal::linux_tpm::LinuxTpmEncryptor::with_keys_dir(
