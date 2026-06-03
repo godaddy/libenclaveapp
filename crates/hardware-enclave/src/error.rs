@@ -110,8 +110,11 @@ impl From<crate::internal::core::Error> for Error {
             },
             CE::Config(s) | CE::Serialization(s) => Error::Config(s),
             CE::Io(e) => Error::Io(e),
-            // non_exhaustive fallback — add explicit arms for new crate::internal::core::Error
-            // variants as they are introduced
+            // non_exhaustive fallback: catches variants added to core::Error in the future.
+            // IMPORTANT — when adding new variants to crate::internal::core::Error, add
+            // explicit arms here BEFORE this catch-all so callers see the right Error variant.
+            // High-impact candidates: any new auth/presence error (→ AuthDenied/AuthRequired),
+            // any new availability error (→ NotAvailable), IO variants (→ Error::Io).
             other => Error::KeyOperation {
                 operation: "unknown".into(),
                 detail: other.to_string(),
@@ -139,8 +142,10 @@ impl From<crate::internal::app_storage::StorageError> for Error {
                 operation: "platform".into(),
                 detail: s,
             },
-            // non_exhaustive fallback — add explicit arms for new StorageError
-            // variants as they are introduced
+            // non_exhaustive fallback: catches variants added to StorageError in the future.
+            // IMPORTANT — when adding new variants to StorageError, add explicit arms here
+            // BEFORE this catch-all. High-impact candidates: any new availability error
+            // (→ NotAvailable), any new auth error (→ AuthDenied/AuthRequired).
             other => Error::KeyOperation {
                 operation: "unknown".into(),
                 detail: other.to_string(),
