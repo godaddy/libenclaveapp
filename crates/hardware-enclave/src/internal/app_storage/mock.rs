@@ -291,6 +291,26 @@ impl EnclaveKeyManager for MockSigner {
     fn is_available(&self) -> bool {
         true
     }
+
+    fn rename_key(&self, old_label: &str, new_label: &str) -> CoreResult<()> {
+        let old_key = self.key_path(old_label);
+        let old_pub = self.pub_path(old_label);
+        if !old_key.exists() {
+            return Err(CoreError::KeyNotFound {
+                label: old_label.to_string(),
+            });
+        }
+        std::fs::rename(&old_key, self.key_path(new_label)).map_err(|e| {
+            CoreError::KeyOperation {
+                operation: "mock_rename_key".into(),
+                detail: e.to_string(),
+            }
+        })?;
+        if old_pub.exists() {
+            drop(std::fs::rename(&old_pub, self.pub_path(new_label)));
+        }
+        Ok(())
+    }
 }
 
 impl EnclaveSigner for MockSigner {
