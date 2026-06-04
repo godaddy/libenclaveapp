@@ -19,4 +19,8 @@
 //! server.run_stdio().expect("bridge server error");
 //! ```
 
-pub use crate::internal::tpm_bridge::{BridgeServer, TpmStorage};
+pub use crate::internal::bridge::BridgeResponse;
+pub use crate::internal::core::timeout::read_line_bounded;
+pub use crate::internal::tpm_bridge::{
+    BridgeParamsCompat, BridgeRequestCompat, BridgeServer, TpmSigningStorage, TpmStorage,
+};

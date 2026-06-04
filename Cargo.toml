@@ -1,20 +1,8 @@
 [workspace]
 members = [
     "crates/hardware-enclave",
-    # Support crates still used via path deps by consuming repos:
-    #   enclaveapp-core, enclaveapp-test-software — sshenc force-software feature
-    #   enclaveapp-tpm-bridge — sshenc-tpm-bridge binary
-    #   enclaveapp-bridge, enclaveapp-windows, enclaveapp-windows-webauthn — tpm-bridge deps
-    #   enclaveapp-test-support — hardware-enclave dev tests
-    "crates/enclaveapp-core",
-    "crates/enclaveapp-test-software",
-    "crates/enclaveapp-test-support",
-    "crates/enclaveapp-tpm-bridge",
-    "crates/enclaveapp-bridge",
-    "crates/enclaveapp-windows",
-    "crates/enclaveapp-windows-webauthn",
 ]
-# Pure implementation crates whose code now lives inside hardware-enclave/src/internal/.
+# Legacy implementation crates whose code now lives inside hardware-enclave/src/internal/.
 # Kept in the repository for reference but excluded from the workspace.
 exclude = [
     "crates/enclaveapp-apple",
@@ -29,7 +17,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
@@ -38,19 +26,6 @@ repository = "https://github.com/godaddy/hardware-enclave"
 [workspace.dependencies]
 # Internal crates
 hardware-enclave = { path = "crates/hardware-enclave" }
-# Legacy source dirs kept for path-dep consumers (sshenc force-software feature).
-# Not workspace members — just available as path deps via workspace.dependencies
-# so their own Cargo.toml files (which use workspace = true internally) continue
-# to parse correctly when referenced via path deps from consuming repos.
-enclaveapp-core = { path = "crates/enclaveapp-core" }
-enclaveapp-bridge = { path = "crates/enclaveapp-bridge" }
-enclaveapp-windows = { path = "crates/enclaveapp-windows" }
-enclaveapp-windows-webauthn = { path = "crates/enclaveapp-windows-webauthn" }
-# default-features = false so that workspace members can opt out of the
-# `linux-tpm` (libtss2) backend by not enabling it; members that want it
-# forward `enclaveapp-app-storage/linux-tpm` via their own `linux-tpm`
-# feature. (Cargo ignores a member's `default-features = false` on a
-# `workspace = true` dep unless the workspace entry sets it here.)
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
